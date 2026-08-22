@@ -2,8 +2,10 @@
  * Runtime config endpoint for the frontend.
  *
  * Reads the backend API URL + key from the server environment at request
- * time, so they can be set as plain env vars (no build-time baking). This is
- * what makes the frontend deployable on Koyeb with env vars only.
+ * time, so they can be set as plain env vars (no build-time baking).
+ *
+ * NOTE: deliberately NOT under /api/* (that path is routed to the backend
+ * service on Koyeb). This lives at /config to avoid the routing conflict.
  */
 import { NextResponse } from "next/server";
 

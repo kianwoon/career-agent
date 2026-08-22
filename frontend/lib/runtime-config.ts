@@ -1,10 +1,10 @@
 /**
  * Runtime configuration for the API client.
  *
- * Reads the backend URL + API key from a runtime config endpoint
- * (`/api/runtime-config`) that the Next.js server exposes. The server reads
- * its own environment at request time, so these values can be set as regular
- * env vars on the host (no build-time baking needed — works on Koyeb).
+ * Reads the backend URL + API key from a runtime config endpoint (`/config`)
+ * that the Next.js server exposes. The server reads its own environment at
+ * request time, so these values can be set as regular env vars on the host
+ * (no build-time baking needed — works on Koyeb).
  *
  * Falls back to `NEXT_PUBLIC_*` build-time values (or localhost) if the
  * runtime endpoint is unavailable (e.g. static export / dev).
@@ -21,7 +21,7 @@ let loading: Promise<RuntimeConfig> | null = null;
 
 async function fetchRuntimeConfig(): Promise<RuntimeConfig> {
   try {
-    const res = await fetch("/api/runtime-config", { cache: "no-store" });
+    const res = await fetch("/config", { cache: "no-store" });
     if (res.ok) {
       const data = (await res.json()) as RuntimeConfig;
       if (data.apiBaseUrl) return data;
