@@ -157,6 +157,30 @@ export async function decideApproval(
 }
 
 // ---------------------------------------------------------------------------
+// Search history
+// ---------------------------------------------------------------------------
+
+export interface SearchHistoryItem {
+  task_id: string;
+  type: SearchMode;
+  query: string;
+  status: string;
+  result_count: number;
+  created_at: string;
+  completed_at?: string | null;
+}
+
+export interface SearchHistoryResponse {
+  items: SearchHistoryItem[];
+}
+
+/** Fetch past search history (most recent first). */
+export async function fetchSearchHistory(): Promise<SearchHistoryResponse> {
+  const base = await resolveApiBase();
+  return getJson<SearchHistoryResponse>(`${base}/api/v1/search/history`);
+}
+
+// ---------------------------------------------------------------------------
 // Browser session management (capture / replay / refresh)
 // ---------------------------------------------------------------------------
 

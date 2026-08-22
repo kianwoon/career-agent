@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   startSearch,
   fetchTaskResults,
+  fetchSearchHistory,
   createBrowserSession,
   captureBrowserSession,
   replayBrowserSession,
@@ -12,6 +13,7 @@ import {
   type SearchResult,
   type Evidence,
   type BrowserSessionView,
+  type SearchHistoryItem,
 } from "@/lib/api";
 
 type Phase = "idle" | "running" | "completed" | "error";
@@ -60,6 +62,8 @@ export default function Home() {
   const [takeoverActive, setTakeoverActive] = useState(false);
   const [browserSession, setBrowserSession] = useState<BrowserSessionView | null>(null);
   const [sessionBusy, setSessionBusy] = useState(false);
+  const [history, setHistory] = useState<SearchHistoryItem[]>([]);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
   const [timeline, setTimeline] = useState<TimelineEvent[]>([
     {
       id: nextEventId(),
@@ -71,6 +75,12 @@ export default function Home() {
 
   const isRunning = phase === "running";
   const judgedCount = Object.keys(verdicts).length;
+
+  // Load past searches on mount.
+  useEffect(() => {
+    loadHistory();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function handleModeChange(next: SearchMode) {
     if (isRunning) return;
@@ -157,6 +167,52 @@ export default function Home() {
           `Search failed: ${err instanceof Error ? err.message : "unknown error"}`
         )
       );
+    }
+    // Refresh history after any search attempt.
+    loadHistory();
+  }
+
+  async function loadHistory() {
+    try {
+      const resp = await fetchSearchHistory();
+      setHistory(resp.items ?? []);
+    } catch {
+      // Non-fatal — history is a convenience, not core.
+    } finally {
+      setHistoryLoaded(true);
+    }
+  }
+
+  async function handleViewHistory(item: SearchHistoryItem) {
+    if (sessionBusy) return;
+    setSessionBusy(true);
+    try {
+      const response = await fetchTaskResults(item.task_id);
+      if (response.status === "completed") {
+        setPhase("completed");
+        setResults(response.results ?? []);
+        setTaskId(item.task_id);
+        setMode(item.type);
+        setQuery(item.query);
+        setVerdicts({});
+        setTimeline((prev) =>
+          addEvent(
+            prev,
+            "info",
+            `Loaded past ${item.type === "jobs" ? "job" : "candidate"} search: "${item.query}" (${response.results?.length ?? 0} results).`
+          )
+        );
+      } else {
+        setTimeline((prev) =>
+          addEvent(prev, "warn", `Past search ${item.task_id} is ${item.status} — no results to show.`)
+        );
+      }
+    } catch (e) {
+      setTimeline((prev) =>
+        addEvent(prev, "warn", `Failed to load past search: ${e instanceof Error ? e.message : "error"}`)
+      );
+    } finally {
+      setSessionBusy(false);
     }
   }
 
@@ -383,6 +439,42 @@ export default function Home() {
               )}
             </div>
           </div>
+        </section>
+
+        <section className="panel history-panel">
+          <div className="panel-head">
+            <h2>Past Searches</h2>
+            <button className="link-btn" onClick={loadHistory} disabled={sessionBusy}>
+              ↻ Refresh
+            </button>
+          </div>
+          {!historyLoaded ? (
+            <div className="empty small">Loading history…</div>
+          ) : history.length === 0 ? (
+            <div className="empty small">No past searches yet.</div>
+          ) : (
+            <ul className="history-list">
+              {history.map((item) => (
+                <li key={item.task_id}>
+                  <button
+                    className="history-item"
+                    onClick={() => handleViewHistory(item)}
+                    disabled={sessionBusy}
+                    title="Click to view past results"
+                  >
+                    <span className={`history-type ${item.type}`}>
+                      {item.type === "jobs" ? "Job" : "Cand"}
+                    </span>
+                    <span className="history-query">{item.query}</span>
+                    <span className="history-meta">
+                      <span className={`history-status ${item.status}`}>{item.status}</span>
+                      <span className="history-count">{item.result_count}</span>
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
         </section>
 
         <div className="columns">

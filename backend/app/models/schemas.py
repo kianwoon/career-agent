@@ -148,6 +148,22 @@ class ActivityEvent(BaseModel):
     duration_ms: int | None = None
 
 
+class SearchHistoryItem(BaseModel):
+    """One past search task, for the history browser."""
+
+    task_id: str
+    type: SearchType
+    query: str
+    status: TaskStatus
+    result_count: int = 0
+    created_at: datetime
+    completed_at: datetime | None = None
+
+
+class SearchHistoryResponse(BaseModel):
+    items: list[SearchHistoryItem] = Field(default_factory=list)
+
+
 class BrowserSessionView(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 

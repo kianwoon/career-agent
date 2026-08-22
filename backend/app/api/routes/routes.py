@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -26,6 +26,8 @@ from app.models.schemas import (
     CandidateSearchRequest,
     JobSearchRequest,
     MatchResult,
+    SearchHistoryItem,
+    SearchHistoryResponse,
     SearchTaskResult,
     SearchType,
     TaskStatus,
@@ -223,6 +225,47 @@ async def _run_task(
             task.status = TaskStatus.failed.value
             task.error = str(exc)
             await db.commit()
+
+
+@router.get("/search/history", response_model=SearchHistoryResponse)
+async def search_history(db: AsyncSession = Depends(get_db)) -> SearchHistoryResponse:
+    """List past search tasks (most recent first), with result counts.
+
+    Lets users browse previous successful searches and their results.
+    """
+    from app.models.orm import MatchEvaluation
+
+    tasks = (
+        (
+            await db.execute(
+                select(SearchTask).order_by(SearchTask.created_at.desc()).limit(50)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    items: list[SearchHistoryItem] = []
+    for t in tasks:
+        count = (
+            await db.execute(
+                select(func.count())
+                .select_from(MatchEvaluation)
+                .where(MatchEvaluation.task_id == t.id)
+            )
+        ).scalar_one()
+        items.append(
+            SearchHistoryItem(
+                task_id=t.id,
+                type=SearchType(t.type),
+                query=t.query,
+                status=TaskStatus(t.status),
+                result_count=count or 0,
+                created_at=t.created_at,
+                completed_at=t.completed_at,
+            )
+        )
+    return SearchHistoryResponse(items=items)
 
 
 @router.get("/tasks/{task_id}", response_model=TaskStatusResponse)
