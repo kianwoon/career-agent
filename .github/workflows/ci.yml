@@ -30,6 +30,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev
 
+      - name: Install Playwright browser
+        run: uv run playwright install --with-deps chromium
+
       - name: Lint (ruff)
         run: uv run ruff check app
 
@@ -55,7 +58,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
 
       - name: Install dependencies
         run: npm ci
