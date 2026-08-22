@@ -114,15 +114,15 @@ class BrowserSession:
         """Extract structured data per a schema of field name -> selector."""
         page = self._require_page()
         result: dict[str, Any] = {}
-        for field, selector in schema.items():
+        for field_name, selector in schema.items():
             try:
                 handle = await page.query_selector(selector)
                 if handle:
-                    result[field] = (await handle.inner_text()).strip()[:2000]
+                    result[field_name] = (await handle.inner_text()).strip()[:2000]
                 else:
-                    result[field] = None
+                    result[field_name] = None
             except Exception:
-                result[field] = None
+                result[field_name] = None
         return result
 
     async def screenshot(self, path: str | None = None) -> bytes | None:

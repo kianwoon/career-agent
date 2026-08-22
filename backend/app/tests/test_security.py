@@ -1,15 +1,26 @@
 """Tests for API security: auth + rate limiting + error envelope."""
 
+import importlib
 import os
 
 import pytest
 from fastapi.testclient import TestClient
 
-# Configure test keys BEFORE importing the app.
+# Set test env vars and force-reload modules so the settings take effect
+# regardless of previous test imports.
 os.environ["API_KEYS"] = "test-key-1:5,test-key-2:3"
 os.environ["API_RATE_LIMIT_PER_MIN"] = "10"
 
-from app.main import app  # noqa: E402
+from app.api import security as _security_mod
+
+importlib.reload(_security_mod)
+
+# Force settings to re-read env (clear the lru_cache populated by earlier
+# test modules that imported app.config with the live .env).
+from app.config import get_settings
+
+get_settings.cache_clear()
+from app.main import app
 
 
 @pytest.fixture(scope="module")

@@ -1,6 +1,6 @@
 """Tests for the credibility / signal-validation module."""
 
-from app.services.credibility import assess_credibility, parse_roles, _duration_to_months
+from app.services.credibility import _duration_to_months, assess_credibility, parse_roles
 
 AVP_EXPERIENCE = """Experience
 Assistant Vice President

@@ -2,10 +2,10 @@
 
 import asyncio
 
+from app.db import Base, async_session, engine
+
 # Import ORM models FIRST so Base.metadata is populated before create_all().
 from app.models import orm  # noqa: F401
-
-from app.db import Base, async_session, engine
 
 
 async def create_all() -> None:

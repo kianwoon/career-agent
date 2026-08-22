@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import JSON, DateTime, Float, ForeignKey, String, Text, func
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
 

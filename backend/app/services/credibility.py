@@ -116,9 +116,9 @@ class CredibilityReport:
 
 _MONTH_PATTERNS = [
     # "2 yrs 5 mos" / "2 years 5 months" / "1 yr 8 mos"
-    re.compile(r"(\d+)\s*(?:yrs?|years?)\s*(?:(\d+)\s*(?:mos?|months?))?", re.I),
+    re.compile(r"(\d+)\s*(?:yrs?|years?)\s*(?:(\d+)\s*(?:mos?|months?))?", re.IGNORECASE),
     # "6 mos" / "6 months" (months only)
-    re.compile(r"(\d+)\s*(?:mos?|months?)", re.I),
+    re.compile(r"(\d+)\s*(?:mos?|months?)", re.IGNORECASE),
 ]
 
 
@@ -167,7 +167,7 @@ def parse_roles(experience_text: str) -> list[RoleEntry]:
 
         is_bullet = line.startswith(("-", "•", "·", "1.", "2.", "3.", "4.", "5.")) or re.match(r"^\d+\.", line)
         # Skip LinkedIn's skill-summary lines like "Gitlab, J2EE and +11 skills".
-        is_skill_line = re.search(r"and\s+\+?\d+\s+skills?$", line, re.I) or line.startswith("… more")
+        is_skill_line = re.search(r"and\s+\+?\d+\s+skills?$", line, re.IGNORECASE) or line.startswith("… more")
 
         # Detect a role block: [title] [company(· Full-time)?] [duration]
         # A title line is short, not a bullet, not a skill-line, and is
@@ -201,7 +201,7 @@ def parse_roles(experience_text: str) -> list[RoleEntry]:
                 while i < len(lines):
                     bl = lines[i]
                     is_bbullet = bl.startswith(("-", "•", "·", "1.", "2.", "3.", "4.", "5.")) or re.match(r"^\d+\.", bl)
-                    bl_is_skill_line = re.search(r"and\s+\+?\d+\s+skills?$", bl, re.I) or bl.startswith("… more")
+                    bl_is_skill_line = re.search(r"and\s+\+?\d+\s+skills?$", bl, re.IGNORECASE) or bl.startswith("… more")
                     if not is_bbullet and not bl_is_skill_line and i + 2 < len(lines):
                         n1, n2 = lines[i + 1], lines[i + 2]
                         n1_is_company = "·" in n1 or "full-time" in n1.lower() or (

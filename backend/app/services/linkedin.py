@@ -11,12 +11,11 @@ Safety:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import random
-from urllib.parse import quote
 from typing import Any
+from urllib.parse import quote
 
 from app.services.browser import BrowserError
 from app.services.cache import query_cache
@@ -123,7 +122,7 @@ async def _extract_jobs(page: Any) -> list[dict[str, Any]]:
                     "metadata_footer": footer,
                 }
             )
-        except Exception as exc:  # noqa: BLE001 - per-card errors shouldn't kill the run
+        except Exception as exc:
             logger.warning("Skipping a job card: %s", exc)
     return jobs
 
@@ -185,7 +184,7 @@ async def _extract_job_detail(page: Any, job: dict[str, Any], href: str) -> dict
                 None,
             )
         logger.info("Extracted detail for %r (%d chars)", job.get("title"), len(description))
-    except Exception as exc:  # noqa: BLE001 - per-job errors shouldn't kill the run
+    except Exception as exc:
         logger.warning("Failed to open detail for %s: %s", href, exc)
     return job
 
@@ -252,9 +251,9 @@ async def search_linkedin_jobs(query: str, location: str | None = None) -> dict[
     finally:
         try:
             await page.close()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         try:
             await pw.stop()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass

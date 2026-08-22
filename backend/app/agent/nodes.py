@@ -13,8 +13,7 @@ allows durable task state and resume.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
-from typing import Annotated, Any, TypedDict
+from typing import Any, TypedDict
 
 from app.models.schemas import ActivityEvent, MatchResult, SearchType, TaskStatus
 
@@ -109,7 +108,7 @@ async def run_search(state: AgentState) -> AgentState:
                 "human_reason": human_reason,
                 "timeline": _log(state, "RUN SEARCH", detail),
             }
-        except Exception as exc:  # noqa: BLE001 - record failure and let the graph handle it
+        except Exception as exc:
             return {
                 **state,
                 "raw_results": [],
@@ -139,7 +138,7 @@ async def run_search(state: AgentState) -> AgentState:
                 "human_reason": human_reason,
                 "timeline": _log(state, "RUN SEARCH", detail),
             }
-        except Exception as exc:  # noqa: BLE001 - record failure and let the graph handle it
+        except Exception as exc:
             return {
                 **state,
                 "raw_results": [],
@@ -249,7 +248,7 @@ async def match_rank(state: AgentState) -> AgentState:
                 scored = await llm_service.rerank_candidates(
                     state.get("query", ""), state.get("normalized", []), scored
                 )
-        except Exception as exc:  # noqa: BLE001 - LLM must never break the run
+        except Exception as exc:
             logger.warning("LLM rerank failed, keeping deterministic order: %s", exc)
 
     return {

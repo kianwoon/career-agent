@@ -12,13 +12,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.graph import supervisor_graph
 from app.agent.nodes import AgentState
+from app.api.security import require_api_key
 from app.db import get_db
 from app.models.orm import SearchTask
 from app.models.schemas import (
     ApprovalDecision,
     ApprovalRequest,
-    BrowserTakeoverRequest,
     BrowserSessionView,
+    BrowserTakeoverRequest,
     CandidateSearchRequest,
     JobSearchRequest,
     MatchResult,
@@ -28,7 +29,6 @@ from app.models.schemas import (
     TaskStatusResponse,
 )
 from app.services.browser import BrowserError, browser_service
-from app.api.security import require_api_key
 
 router = APIRouter(
     prefix="/api/v1",
@@ -216,7 +216,7 @@ async def _run_task(
                     )
                 )
             await db.commit()
-        except Exception as exc:  # noqa: BLE001 - task failure is recorded, not raised
+        except Exception as exc:
             task.status = TaskStatus.failed.value
             task.error = str(exc)
             await db.commit()
@@ -349,7 +349,7 @@ async def browser_takeover(
     session_id: str, req: BrowserTakeoverRequest
 ) -> BrowserSessionView:
     try:
-        session = await browser_service.get_session(session_id)
+        await browser_service.get_session(session_id)
     except BrowserError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     if req.action == "status":

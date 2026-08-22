@@ -40,6 +40,13 @@ packages = ["app"]
 line-length = 100
 target-version = "py311"
 
+[tool.ruff.lint]
+# B008: Depends(...) in FastAPI defaults is idiomatic.
+# BLE001: adapters intentionally catch broad exceptions for robustness.
+# S110: try/except-pass cleanup in browser teardown is intentional.
+# DTZ003: utcnow() used pervasively; accepted for Phase 1.
+ignore = ["B008", "BLE001", "S110", "DTZ003", "RUF012"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["app/tests"]

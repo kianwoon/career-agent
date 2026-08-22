@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Optional
 
 from fastapi import Header, HTTPException, Request, status
 
@@ -79,7 +78,7 @@ class SlidingWindowLimiter:
 
 
 # Process-global instances (refreshed lazily from settings).
-_key_store: Optional[APIKeyStore] = None
+_key_store: APIKeyStore | None = None
 _limiter = SlidingWindowLimiter()
 
 
@@ -93,7 +92,7 @@ def _get_key_store() -> APIKeyStore:
 
 async def require_api_key(
     request: Request,
-    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> str:
     """FastAPI dependency enforcing API-key auth + rate limiting.
 

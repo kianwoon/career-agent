@@ -9,7 +9,6 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
@@ -130,7 +129,6 @@ class CandidateMatchResult(MatchResult):
     """Candidate result — enrichment fields are on the base MatchResult so
     they survive serialization via SearchTaskResult."""
 
-    pass
 
 
 class SearchTaskResult(BaseModel):

@@ -82,7 +82,7 @@ class LLMService:
                         return block.get("text")
                 logger.warning("LLM response had no text block: %s", str(data)[:200])
                 return None
-        except Exception as exc:  # noqa: BLE001 - LLM must never break the pipeline
+        except Exception as exc:
             logger.warning("LLM call failed: %s", exc)
             return None
 
@@ -141,7 +141,7 @@ class LLMService:
 
         try:
             reranked = self._parse_rerank_json(raw)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("Failed to parse LLM rerank output: %s — %s", exc, raw[:200])
             return current
 
@@ -226,7 +226,7 @@ class LLMService:
 
         try:
             reranked = self._parse_rerank_json(raw)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("Failed to parse LLM rerank output: %s — %s", exc, raw[:200])
             return current
 
@@ -250,8 +250,7 @@ class LLMService:
         text = raw.strip()
         if text.startswith("```"):
             text = text.split("```", 2)[1]
-            if text.startswith("json"):
-                text = text[4:]
+            text = text.removeprefix("json")
         text = text.strip().strip("`")
         data = json.loads(text)
         if isinstance(data, list):

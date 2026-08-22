@@ -12,7 +12,6 @@ Safety:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import random
@@ -233,7 +232,7 @@ async def _extract_profile_detail(page: Any, candidate: dict[str, Any], profile_
             len(skills),
             len(experience),
         )
-    except Exception as exc:  # noqa: BLE001 - per-profile errors shouldn't kill the run
+    except Exception as exc:
         logger.warning("Failed to open profile %s: %s", profile_url, exc)
     return candidate
 
@@ -297,9 +296,9 @@ async def search_linkedin_people(query: str) -> dict[str, Any]:
     finally:
         try:
             await page.close()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         try:
             await pw.stop()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
