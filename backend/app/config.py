@@ -1,8 +1,30 @@
 """Application configuration loaded from environment variables."""
 
 from functools import lru_cache
+from typing import Annotated
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import BeforeValidator, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+
+def _parse_list(v):
+    """Accept both JSON arrays and comma-separated strings for list fields."""
+    if isinstance(v, str):
+        v = v.strip()
+        if v.startswith("["):
+            import json as _json
+
+            try:
+                return _json.loads(v)
+            except Exception:
+                pass
+        return [x.strip() for x in v.split(",") if x.strip()]
+    return v
+
+
+# List fields that may arrive as JSON or comma-separated from env hosts.
+# NoDecode prevents pydantic-settings from force-JSON-decoding list fields.
+StrList = Annotated[list[str], NoDecode, BeforeValidator(_parse_list)]
 
 
 class Settings(BaseSettings):
@@ -32,7 +54,7 @@ class Settings(BaseSettings):
     # Set via env: SESSION_ENCRYPTION_KEY. Derive if empty (dev only, warn).
     session_encryption_key: str = ""
     # Domain scoping for captured sessions (comma-separated).
-    session_domains: list[str] = ["linkedin.com", "www.linkedin.com"]
+    session_domains: StrList = ["linkedin.com", "www.linkedin.com"]
 
     # LLM (optional; not required for Phase 1 deterministic path)
     openai_api_key: str = ""
@@ -62,7 +84,7 @@ class Settings(BaseSettings):
     pacing_circuit_breaker_s: int = 300  # backoff after a challenge/block
 
     # CORS for the Next.js dev server
-    cors_origins: list[str] = ["http://localhost:3000"]
+    cors_origins: StrList = ["http://localhost:3000"]
 
     # External API security.
     # Comma-separated list of valid API keys, e.g. "key1,key2". Each key can
@@ -72,7 +94,7 @@ class Settings(BaseSettings):
     # Default per-key rate limit (requests per minute) when no suffix given.
     api_rate_limit_per_min: int = 30
     # Whether /health and /docs stay open without auth.
-    api_public_paths: list[str] = ["/api/v1/health", "/docs", "/openapi.json"]
+    api_public_paths: StrList = ["/api/v1/health", "/docs", "/openapi.json"]
 
 
 @lru_cache
