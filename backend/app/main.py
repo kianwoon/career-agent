@@ -23,6 +23,17 @@ async def lifespan(app: FastAPI):
     # Attach a handler AFTER uvicorn's logging dictConfig runs (uvicorn
     # configures at startup, wiping basicConfig handlers set at import time).
     _configure_handlers()
+    # Create DB tables on startup (idempotent). In production this runs against
+    # the managed Postgres; harmless to re-run on each boot.
+    try:
+        from app.db import Base, engine
+        from app.models import orm  # noqa: F401  (register models)
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("Database tables ensured")
+    except Exception as exc:  # noqa: BLE001 - startup must not hard-crash on DB hiccups
+        logger.error("Could not initialize DB tables: %s", exc)
     # Startup: nothing heavy yet. Shutdown: close browser sessions.
     yield
     await browser_service.shutdown()

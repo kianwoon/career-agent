@@ -1,0 +1,9 @@
+# Frontend — files not sent to Docker build context
+node_modules/
+.next/
+out/
+.env.local
+.env*.local
+Dockerfile
+.dockerignore
+*.tsbuildinfo

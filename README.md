@@ -39,6 +39,25 @@ cp .env.local.example .env.local
 npm run dev             # http://localhost:3000
 ```
 
+## Docker / Deployment
+
+Production Dockerfiles are included:
+
+```bash
+# Backend API (includes headless Chromium for LinkedIn automation)
+docker build -t career-api -f backend/Dockerfile backend/
+docker run -p 8000:8000 -e DATABASE_URL=... -e API_KEYS=... career-api
+
+# Frontend
+docker build -t career-web -f frontend/Dockerfile frontend/
+docker run -p 3000:3000 career-web
+```
+
+- **Postgres**: reuse an existing instance; the API auto-creates tables on boot.
+- **Koyeb**: see [`DEPLOY.md`](DEPLOY.md) for full instructions + `koyeb.yaml`.
+- **Browser session**: in production there is no local Brave — the bot uses
+  captured-session replay (capture once while signed in, replay headlessly).
+
 ## Phase 1 API Sketch
 
 | Method | Path | Purpose |

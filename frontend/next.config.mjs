@@ -6,6 +6,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  // Standalone output for a minimal production Docker image.
+  output: "standalone",
   // Pin tracing to this project so Next doesn't infer a parent workspace
   // (e.g. when this repo lives inside a larger folder with its own lockfile).
   outputFileTracingRoot: __dirname,

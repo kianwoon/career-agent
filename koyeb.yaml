@@ -1,0 +1,65 @@
+# Koyeb deployment configuration for Career Agent
+#
+# Two services:
+#   1. career-api   — FastAPI + Playwright (headless Chromium for LinkedIn)
+#   2. career-web   — Next.js frontend
+#
+# Postgres: REUSE your existing Koyeb Postgres instance. Point the API at it
+# via the DATABASE_URL env var (the app auto-creates tables on boot).
+#
+# Deploy:
+#   koyeb service create career-api  --git github.com/kianwoon/career-agent --git-branch main --git-build-context /backend --git-dockerfile /backend/Dockerfile ...
+#   (or use the dashboard with the Dockerfile in /backend)
+
+service:
+  # ------------------------------------------------------------------ API
+  - name: career-api
+    instance_types:
+      - type: nano          # 1 vCPU / 512MB is the FLOOR; 2GB recommended
+    ports:
+      - port: 8000
+        protocol: http
+    scalings:
+      min: 1
+      max: 1                # single instance — in-memory pacing + session state
+    env:
+      - name: APP_NAME
+        value: "Career Agent API"
+      - name: DATABASE_URL
+        value: "postgresql+asyncpg://USER:PASS@HOST:5432/career_agent"   # ← your existing Koyeb Postgres
+      - name: API_KEYS
+        value: ""            # ← set your real API keys (comma-separated)
+      - name: API_RATE_LIMIT_PER_MIN
+        value: "30"
+      - name: SESSION_ENCRYPTION_KEY
+        value: ""            # ← 64-hex-char AES key (REQUIRED in prod)
+      - name: LLM_ENABLED
+        value: "true"
+      - name: LLM_API_KEY
+        value: ""            # ← your GLM coding-plan key
+      - name: LLM_BASE_URL
+        value: "https://api.z.ai/api/anthropic/v1/messages"
+      - name: LLM_MODEL_NAME
+        value: "GLM-5.3"
+      - name: CORS_ORIGINS
+        value: '["https://career-web-<your-org>.koyeb.app"]'
+      - name: BRAVE_CDP_URL
+        value: ""            # no local Brave in prod — captured session replay is used
+
+  # ------------------------------------------------------------- Frontend
+  - name: career-web
+    instance_types:
+      - type: nano
+    ports:
+      - port: 3000
+        protocol: http
+    scalings:
+      min: 1
+      max: 1
+    routes:
+      - path: /
+    env:
+      - name: NEXT_PUBLIC_API_BASE_URL
+        value: "https://career-api-<your-org>.koyeb.app"   # ← API service public URL
+      - name: NEXT_PUBLIC_API_KEY
+        value: ""            # ← same key as API_KEYS, so the UI authenticates

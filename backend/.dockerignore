@@ -1,0 +1,12 @@
+# Backend — files not sent to Docker build context
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+.env.*
+!.env.example
+tests/
+Dockerfile
+.dockerignore
+*.egg-info/
