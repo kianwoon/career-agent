@@ -10,6 +10,22 @@ jobs:
   backend-test:
     name: Backend tests + lint
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: career
+          POSTGRES_PASSWORD: career
+          POSTGRES_DB: career_agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U career -d career_agent"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://career:career@localhost:5432/career_agent
     defaults:
       run:
         working-directory: backend
@@ -32,6 +48,9 @@ jobs:
 
       - name: Install Playwright browser
         run: uv run playwright install --with-deps chromium
+
+      - name: Create DB tables
+        run: uv run python -m app.seed
 
       - name: Lint (ruff)
         run: uv run ruff check app
