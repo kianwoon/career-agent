@@ -107,12 +107,22 @@ async def _connect_with_session(
 
 
 async def _connect_with_best_session() -> tuple[Any, Any] | None:
-    """Connect using the most recently captured stored session, else CDP.
+    """Connect using the most reliable available session.
 
-    If the stored session is near-expiry, try to refresh it from the live
-    signed-in browser (CDP) before connecting.
+    Priority:
+      1. CDP (persistent in-container Chromium / local Brave) — the SAME
+         browser+profile that holds the login. This is the primary path on
+         Koyeb and locally.
+      2. Stored (encrypted) session replayed in a fresh Chromium — fallback
+         when no CDP browser is reachable.
     """
-    # Load the newest captured session row from the DB.
+    # 1. Prefer CDP: the persistent browser is the one that's actually logged in.
+    try:
+        return await _connect()
+    except BrowserError:
+        logger.info("CDP browser unavailable, falling back to stored session")
+
+    # 2. Fallback: replay the stored (encrypted) session in a fresh Chromium.
     row = None
     try:
         from sqlalchemy import select
@@ -133,35 +143,12 @@ async def _connect_with_best_session() -> tuple[Any, Any] | None:
         logger.warning("Could not load stored session: %s", exc)
 
     if row is not None and row.session_state:
-        # Try the stored session first (fresh Chromium, no Brave needed).
-        # If the session is expired, connect_with_stored_session will return
-        # None, and we'll fall through to the CDP refresh attempt.
         result = await _connect_with_session(row.session_state)
         if result:
             return result
-        logger.info("Stored session %s expired or invalid — attempting refresh via CDP", row.id)
-        # If connected via CDP is available, try to refresh the session.
-        try:
-            from app.services.session import refresh_from_cdp
+        logger.info("Stored session %s expired or invalid", row.id)
 
-            async with async_session() as db:
-                fresh = await db.get(BrowserSession, row.id)
-                if fresh is not None and await refresh_from_cdp(fresh):
-                    await db.commit()
-                    row = fresh
-                    blob = row.session_state
-                    if blob:
-                        result = await _connect_with_session(blob)
-                        if result:
-                            return result
-        except Exception as exc:
-            logger.warning("Auto-refresh skipped: %s", exc)
-
-    # Fallback: Brave CDP.
-    try:
-        return await _connect()
-    except BrowserError:
-        return None, None
+    return None, None
 
 
 async def _extract_jobs(page: Any) -> list[dict[str, Any]]:
