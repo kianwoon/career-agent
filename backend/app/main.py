@@ -32,7 +32,7 @@ async def lifespan(app: FastAPI):
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         logger.info("Database tables ensured")
-    except Exception as exc:  # noqa: BLE001 - startup must not hard-crash on DB hiccups
+    except Exception as exc:  # startup must not hard-crash on DB hiccups
         logger.error("Could not initialize DB tables: %s", exc)
     # Startup: nothing heavy yet. Shutdown: close browser sessions.
     yield
