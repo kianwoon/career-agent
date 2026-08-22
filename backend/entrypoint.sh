@@ -49,6 +49,9 @@ for i in $(seq 1 30); do
 done
 
 echo "=== Starting uvicorn (API :$API_PORT) ==="
-export BRAVE_CDP_URL="http://127.0.0.1:$CDP_PORT"
+# Use the tunnel URL if provided (e.g. Koyeb env BRAVE_CDP_URL pointing to a
+# local Brave via ngrok), otherwise fall back to the in-container Chromium.
+export BRAVE_CDP_URL="${BRAVE_CDP_URL:-http://127.0.0.1:$CDP_PORT}"
+echo "BRAVE_CDP_URL=$BRAVE_CDP_URL"
 
 exec uv run uvicorn app.main:app --host 0.0.0.0 --port "$API_PORT"
