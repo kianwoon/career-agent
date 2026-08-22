@@ -25,6 +25,9 @@ logger = logging.getLogger(__name__)
 
 # Where the authenticated browser (e.g. Brave) exposes CDP.
 BRAVE_CDP_URL = os.getenv("BRAVE_CDP_URL", "http://localhost:9222")
+# Optional auth header for CDP connections (e.g. "X-Auth-Token: abc123").
+# Format: "HeaderName: HeaderValue". Used for CDP tunnel auth.
+CDP_AUTH_HEADER = os.getenv("CDP_AUTH_HEADER", "")
 
 # Selectors discovered by probing the live LinkedIn jobs page.
 JOB_CARD = "li.scaffold-layout__list-item"
@@ -71,7 +74,8 @@ async def _connect() -> tuple[Any, Any]:
     pw = None
     try:
         pw = await async_playwright().start()
-        browser = await pw.chromium.connect_over_cdp(BRAVE_CDP_URL)
+        headers = _cdp_headers()
+        browser = await pw.chromium.connect_over_cdp(BRAVE_CDP_URL, headers=headers)
         ctx = browser.contexts[0]
         page = await ctx.new_page()
         return pw, page
@@ -79,6 +83,14 @@ async def _connect() -> tuple[Any, Any]:
         if pw:
             await pw.stop()
         raise BrowserError(f"Failed to connect to Brave CDP at {BRAVE_CDP_URL}: {exc}") from exc
+
+
+def _cdp_headers() -> dict[str, str] | None:
+    """Parse CDP_AUTH_HEADER ('Name: Value') into a headers dict, or None."""
+    if not CDP_AUTH_HEADER:
+        return None
+    name, _, value = CDP_AUTH_HEADER.partition(":")
+    return {name.strip(): value.strip()}
 
 
 async def _connect_with_session(
