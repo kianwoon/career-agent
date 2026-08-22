@@ -36,7 +36,14 @@ RUN uv run playwright install chromium
 # Copy the application source.
 COPY app ./app
 
-EXPOSE 8000
+# Persistent-browser entrypoint: starts headless Chromium (CDP) + uvicorn.
+COPY entrypoint.sh ./
+RUN chmod +x entrypoint.sh
 
-# Run the API. DB schema is auto-created in the lifespan on boot.
-CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Browser profile lives on a persistent volume (Koyeb volume /data).
+VOLUME ["/data"]
+
+EXPOSE 8000 9222
+
+# Run the entrypoint (persistent Chromium + API).
+CMD ["./entrypoint.sh"]

@@ -15,13 +15,21 @@ service:
   # ------------------------------------------------------------------ API
   - name: career-api
     instance_types:
-      - type: nano          # 1 vCPU / 512MB is the FLOOR; 2GB recommended
+      - type: small          # 2GB — Chromium needs ~700MB; nano (0.5GB) OOMs
     ports:
       - port: 8000
         protocol: http
     scalings:
       min: 1
       max: 1                # single instance — in-memory pacing + session state
+    # Persistent volume for the Chromium profile. The user logs in ONCE via
+    # human takeover; the same browser+profile is reused for all sessions
+    # (LinkedIn login does NOT transfer across browser contexts/IPs, so the
+    # browser must persist).
+    volumes:
+      - name: browser-profile
+        path: /data
+        size: 1Gi
     env:
       - name: APP_NAME
         value: "Career Agent API"
@@ -42,9 +50,9 @@ service:
       - name: LLM_MODEL_NAME
         value: "GLM-5.3"
       - name: CORS_ORIGINS
-        value: '["https://career-web-<your-org>.koyeb.app"]'
+        value: '["https://career-agent-<your-org>.koyeb.app"]'
       - name: BRAVE_CDP_URL
-        value: ""            # no local Brave in prod — captured session replay is used
+        value: "http://127.0.0.1:9222"   # in-container persistent Chromium
 
   # ------------------------------------------------------------- Frontend
   - name: career-web
@@ -60,6 +68,6 @@ service:
       - path: /
     env:
       - name: NEXT_PUBLIC_API_BASE_URL
-        value: "https://career-api-<your-org>.koyeb.app"   # ← API service public URL
+        value: "https://career-agent-<your-org>.koyeb.app/api"   # API behind /api route
       - name: NEXT_PUBLIC_API_KEY
         value: ""            # ← same key as API_KEYS, so the UI authenticates
