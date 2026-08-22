@@ -73,21 +73,30 @@ export interface TaskStatus {
   error?: string | null;
 }
 
-export const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+// Runtime config: reads backend URL + key from /api/runtime-config (server
+// env), so values can be set at deploy time on Koyeb without rebuilding.
+import { apiBaseUrl, apiKey } from "./runtime-config";
 
-// Optional API key for the frontend to authenticate against the backend.
-// Configure via NEXT_PUBLIC_API_KEY in .env.local. If empty, requests go
-// unauthenticated (only works when the backend has API_KEYS empty = dev).
-const API_KEY = process.env.NEXT_PUBLIC_API_KEY ?? "";
+async function resolveApiBase(): Promise<string> {
+  try {
+    return await apiBaseUrl();
+  } catch {
+    return process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+  }
+}
 
-export function searchEndpoint(mode: SearchMode): string {
-  return `${API_BASE_URL}/api/v1/search/${mode}`;
+async function resolveApiKey(): Promise<string> {
+  try {
+    return await apiKey();
+  } catch {
+    return process.env.NEXT_PUBLIC_API_KEY ?? "";
+  }
 }
 
 async function postJson<T>(url: string, body: unknown): Promise<T> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (API_KEY) headers["X-API-Key"] = API_KEY;
+  const key = await resolveApiKey();
+  if (key) headers["X-API-Key"] = key;
   const res = await fetch(url, {
     method: "POST",
     headers,
@@ -102,7 +111,8 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
 
 async function getJson<T>(url: string): Promise<T> {
   const headers: Record<string, string> = {};
-  if (API_KEY) headers["X-API-Key"] = API_KEY;
+  const key = await resolveApiKey();
+  if (key) headers["X-API-Key"] = key;
   const res = await fetch(url, { headers });
   if (!res.ok) {
     const detail = await res.text();
@@ -117,17 +127,20 @@ export async function startSearch(request: SearchRequest): Promise<TaskStatus> {
     request.mode === "jobs"
       ? { query: request.query, location: request.location }
       : { query: request.query, location: request.location };
-  return postJson<TaskStatus>(searchEndpoint(request.mode), body);
+  const base = await resolveApiBase();
+  return postJson<TaskStatus>(`${base}/api/v1/search/${request.mode}`, body);
 }
 
 /** Fetch the ranked results for a completed task. */
 export async function fetchTaskResults(taskId: string): Promise<SearchResponse> {
-  return getJson<SearchResponse>(`${API_BASE_URL}/api/v1/tasks/${taskId}/results`);
+  const base = await resolveApiBase();
+  return getJson<SearchResponse>(`${base}/api/v1/tasks/${taskId}/results`);
 }
 
 /** Fetch a task's current status. */
 export async function fetchTaskStatus(taskId: string): Promise<TaskStatus> {
-  return getJson<TaskStatus>(`${API_BASE_URL}/api/v1/tasks/${taskId}`);
+  const base = await resolveApiBase();
+  return getJson<TaskStatus>(`${base}/api/v1/tasks/${taskId}`);
 }
 
 /** Approve or reject a pending approval. */
@@ -136,7 +149,8 @@ export async function decideApproval(
   decision: "approve" | "reject",
   note?: string,
 ): Promise<unknown> {
-  return postJson(`${API_BASE_URL}/api/v1/approvals/${approvalId}`, {
+  const base = await resolveApiBase();
+  return postJson(`${base}/api/v1/approvals/${approvalId}`, {
     decision,
     note,
   });
@@ -157,18 +171,17 @@ export interface BrowserSessionView {
 
 /** Create a browser session row (persisted in DB). */
 export async function createBrowserSession(): Promise<BrowserSessionView> {
-  return postJson<BrowserSessionView>(
-    `${API_BASE_URL}/api/v1/browser/sessions`,
-    {},
-  );
+  const base = await resolveApiBase();
+  return postJson<BrowserSessionView>(`${base}/api/v1/browser/sessions`, {});
 }
 
 /** Capture the live signed-in browser's cookies (encrypted, stored). */
 export async function captureBrowserSession(
   sessionId: string,
 ): Promise<BrowserSessionView> {
+  const base = await resolveApiBase();
   return postJson<BrowserSessionView>(
-    `${API_BASE_URL}/api/v1/browser/${sessionId}/capture`,
+    `${base}/api/v1/browser/${sessionId}/capture`,
     {},
   );
 }
@@ -177,8 +190,9 @@ export async function captureBrowserSession(
 export async function replayBrowserSession(
   sessionId: string,
 ): Promise<BrowserSessionView> {
+  const base = await resolveApiBase();
   return postJson<BrowserSessionView>(
-    `${API_BASE_URL}/api/v1/browser/${sessionId}/replay`,
+    `${base}/api/v1/browser/${sessionId}/replay`,
     {},
   );
 }
@@ -187,8 +201,9 @@ export async function replayBrowserSession(
 export async function refreshBrowserSession(
   sessionId: string,
 ): Promise<BrowserSessionView> {
+  const base = await resolveApiBase();
   return postJson<BrowserSessionView>(
-    `${API_BASE_URL}/api/v1/browser/${sessionId}/refresh`,
+    `${base}/api/v1/browser/${sessionId}/refresh`,
     {},
   );
 }
