@@ -1,9 +1,18 @@
 """Tests for session capture/replay: encryption round-trip + state filtering."""
 
 import json
+from datetime import UTC, datetime, timedelta
 
 from app.services.encryption import decrypt_session_state, encrypt_session_state
-from app.services.session import _earliest_expiry, _filter_state
+from app.services.session import _earliest_expiry, _filter_state, session_needs_refresh
+
+
+class _FakeSession:
+    """Minimal stand-in for BrowserSession (session_state/expires_at)."""
+
+    def __init__(self, session_state=None, expires_at=None):
+        self.session_state = session_state
+        self.expires_at = expires_at
 
 
 def test_encrypt_decrypt_round_trip():
@@ -68,3 +77,22 @@ def test_earliest_expiry():
 def test_earliest_expiry_none_when_all_session():
     state = {"cookies": [{"name": "a", "expires": -1}, {"name": "b", "expires": 0}]}
     assert _earliest_expiry(state) is None
+
+
+def test_session_needs_refresh_no_state():
+    assert session_needs_refresh(_FakeSession(session_state=None)) is True
+
+
+def test_session_needs_refresh_no_expiry():
+    # Captured state but no expiry info -> be safe, refresh.
+    assert session_needs_refresh(_FakeSession(session_state="blob", expires_at=None)) is True
+
+
+def test_session_needs_refresh_far_future():
+    exp = datetime.now(UTC) + timedelta(days=30)
+    assert session_needs_refresh(_FakeSession(session_state="blob", expires_at=exp)) is False
+
+
+def test_session_needs_refresh_near_expiry():
+    exp = datetime.now(UTC) + timedelta(days=2)
+    assert session_needs_refresh(_FakeSession(session_state="blob", expires_at=exp)) is True

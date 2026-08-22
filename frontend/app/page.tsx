@@ -4,9 +4,14 @@ import { useState } from "react";
 import {
   startSearch,
   fetchTaskResults,
+  createBrowserSession,
+  captureBrowserSession,
+  replayBrowserSession,
+  refreshBrowserSession,
   type SearchMode,
   type SearchResult,
   type Evidence,
+  type BrowserSessionView,
 } from "@/lib/api";
 
 type Phase = "idle" | "running" | "completed" | "error";
@@ -53,6 +58,8 @@ export default function Home() {
   const [results, setResults] = useState<SearchResult[]>([]);
   const [verdicts, setVerdicts] = useState<Record<string, Verdict>>({});
   const [takeoverActive, setTakeoverActive] = useState(false);
+  const [browserSession, setBrowserSession] = useState<BrowserSessionView | null>(null);
+  const [sessionBusy, setSessionBusy] = useState(false);
   const [timeline, setTimeline] = useState<TimelineEvent[]>([
     {
       id: nextEventId(),
@@ -153,6 +160,89 @@ export default function Home() {
       );
       return !active;
     });
+  }
+
+  // Lazily create a browser session row on first use.
+  async function ensureSession(): Promise<BrowserSessionView> {
+    if (browserSession) return browserSession;
+    const s = await createBrowserSession();
+    setBrowserSession(s);
+    return s;
+  }
+
+  async function handleCapture() {
+    if (sessionBusy) return;
+    setSessionBusy(true);
+    try {
+      const s = await ensureSession();
+      const res = await captureBrowserSession(s.session_id);
+      setBrowserSession(res);
+      setTimeline((prev) =>
+        addEvent(
+          prev,
+          res.status === "captured" ? "success" : "warn",
+          res.status === "captured"
+            ? "Captured signed-in session (cookies encrypted & stored)."
+            : `Capture needs human: ${res.reason ?? "unknown"}`
+        )
+      );
+    } catch (e) {
+      setTimeline((prev) =>
+        addEvent(prev, "warn", `Capture failed: ${e instanceof Error ? e.message : "error"}`)
+      );
+    } finally {
+      setSessionBusy(false);
+    }
+  }
+
+  async function handleReplay() {
+    if (sessionBusy) return;
+    setSessionBusy(true);
+    try {
+      const s = await ensureSession();
+      const res = await replayBrowserSession(s.session_id);
+      setBrowserSession(res);
+      setTimeline((prev) =>
+        addEvent(
+          prev,
+          res.status === "ready" ? "success" : "warn",
+          res.status === "ready"
+            ? "Replayed session — logged in via fresh Chromium."
+            : `Replay needs human: ${res.reason ?? "session expired"}`
+        )
+      );
+    } catch (e) {
+      setTimeline((prev) =>
+        addEvent(prev, "warn", `Replay failed: ${e instanceof Error ? e.message : "error"}`)
+      );
+    } finally {
+      setSessionBusy(false);
+    }
+  }
+
+  async function handleRefresh() {
+    if (sessionBusy) return;
+    setSessionBusy(true);
+    try {
+      const s = await ensureSession();
+      const res = await refreshBrowserSession(s.session_id);
+      setBrowserSession(res);
+      setTimeline((prev) =>
+        addEvent(
+          prev,
+          res.status === "captured" ? "success" : "warn",
+          res.status === "captured"
+            ? "Refreshed session cookies."
+            : `Refresh needs human: ${res.reason ?? "browser not running"}`
+        )
+      );
+    } catch (e) {
+      setTimeline((prev) =>
+        addEvent(prev, "warn", `Refresh failed: ${e instanceof Error ? e.message : "error"}`)
+      );
+    } finally {
+      setSessionBusy(false);
+    }
   }
 
   function handleVerdict(id: string, verdict: Verdict) {
@@ -359,13 +449,46 @@ export default function Home() {
                 </div>
                 <div>
                   <dt>Status</dt>
-                  <dd>{isRunning ? "active" : "idle"}</dd>
+                  <dd>
+                    {sessionBusy
+                      ? "busy…"
+                      : browserSession?.status === "captured"
+                        ? "captured"
+                        : browserSession?.status === "ready"
+                          ? "ready"
+                          : isRunning
+                            ? "active"
+                            : "idle"}
+                  </dd>
                 </div>
                 <div>
                   <dt>Takeover</dt>
                   <dd>{takeoverActive ? "engaged" : "available"}</dd>
                 </div>
               </dl>
+              <div className="session-actions">
+                <button
+                  className="btn session-btn"
+                  onClick={handleCapture}
+                  disabled={sessionBusy}
+                >
+                  Capture
+                </button>
+                <button
+                  className="btn session-btn"
+                  onClick={handleReplay}
+                  disabled={sessionBusy}
+                >
+                  Replay
+                </button>
+                <button
+                  className="btn session-btn"
+                  onClick={handleRefresh}
+                  disabled={sessionBusy}
+                >
+                  Refresh
+                </button>
+              </div>
             </section>
 
             <section className="panel">

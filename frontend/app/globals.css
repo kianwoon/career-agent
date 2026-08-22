@@ -594,6 +594,34 @@ body {
   font-size: 11px;
 }
 
+.session-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.session-btn {
+  flex: 1;
+  padding: 6px 8px;
+  font-size: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--text);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.session-btn:hover:not(:disabled) {
+  border-color: var(--blue, #4f8cff);
+  background: rgba(79, 140, 255, 0.1);
+}
+
+.session-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .result-actions {
   display: flex;
   align-items: center;

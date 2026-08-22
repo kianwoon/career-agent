@@ -449,6 +449,42 @@ async def browser_replay(session_id: str, db: AsyncSession = Depends(get_db)) ->
     )
 
 
+@router.post("/browser/{session_id}/refresh", response_model=BrowserSessionView)
+async def browser_refresh(session_id: str, db: AsyncSession = Depends(get_db)) -> BrowserSessionView:
+    """Re-capture the session from the live signed-in browser (CDP).
+
+    Refreshes near-expiry cookies. Requires the signed-in browser to be
+    running on the CDP port. Returns needs_human if CDP is unavailable.
+    """
+    from app.models.orm import BrowserSession
+    from app.services.session import refresh_from_cdp
+
+    session = await db.get(BrowserSession, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Browser session not found")
+
+    try:
+        refreshed = await refresh_from_cdp(session)
+        await db.commit()
+    except Exception as exc:
+        logger.warning("Refresh failed for %s: %s", session_id, exc)
+        raise HTTPException(status_code=500, detail=f"Refresh failed: {exc}") from exc
+
+    if refreshed:
+        return BrowserSessionView(
+            session_id=session.id,
+            status="captured",
+            url="https://www.linkedin.com/",
+            title="Session refreshed",
+        )
+    return BrowserSessionView(
+        session_id=session.id,
+        status="needs_human",
+        needs_human=True,
+        reason="Could not refresh via CDP (browser not running?) — sign in manually and re-capture",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Approvals
 # ---------------------------------------------------------------------------

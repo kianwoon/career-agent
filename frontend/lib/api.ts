@@ -76,16 +76,34 @@ export interface TaskStatus {
 export const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
+// Optional API key for the frontend to authenticate against the backend.
+// Configure via NEXT_PUBLIC_API_KEY in .env.local. If empty, requests go
+// unauthenticated (only works when the backend has API_KEYS empty = dev).
+const API_KEY = process.env.NEXT_PUBLIC_API_KEY ?? "";
+
 export function searchEndpoint(mode: SearchMode): string {
   return `${API_BASE_URL}/api/v1/search/${mode}`;
 }
 
 async function postJson<T>(url: string, body: unknown): Promise<T> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (API_KEY) headers["X-API-Key"] = API_KEY;
   const res = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify(body),
   });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(`Request failed with status ${res.status}: ${detail}`);
+  }
+  return (await res.json()) as T;
+}
+
+async function getJson<T>(url: string): Promise<T> {
+  const headers: Record<string, string> = {};
+  if (API_KEY) headers["X-API-Key"] = API_KEY;
+  const res = await fetch(url, { headers });
   if (!res.ok) {
     const detail = await res.text();
     throw new Error(`Request failed with status ${res.status}: ${detail}`);
@@ -104,20 +122,12 @@ export async function startSearch(request: SearchRequest): Promise<TaskStatus> {
 
 /** Fetch the ranked results for a completed task. */
 export async function fetchTaskResults(taskId: string): Promise<SearchResponse> {
-  const res = await fetch(`${API_BASE_URL}/api/v1/tasks/${taskId}/results`);
-  if (!res.ok) {
-    throw new Error(`Failed to fetch results: status ${res.status}`);
-  }
-  return (await res.json()) as SearchResponse;
+  return getJson<SearchResponse>(`${API_BASE_URL}/api/v1/tasks/${taskId}/results`);
 }
 
 /** Fetch a task's current status. */
 export async function fetchTaskStatus(taskId: string): Promise<TaskStatus> {
-  const res = await fetch(`${API_BASE_URL}/api/v1/tasks/${taskId}`);
-  if (!res.ok) {
-    throw new Error(`Failed to fetch task status: status ${res.status}`);
-  }
-  return (await res.json()) as TaskStatus;
+  return getJson<TaskStatus>(`${API_BASE_URL}/api/v1/tasks/${taskId}`);
 }
 
 /** Approve or reject a pending approval. */
@@ -130,4 +140,55 @@ export async function decideApproval(
     decision,
     note,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Browser session management (capture / replay / refresh)
+// ---------------------------------------------------------------------------
+
+export interface BrowserSessionView {
+  session_id: string;
+  status: string;
+  url?: string | null;
+  title?: string | null;
+  needs_human?: boolean;
+  reason?: string | null;
+}
+
+/** Create a browser session row (persisted in DB). */
+export async function createBrowserSession(): Promise<BrowserSessionView> {
+  return postJson<BrowserSessionView>(
+    `${API_BASE_URL}/api/v1/browser/sessions`,
+    {},
+  );
+}
+
+/** Capture the live signed-in browser's cookies (encrypted, stored). */
+export async function captureBrowserSession(
+  sessionId: string,
+): Promise<BrowserSessionView> {
+  return postJson<BrowserSessionView>(
+    `${API_BASE_URL}/api/v1/browser/${sessionId}/capture`,
+    {},
+  );
+}
+
+/** Replay a captured session in fresh Chromium and verify login. */
+export async function replayBrowserSession(
+  sessionId: string,
+): Promise<BrowserSessionView> {
+  return postJson<BrowserSessionView>(
+    `${API_BASE_URL}/api/v1/browser/${sessionId}/replay`,
+    {},
+  );
+}
+
+/** Refresh a near-expiry session by re-capturing from the live browser. */
+export async function refreshBrowserSession(
+  sessionId: string,
+): Promise<BrowserSessionView> {
+  return postJson<BrowserSessionView>(
+    `${API_BASE_URL}/api/v1/browser/${sessionId}/refresh`,
+    {},
+  );
 }

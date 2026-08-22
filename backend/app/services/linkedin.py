@@ -107,8 +107,13 @@ async def _connect_with_session(
 
 
 async def _connect_with_best_session() -> tuple[Any, Any] | None:
-    """Connect using the most recently captured stored session, else CDP."""
-    # Load the newest captured session blob from the DB.
+    """Connect using the most recently captured stored session, else CDP.
+
+    If the stored session is near-expiry, try to refresh it from the live
+    signed-in browser (CDP) before connecting.
+    """
+    # Load the newest captured session row from the DB.
+    row = None
     try:
         from sqlalchemy import select
 
@@ -124,15 +129,29 @@ async def _connect_with_best_session() -> tuple[Any, Any] | None:
                     .limit(1)
                 )
             ).scalar_one_or_none()
-            blob = row.session_state if row else None
     except Exception as exc:
         logger.warning("Could not load stored session: %s", exc)
-        blob = None
 
-    if blob:
-        result = await _connect_with_session(blob)
-        if result:
-            return result
+    if row is not None:
+        # Auto-refresh if near expiry AND the live browser is reachable.
+        try:
+            from app.services.session import refresh_from_cdp, session_needs_refresh
+
+            if session_needs_refresh(row):
+                logger.info("Stored session %s near-expiry — attempting refresh via CDP", row.id)
+                async with async_session() as db:
+                    fresh = await db.get(BrowserSession, row.id)
+                    if fresh is not None and await refresh_from_cdp(fresh):
+                        await db.commit()
+                        row = fresh
+        except Exception as exc:
+            logger.warning("Auto-refresh skipped: %s", exc)
+
+        blob = row.session_state
+        if blob:
+            result = await _connect_with_session(blob)
+            if result:
+                return result
 
     # Fallback: Brave CDP.
     try:

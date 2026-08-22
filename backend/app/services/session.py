@@ -138,6 +138,40 @@ def _filter_state(state: dict, domains: list[str]) -> dict:
     return {"cookies": cookies, "origins": origins}
 
 
+# How far ahead of the earliest cookie expiry we consider a session "near
+# expiry" and in need of refresh.
+REFRESH_LEAD_DAYS = 7
+
+
+def session_needs_refresh(session: BrowserSession, lead_days: int = REFRESH_LEAD_DAYS) -> bool:
+    """True if the session has no expiry or is within lead_days of expiring."""
+    if not session.session_state:
+        return True  # nothing captured -> needs capture
+    if session.expires_at is None:
+        return True  # no expiry info (e.g. all session cookies) -> be safe
+    # Naive vs aware: expires_at is stored tz-aware; compare with now.
+    now = datetime.now(UTC)
+    exp = session.expires_at
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=UTC)
+    return (exp - now).total_seconds() < lead_days * 86400
+
+
+async def refresh_from_cdp(session: BrowserSession) -> bool:
+    """Re-capture the session from the live signed-in browser (CDP).
+
+    Returns True if a fresh capture happened, False if CDP is unavailable
+    (caller should keep the old session and/or request human takeover).
+    """
+    try:
+        await capture_from_cdp(session)
+        logger.info("Refreshed session %s via CDP (expires %s)", session.id, session.expires_at)
+        return True
+    except Exception as exc:
+        logger.warning("Refresh via CDP failed for %s: %s", session.id, exc)
+        return False
+
+
 def _earliest_expiry(state: dict) -> datetime | None:
     """Earliest cookie expiry among the captured cookies (or None)."""
     expiries = []
