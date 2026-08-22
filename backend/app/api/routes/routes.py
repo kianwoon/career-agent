@@ -1,0 +1,408 @@
+"""API routes for the Career Agent service."""
+
+from __future__ import annotations
+
+import asyncio
+import uuid
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.agent.graph import supervisor_graph
+from app.agent.nodes import AgentState
+from app.db import get_db
+from app.models.orm import SearchTask
+from app.models.schemas import (
+    ApprovalDecision,
+    ApprovalRequest,
+    BrowserTakeoverRequest,
+    BrowserSessionView,
+    CandidateSearchRequest,
+    JobSearchRequest,
+    MatchResult,
+    SearchTaskResult,
+    SearchType,
+    TaskStatus,
+    TaskStatusResponse,
+)
+from app.services.browser import BrowserError, browser_service
+from app.api.security import require_api_key
+
+router = APIRouter(
+    prefix="/api/v1",
+    dependencies=[Depends(require_api_key)],
+)
+
+
+# ---------------------------------------------------------------------------
+# Search tasks
+# ---------------------------------------------------------------------------
+
+
+@router.post("/search/jobs", status_code=201)
+async def start_job_search(
+    req: JobSearchRequest,
+    db: AsyncSession = Depends(get_db),
+) -> TaskStatusResponse:
+    """Create and start a job search task."""
+    return await _start_task(db, SearchType.jobs, query=req.query, location=req.location)
+
+
+@router.post("/search/candidates", status_code=201)
+async def start_candidate_search(
+    req: CandidateSearchRequest,
+    db: AsyncSession = Depends(get_db),
+) -> TaskStatusResponse:
+    """Create and start a candidate search task."""
+    return await _start_task(db, SearchType.candidates, query=req.query, location=req.location)
+
+
+async def _default_user_id(db: AsyncSession) -> str | None:
+    """Resolve the demo user id (single-user Phase 1)."""
+    from app.models.orm import User
+
+    user = (
+        await db.execute(select(User).limit(1))
+    ).scalar_one_or_none()
+    return user.id if user else None
+
+
+async def _start_task(
+    db: AsyncSession,
+    task_type: SearchType,
+    query: str,
+    location: str | None = None,
+) -> TaskStatusResponse:
+    task = SearchTask(
+        id=str(uuid.uuid4()),
+        type=task_type.value,
+        query=query,
+        status=TaskStatus.pending.value,
+    )
+    db.add(task)
+    await db.commit()
+    await db.refresh(task)
+
+    # Return immediately; run the agent in the background so the caller does
+    # not block. Poll GET /tasks/{id} for completion.
+    asyncio.create_task(_run_task(task.id, task_type, query, location))
+    return TaskStatusResponse(
+        task_id=task.id,
+        type=task_type,
+        status=TaskStatus.pending,
+        workflow_state=task.workflow_state,
+        created_at=task.created_at,
+        started_at=task.started_at,
+        completed_at=task.completed_at,
+        error=task.error,
+    )
+
+
+async def _run_task(
+    task_id: str,
+    task_type: SearchType,
+    query: str,
+    location: str | None,
+) -> None:
+    """Execute the LangGraph pipeline for a task in the background."""
+    from app.db import async_session as _session_factory
+
+    async with _session_factory() as db:
+        task = await db.get(SearchTask, task_id)
+        if task is None:
+            return
+        task.status = TaskStatus.running.value
+        task.started_at = datetime.utcnow()
+        await db.commit()
+
+        # Seed the profile so the matching engine has something to score against.
+        profile = {
+            "headline": "AI Power User",
+            "summary": "Applying frontier models to real-world problems; technology leadership",
+            "skills": ["ai", "ml", "leadership", "platform", "engineering", "product"],
+            "preferences": {"location": location or "Singapore"},
+        }
+
+        initial: AgentState = {
+            "task_id": task.id,
+            "type": task_type,
+            "query": query,
+            "location": location,
+            "status": TaskStatus.running,
+            "profile": profile,
+        }
+
+        try:
+            result_state = await supervisor_graph.ainvoke(initial)
+            task.status = result_state.get("status", TaskStatus.completed).value
+            task.workflow_state = "complete"
+            if result_state.get("error"):
+                task.error = result_state["error"]
+            task.completed_at = datetime.utcnow()
+
+            # Persist ranked results (jobs or candidates) + match evaluations.
+            from app.models.orm import Candidate, Job, MatchEvaluation
+
+            user_id = await _default_user_id(db)
+            for r in result_state.get("results", []):
+                if task_type == SearchType.jobs:
+                    entity = (
+                        await db.execute(
+                            select(Job).where(Job.source_url == (r.source_url or ""))
+                        )
+                    ).scalar_one_or_none()
+                    if entity is None:
+                        entity = Job(
+                            user_id=user_id,
+                            title=r.title,
+                            company=r.subtitle or r.title,
+                            location=r.location,
+                            description=r.match_reason or "",
+                            source=r.source,
+                            source_url=r.source_url or "",
+                            posted_at=None,
+                            employment_type=None,
+                            salary_text=None,
+                        )
+                        db.add(entity)
+                        await db.flush()
+                else:
+                    entity = (
+                        await db.execute(
+                            select(Candidate).where(Candidate.source_url == (r.source_url or ""))
+                        )
+                    ).scalar_one_or_none()
+                    if entity is None:
+                        entity = Candidate(
+                            user_id=user_id,
+                            name=r.title,
+                            headline=r.subtitle,
+                            location=r.location,
+                            summary=getattr(r, "summary", "") or r.match_reason or "",
+                            skills=getattr(r, "skills", []) or [],
+                            experience=getattr(r, "experience", "") or "",
+                            education=getattr(r, "education", "") or "",
+                            certifications=getattr(r, "certifications", "") or "",
+                            source=r.source,
+                            source_url=r.source_url or "",
+                        )
+                        db.add(entity)
+                        await db.flush()
+                    else:
+                        # Enrich an existing row if it was created before
+                        # profile enrichment existed.
+                        enriched_summary = getattr(r, "summary", "") or ""
+                        enriched_skills = getattr(r, "skills", []) or []
+                        enriched_experience = getattr(r, "experience", "") or ""
+                        if enriched_summary and len(enriched_summary) > len(entity.summary or ""):
+                            entity.summary = enriched_summary
+                        if enriched_skills:
+                            entity.skills = enriched_skills
+                        if enriched_experience and len(enriched_experience) > len(entity.experience or ""):
+                            entity.experience = enriched_experience
+                        if getattr(r, "education", ""):
+                            entity.education = r.education
+                        if getattr(r, "certifications", ""):
+                            entity.certifications = r.certifications
+                db.add(
+                    MatchEvaluation(
+                        task_id=task.id,
+                        entity_type="job" if task_type == SearchType.jobs else "candidate",
+                        entity_id=entity.id,
+                        score=r.match_score,
+                        reason=r.match_reason or "",
+                    )
+                )
+            await db.commit()
+        except Exception as exc:  # noqa: BLE001 - task failure is recorded, not raised
+            task.status = TaskStatus.failed.value
+            task.error = str(exc)
+            await db.commit()
+
+
+@router.get("/tasks/{task_id}", response_model=TaskStatusResponse)
+async def get_task(task_id: str, db: AsyncSession = Depends(get_db)) -> TaskStatusResponse:
+    task = await db.get(SearchTask, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return TaskStatusResponse(
+        task_id=task.id,
+        type=SearchType(task.type),
+        status=TaskStatus(task.status),
+        workflow_state=task.workflow_state,
+        created_at=task.created_at,
+        started_at=task.started_at,
+        completed_at=task.completed_at,
+        error=task.error,
+    )
+
+
+@router.get("/tasks/{task_id}/results", response_model=SearchTaskResult)
+async def get_task_results(
+    task_id: str, db: AsyncSession = Depends(get_db)
+) -> SearchTaskResult:
+    task = await db.get(SearchTask, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # Load match evaluations for this task, joined with the underlying
+    # entity (job or candidate).
+    from app.models.orm import Candidate, Job, MatchEvaluation
+
+    evals = (
+        (
+            await db.execute(
+                select(MatchEvaluation)
+                .where(MatchEvaluation.task_id == task_id)
+                .order_by(MatchEvaluation.score.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    # Determine entity type from the first eval.
+    entity_type = evals[0].entity_type if evals else "job"
+
+    results: list[MatchResult] = []
+    for ev in evals:
+        if entity_type == "candidate":
+            entity = await db.get(Candidate, ev.entity_id)
+        else:
+            entity = await db.get(Job, ev.entity_id)
+        if entity is None:
+            continue
+        if entity_type == "candidate":
+            from app.models.schemas import CandidateMatchResult
+            from app.services.credibility import assess_credibility
+
+            cred = assess_credibility({
+                "name": entity.name,
+                "headline": entity.headline or "",
+                "skills": entity.skills or [],
+                "experience": entity.experience or "",
+            })
+
+            results.append(
+                CandidateMatchResult(
+                    id=entity.id,
+                    title=entity.name,
+                    subtitle=entity.headline,
+                    location=entity.location,
+                    source=entity.source,
+                    source_url=entity.source_url,
+                    match_score=ev.score,
+                    match_reason=ev.reason,
+                    evidence=[],
+                    gaps=[],
+                    summary=entity.summary,
+                    skills=entity.skills or [],
+                    experience=entity.experience,
+                    education=entity.education,
+                    certifications=entity.certifications,
+                    credibility=cred.to_dict(),
+                )
+            )
+        else:
+            results.append(
+                MatchResult(
+                    id=entity.id,
+                    title=entity.title,
+                    subtitle=entity.company,
+                    location=entity.location,
+                    source=entity.source,
+                    source_url=entity.source_url,
+                    match_score=ev.score,
+                    match_reason=ev.reason,
+                    evidence=[],
+                    gaps=[],
+                )
+            )
+
+    return SearchTaskResult(
+        task_id=task.id,
+        status=TaskStatus(task.status),
+        results=results,
+        summary=f"{len(results)} ranked results",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Browser sessions
+# ---------------------------------------------------------------------------
+
+
+@router.post("/browser/sessions", status_code=201)
+async def create_browser_session() -> BrowserSessionView:
+    session_id = str(uuid.uuid4())
+    try:
+        await browser_service.create_session(session_id)
+    except BrowserError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return BrowserSessionView(session_id=session_id, status="idle")
+
+
+@router.post("/browser/{session_id}/takeover", response_model=BrowserSessionView)
+async def browser_takeover(
+    session_id: str, req: BrowserTakeoverRequest
+) -> BrowserSessionView:
+    try:
+        session = await browser_service.get_session(session_id)
+    except BrowserError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if req.action == "status":
+        return BrowserSessionView(session_id=session_id, status="running")
+    if req.action == "return":
+        return BrowserSessionView(session_id=session_id, status="agent")
+    # start: mark that a human is taking over
+    return BrowserSessionView(session_id=session_id, status="human", needs_human=True)
+
+
+@router.get("/browser/{session_id}/observe", response_model=BrowserSessionView)
+async def browser_observe(session_id: str) -> BrowserSessionView:
+    try:
+        session = await browser_service.get_session(session_id)
+        result = await session.observe()
+    except BrowserError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return BrowserSessionView(
+        session_id=session_id,
+        status="running",
+        url=result.url,
+        title=result.title,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Approvals
+# ---------------------------------------------------------------------------
+
+
+@router.post("/approvals/{approval_id}")
+async def decide_approval(approval_id: str, req: ApprovalRequest) -> dict:
+    """Record an approval decision.
+
+    Phase 1 stores no pending approvals yet; this endpoint validates the
+    decision shape and returns a stub. The policy engine (Milestone 5) will
+    wire this to real pending actions.
+    """
+    if req.decision not in (ApprovalDecision.approve, ApprovalDecision.reject):
+        raise HTTPException(status_code=422, detail="Invalid decision")
+    return {
+        "approval_id": approval_id,
+        "decision": req.decision.value,
+        "status": "processed",
+        "note": req.note,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------
+
+
+@router.get("/health")
+async def health() -> dict:
+    return {"status": "ok", "service": "career-agent-api", "time": datetime.utcnow().isoformat()}

@@ -1,0 +1,23 @@
+# Steel self-hosted browser service
+#
+# Reference container config for running Steel locally. Steel itself ships as
+# `steel-dev/steel-browser`. This file documents the intended deployment shape;
+# adjust the image/tag to match your Steel version.
+#
+#   docker compose -f infra/steel/docker-compose.steel.yml up -d
+
+services:
+  steel:
+    image: steel-dev/steel-browser:latest
+    container_name: career-steel
+    env_file:
+      - .env.steel
+    ports:
+      - "3000:3000"           # Steel API (bind to 127.0.0.1 in production)
+      - "9222:9222"           # remote debugging, not exposed publicly
+    volumes:
+      - steel_profiles:/data/steel/profiles
+    restart: unless-stopped
+
+volumes:
+  steel_profiles:
