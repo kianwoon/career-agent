@@ -27,6 +27,13 @@ class Settings(BaseSettings):
     steel_api_url: str = "http://localhost:3000"
     steel_api_key: str = ""
 
+    # Browser session capture/replay (encrypted cookie storage).
+    # 32-byte (64 hex chars) AES-256 key for encrypting stored sessions.
+    # Set via env: SESSION_ENCRYPTION_KEY. Derive if empty (dev only, warn).
+    session_encryption_key: str = ""
+    # Domain scoping for captured sessions (comma-separated).
+    session_domains: list[str] = ["linkedin.com", "www.linkedin.com"]
+
     # LLM (optional; not required for Phase 1 deterministic path)
     openai_api_key: str = ""
     llm_model: str = "gpt-4o-mini"

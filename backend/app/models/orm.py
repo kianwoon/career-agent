@@ -113,6 +113,14 @@ class BrowserSession(Base):
     region: Mapped[str | None] = mapped_column(String(100), nullable=True)
     steel_session_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="idle")
+    # Encrypted Playwright storage_state (cookies + localStorage). Base64 blob.
+    session_state: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Metadata for session lifecycle (set at capture time).
+    captured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    domains: Mapped[list] = mapped_column(JSON, default=list)
+    # Short human-readable note e.g. "linkedin-signed-in".
+    session_label: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

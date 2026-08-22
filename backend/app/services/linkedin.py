@@ -81,6 +81,66 @@ async def _connect() -> tuple[Any, Any]:
         raise BrowserError(f"Failed to connect to Brave CDP at {BRAVE_CDP_URL}: {exc}") from exc
 
 
+async def _connect_with_session(
+    session_state_blob: str | None = None,
+) -> tuple[Any, Any] | None:
+    """Try to connect via a stored session first (fresh Chromium, no Brave).
+
+    Falls back to CDP if no stored session is available.
+    Returns (playwright, page) or None if both methods fail.
+    """
+    from app.services.session import connect_with_stored_session
+
+    if session_state_blob:
+        try:
+            result = await connect_with_stored_session(
+                session_state_blob,
+                "https://www.linkedin.com/jobs/",
+            )
+            if result:
+                return result
+            logger.info("Stored session expired, falling back to CDP")
+        except Exception as exc:
+            logger.warning("Stored session connect failed: %s", exc)
+
+    return None
+
+
+async def _connect_with_best_session() -> tuple[Any, Any] | None:
+    """Connect using the most recently captured stored session, else CDP."""
+    # Load the newest captured session blob from the DB.
+    try:
+        from sqlalchemy import select
+
+        from app.db import async_session
+        from app.models.orm import BrowserSession
+
+        async with async_session() as db:
+            row = (
+                await db.execute(
+                    select(BrowserSession)
+                    .where(BrowserSession.session_state.isnot(None))
+                    .order_by(BrowserSession.captured_at.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            blob = row.session_state if row else None
+    except Exception as exc:
+        logger.warning("Could not load stored session: %s", exc)
+        blob = None
+
+    if blob:
+        result = await _connect_with_session(blob)
+        if result:
+            return result
+
+    # Fallback: Brave CDP.
+    try:
+        return await _connect()
+    except BrowserError:
+        return None, None
+
+
 async def _extract_jobs(page: Any) -> list[dict[str, Any]]:
     """Extract structured jobs from the LinkedIn job cards list."""
     jobs: list[dict[str, Any]] = []
@@ -207,7 +267,10 @@ async def _extract_jobs_with_details(
 
 
 async def search_linkedin_jobs(query: str, location: str | None = None) -> dict[str, Any]:
-    """Run a LinkedIn job search through the authenticated Brave session.
+    """Run a LinkedIn job search through an authenticated browser session.
+
+    Uses the captured/replayed session (fresh Chromium + stored cookies) when
+    available; otherwise falls back to the Brave CDP connection.
 
     Returns:
         {
@@ -216,7 +279,14 @@ async def search_linkedin_jobs(query: str, location: str | None = None) -> dict[
           "human_reason": str | None,
         }
     """
-    pw, page = await _connect()
+    # Prefer a stored (encrypted, replayed) session — no Brave needed.
+    pw, page = await _connect_with_best_session()
+    if pw is None or page is None:
+        return {
+            "raw_results": [],
+            "needs_human": True,
+            "human_reason": "No authenticated browser session available (capture one or connect Brave CDP)",
+        }
     try:
         # Result cache: avoid re-hitting LinkedIn for the same query.
         cached = query_cache.get(query, location)

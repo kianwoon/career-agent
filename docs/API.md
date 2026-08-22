@@ -56,6 +56,8 @@ API_RATE_LIMIT_PER_MIN=30      # default when no ":N" suffix
 | GET | `/api/v1/tasks/{task_id}` | Get task status |
 | GET | `/api/v1/tasks/{task_id}/results` | Get ranked results |
 | POST | `/api/v1/browser/sessions` | Create a browser session |
+| POST | `/api/v1/browser/{session_id}/capture` | Capture signed-in cookies (encrypted) |
+| POST | `/api/v1/browser/{session_id}/replay` | Replay captured session in fresh Chromium |
 | POST | `/api/v1/browser/{session_id}/takeover` | Human takeover control |
 | GET | `/api/v1/browser/{session_id}/observe` | Observe current browser page |
 | POST | `/api/v1/approvals/{approval_id}` | Approve/reject a pending action |
@@ -318,6 +320,35 @@ These let callers manage the underlying browser and request human takeover.
 { "session_id": "70415271-7265-4510-b16f-bd8db5b76b8a", "status": "idle" }
 ```
 
+### Capture signed-in session (cookies)
+
+**`POST /api/v1/browser/{session_id}/capture`**
+
+Reads the live signed-in browser's cookies + localStorage (via CDP), encrypts
+them (AES-256-GCM), and stores them in Postgres. The raw cookies are **never**
+returned or logged.
+
+```json
+{ "session_id": "...", "status": "captured" }
+```
+
+Requires the signed-in browser to be running on the CDP port at capture time.
+After capture, the session is **portable** — replay works without the original
+browser.
+
+### Replay captured session
+
+**`POST /api/v1/browser/{session_id}/replay`**
+
+Decrypts the stored session and launches a **fresh headless Chromium** with the
+cookies applied, then verifies the login actually works.
+
+```json
+{ "session_id": "...", "status": "ready" }              // logged in OK
+{ "session_id": "...", "status": "needs_human",          // cookies expired
+  "needs_human": true, "reason": "Session replay did not stay logged in..." }
+```
+
 ### Human takeover
 
 **`POST /api/v1/browser/{session_id}/takeover`** with body:
@@ -331,6 +362,17 @@ These let callers manage the underlying browser and request human takeover.
 ### Observe
 
 **`GET /api/v1/browser/{session_id}/observe`** → current URL + title.
+
+### Session security (spec §7 + §15)
+
+- Cookies are **encrypted at rest** (AES-256-GCM) with a key from
+  `SESSION_ENCRYPTION_KEY` (env-only).
+- Raw cookies are never logged or returned by any endpoint.
+- Sessions are scoped per user (`user_id`).
+- Replay verifies login; expired sessions return `needs_human` rather than
+  silently failing.
+- The browser adapters prefer the stored session (fresh Chromium) and only
+  fall back to CDP when no captured session exists.
 
 ---
 

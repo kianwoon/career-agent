@@ -254,7 +254,10 @@ async def _extract_candidates_with_details(
 
 
 async def search_linkedin_people(query: str) -> dict[str, Any]:
-    """Run a LinkedIn people search through the authenticated Brave session.
+    """Run a LinkedIn people search through an authenticated browser session.
+
+    Uses the captured/replayed stored session (fresh Chromium) when available;
+    otherwise falls back to the Brave CDP connection.
 
     Returns:
         {
@@ -263,7 +266,15 @@ async def search_linkedin_people(query: str) -> dict[str, Any]:
           "human_reason": str | None,
         }
     """
-    pw, page = await _connect()
+    from app.services.linkedin import _connect_with_best_session
+
+    pw, page = await _connect_with_best_session()
+    if pw is None or page is None:
+        return {
+            "raw_results": [],
+            "needs_human": True,
+            "human_reason": "No authenticated browser session available (capture one or connect Brave CDP)",
+        }
     try:
         # Result cache: avoid re-hitting LinkedIn for the same query.
         cached = query_cache.get(f"people:{query}", None)

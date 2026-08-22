@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
 
 from app.agent.graph import supervisor_graph
 from app.agent.nodes import AgentState
@@ -335,12 +338,21 @@ async def get_task_results(
 
 
 @router.post("/browser/sessions", status_code=201)
-async def create_browser_session() -> BrowserSessionView:
+async def create_browser_session(db: AsyncSession = Depends(get_db)) -> BrowserSessionView:
+    from app.models.orm import BrowserSession
+
     session_id = str(uuid.uuid4())
-    try:
-        await browser_service.create_session(session_id)
-    except BrowserError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    # Persist a DB row so capture/replay can find it by id.
+    user_id = await _default_user_id(db)
+    db.add(
+        BrowserSession(
+            id=session_id,
+            user_id=user_id,
+            profile_name="default",
+            status="idle",
+        )
+    )
+    await db.commit()
     return BrowserSessionView(session_id=session_id, status="idle")
 
 
@@ -372,6 +384,68 @@ async def browser_observe(session_id: str) -> BrowserSessionView:
         status="running",
         url=result.url,
         title=result.title,
+    )
+
+
+@router.post("/browser/{session_id}/capture", response_model=BrowserSessionView)
+async def browser_capture(session_id: str, db: AsyncSession = Depends(get_db)) -> BrowserSessionView:
+    """Capture the live signed-in browser's session state (cookies + localStorage).
+
+    Connects to the authenticated Brave instance via CDP, reads storage_state
+    for LinkedIn, encrypts it, and stores on the session row.
+    """
+    from app.models.orm import BrowserSession
+    from app.services.session import capture_from_cdp
+
+    session = await db.get(BrowserSession, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Browser session not found")
+
+    try:
+        await capture_from_cdp(session)
+        await db.commit()
+    except Exception as exc:
+        logger.warning("Capture failed for %s: %s", session_id, exc)
+        raise HTTPException(status_code=500, detail=f"Capture failed: {exc}") from exc
+
+    return BrowserSessionView(
+        session_id=session.id,
+        status="captured",
+        url="https://www.linkedin.com/",
+        title="Captured session",
+    )
+
+
+@router.post("/browser/{session_id}/replay", response_model=BrowserSessionView)
+async def browser_replay(session_id: str, db: AsyncSession = Depends(get_db)) -> BrowserSessionView:
+    """Replay a captured session in a fresh headless Chromium and verify login."""
+    from app.models.orm import BrowserSession
+    from app.services.session import replay_session
+
+    session = await db.get(BrowserSession, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Browser session not found")
+    if not session.session_state:
+        raise HTTPException(status_code=409, detail="Session has no captured state — capture first")
+
+    try:
+        result = await replay_session(session)
+    except Exception as exc:
+        logger.warning("Replay failed for %s: %s", session_id, exc)
+        raise HTTPException(status_code=500, detail=f"Replay failed: {exc}") from exc
+
+    if result == "logged_in":
+        return BrowserSessionView(
+            session_id=session.id,
+            status="ready",
+            url="https://www.linkedin.com/feed/",
+            title="Replay OK — logged in",
+        )
+    return BrowserSessionView(
+        session_id=session.id,
+        status="needs_human",
+        needs_human=True,
+        reason="Session replay did not stay logged in (cookies expired?) — re-capture or sign in manually",
     )
 
 
