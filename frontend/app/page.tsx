@@ -110,13 +110,15 @@ export default function Home() {
         addEvent(prev, "info", `Task created: ${task.task_id} (${task.status}).`)
       );
 
-      // Poll for results.
+      // Poll for results. Searches can take 1.5-3 min (LinkedIn navigation +
+      // profile extraction + LLM rerank), so poll up to ~4 minutes.
       let response;
-      for (let attempt = 0; attempt < 20; attempt++) {
-        await new Promise((r) => setTimeout(r, 1200));
+      for (let attempt = 0; attempt < 100; attempt++) {
+        await new Promise((r) => setTimeout(r, 2500));
         response = await fetchTaskResults(task.task_id);
         if (response.status === "completed") break;
         if (response.status === "failed") break;
+        if (response.status === "paused") break;
       }
 
       if (!response) {
@@ -124,6 +126,17 @@ export default function Home() {
       }
       if (response.status === "failed") {
         throw new Error("Backend task failed.");
+      }
+      if (response.status === "paused") {
+        setPhase("error");
+        setTimeline((prev) =>
+          addEvent(
+            prev,
+            "warn",
+            "Search paused — the browser session needs human attention (MFA/CAPTCHA/expired login)."
+          )
+        );
+        return;
       }
 
       setPhase("completed");
