@@ -132,26 +132,30 @@ async def _connect_with_best_session() -> tuple[Any, Any] | None:
     except Exception as exc:
         logger.warning("Could not load stored session: %s", exc)
 
-    if row is not None:
-        # Auto-refresh if near expiry AND the live browser is reachable.
+    if row is not None and row.session_state:
+        # Try the stored session first (fresh Chromium, no Brave needed).
+        # If the session is expired, connect_with_stored_session will return
+        # None, and we'll fall through to the CDP refresh attempt.
+        result = await _connect_with_session(row.session_state)
+        if result:
+            return result
+        logger.info("Stored session %s expired or invalid — attempting refresh via CDP", row.id)
+        # If connected via CDP is available, try to refresh the session.
         try:
-            from app.services.session import refresh_from_cdp, session_needs_refresh
+            from app.services.session import refresh_from_cdp
 
-            if session_needs_refresh(row):
-                logger.info("Stored session %s near-expiry — attempting refresh via CDP", row.id)
-                async with async_session() as db:
-                    fresh = await db.get(BrowserSession, row.id)
-                    if fresh is not None and await refresh_from_cdp(fresh):
-                        await db.commit()
-                        row = fresh
+            async with async_session() as db:
+                fresh = await db.get(BrowserSession, row.id)
+                if fresh is not None and await refresh_from_cdp(fresh):
+                    await db.commit()
+                    row = fresh
+                    blob = row.session_state
+                    if blob:
+                        result = await _connect_with_session(blob)
+                        if result:
+                            return result
         except Exception as exc:
             logger.warning("Auto-refresh skipped: %s", exc)
-
-        blob = row.session_state
-        if blob:
-            result = await _connect_with_session(blob)
-            if result:
-                return result
 
     # Fallback: Brave CDP.
     try:
