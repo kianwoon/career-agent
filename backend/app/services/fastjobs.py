@@ -39,6 +39,7 @@ Job detail DOM (`#jobad`):
 from __future__ import annotations
 
 import logging
+import os
 import random
 import re
 from typing import Any
@@ -106,10 +107,6 @@ async def _connect() -> tuple[Any, Any]:
         logger.warning("FastJobs stored-session connect failed: %s", exc)
 
     # 2. Fall back to CDP (persistent browser that already passed Cloudflare).
-    import os
-
-    from playwright.async_api import async_playwright
-
     cdp_url = os.getenv("BRAVE_CDP_URL", "http://localhost:9222")
     auth_header = os.getenv("CDP_AUTH_HEADER", "")
     headers = None
@@ -188,8 +185,8 @@ async def _extract_jobs(page: Any) -> list[dict[str, Any]]:
                     t = (await tags_el.nth(j).inner_text()).strip()
                     if t:
                         tags.append(t)
-                except Exception:
-                    continue
+                except Exception as exc:
+                    logger.debug("Skipping FastJobs tag %s on card %s: %s", j, i, exc)
 
             href = await card.get_attribute("href")
             job_id = await card.get_attribute("data-job-id")
