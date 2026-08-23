@@ -12,6 +12,7 @@ allows durable task state and resume.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, TypedDict
 
@@ -73,51 +74,124 @@ def understand(state: AgentState) -> AgentState:
 
 
 def plan_search(state: AgentState) -> AgentState:
-    """PLAN SEARCH STRATEGY: decide sources and query terms."""
-    source = "linkedin" if "linkedin" in (state.get("query") or "").lower() else "jobs_site"
+    """PLAN SEARCH STRATEGY: decide sources and query terms.
+
+    For job searches we query multiple sources in parallel (LinkedIn +
+    MyCareersFuture + FastJobs). The ``sources`` list is recorded in the
+    timeline for observability but is not consumed by subsequent nodes (they
+    see only the merged ``raw_results``).
+    """
+    sources = ["linkedin", "mycareersfuture", "fastjobs"]
+    source_label = "+".join(sources)
     return {
         **state,
-        "timeline": _log(state, "PLAN SEARCH", f"Chose source={source}, query={state.get('query')}"),
+        "timeline": _log(state, "PLAN SEARCH", f"Sources={source_label}, query={state.get('query')}"),
     }
 
 
+async def _safe_search(
+    fn: Any,
+    query: str,
+    location: str | None,
+) -> dict[str, Any]:
+    """Call a search adapter and normalize failures into the adapter contract.
+
+    Adapters may raise; ``run_search`` treats an exception the same as a
+    blocked source (empty results + human_reason) so one failing source never
+    takes down the other.
+    """
+    try:
+        result = await fn(query, location)
+        return result or {}
+    except Exception as exc:
+        return {
+            "raw_results": [],
+            "needs_human": True,
+            "human_reason": f"{getattr(fn, '__name__', 'adapter')} failed: {exc}",
+        }
+
+
 async def run_search(state: AgentState) -> AgentState:
-    """RUN SEARCH: invoke the browser/search adapter for the source."""
+    """RUN SEARCH: invoke all job-search adapters and merge the results.
+
+    Job searches hit LinkedIn (authenticated browser), MyCareersFuture
+    (public API), and FastJobs (browser) in parallel. Candidate searches
+    delegate to the LinkedIn People adapter only.
+    """
     query = state.get("query", "")
     location = state.get("location")
     task_type = state.get("type")
 
-    # Jobs -> LinkedIn adapter (authenticated Brave session).
+    # -------------------------------------------------------
+    # Jobs -> run LinkedIn + MyCareersFuture + FastJobs in parallel
+    # -------------------------------------------------------
     if task_type == SearchType.jobs:
+        from app.services.fastjobs import search_fastjobs_jobs
         from app.services.linkedin import search_linkedin_jobs
+        from app.services.mycareersfuture import search_mycareersfuture_jobs
 
-        try:
-            result = await search_linkedin_jobs(query, location)
-            raw = result.get("raw_results", [])
-            needs_human = result.get("needs_human", False)
-            human_reason = result.get("human_reason")
-            detail = (
-                f"LinkedIn search found {len(raw)} jobs"
-                if not needs_human
-                else f"LinkedIn blocked: {human_reason}"
-            )
-            return {
-                **state,
-                "raw_results": raw,
-                "needs_human": needs_human,
-                "human_reason": human_reason,
-                "timeline": _log(state, "RUN SEARCH", detail),
-            }
-        except Exception as exc:
+        li_result, mcf_result, fj_result = await asyncio.gather(
+            _safe_search(search_linkedin_jobs, query, location),
+            _safe_search(search_mycareersfuture_jobs, query, location),
+            _safe_search(search_fastjobs_jobs, query, location),
+        )
+
+        raw: list[dict[str, Any]] = []
+        timeline_events: list[str] = []
+
+        li_raw = li_result.get("raw_results", [])
+        li_ok = not li_result.get("needs_human", False) and li_raw
+        if li_ok:
+            raw.extend(li_raw)
+            timeline_events.append(f"LinkedIn: {len(li_raw)} jobs")
+        else:
+            timeline_events.append(f"LinkedIn blocked: {li_result.get('human_reason', 'unknown')}")
+
+        mcf_raw = mcf_result.get("raw_results", [])
+        mcf_ok = not mcf_result.get("needs_human", False) and mcf_raw
+        if mcf_ok:
+            raw.extend(mcf_raw)
+            timeline_events.append(f"MyCareersFuture: {len(mcf_raw)} jobs")
+        else:
+            timeline_events.append(f"MyCareersFuture: {mcf_result.get('human_reason', 'no results')}")
+
+        fj_raw = fj_result.get("raw_results", [])
+        fj_ok = not fj_result.get("needs_human", False) and fj_raw
+        if fj_ok:
+            raw.extend(fj_raw)
+            timeline_events.append(f"FastJobs: {len(fj_raw)} jobs")
+        else:
+            timeline_events.append(f"FastJobs: {fj_result.get('human_reason', 'no results')}")
+
+        # Only flag a human bottleneck if ALL sources are blocked/failed.
+        all_blocked = not li_ok and not mcf_ok and not fj_ok
+        if all_blocked:
+            reasons = []
+            if li_result.get("human_reason"):
+                reasons.append(li_result["human_reason"])
+            if mcf_result.get("human_reason"):
+                reasons.append(mcf_result["human_reason"])
+            if fj_result.get("human_reason"):
+                reasons.append(fj_result["human_reason"])
             return {
                 **state,
                 "raw_results": [],
                 "needs_human": True,
-                "human_reason": f"LinkedIn search failed: {exc}",
-                "timeline": _log(state, "RUN SEARCH", f"LinkedIn search error: {exc}"),
+                "human_reason": "; ".join(reasons) if reasons else "All job sources failed",
+                "timeline": _log(state, "RUN SEARCH", " | ".join(timeline_events)),
             }
 
+        return {
+            **state,
+            "raw_results": raw,
+            "needs_human": False,
+            "human_reason": None,
+            "timeline": _log(state, "RUN SEARCH", " | ".join(timeline_events)),
+        }
+
+    # -------------------------------------------------------
     # Candidates -> LinkedIn People adapter (authenticated Brave session).
+    # -------------------------------------------------------
     if task_type == SearchType.candidates:
         from app.services.linkedin_people import search_linkedin_people
 

@@ -26,6 +26,43 @@ interface TimelineEvent {
   time: string;
 }
 
+/** Display metadata for every job-source connector the backend can return. */
+const SOURCE_META: Record<string, { label: string; short: string; color: string }> = {
+  linkedin: {
+    label: "LinkedIn",
+    short: "LI",
+    color: "#0a66c2",
+  },
+  mycareersfuture: {
+    label: "MyCareersFuture",
+    short: "MCF",
+    color: "#5e2ca5",
+  },
+  fastjobs: {
+    label: "FastJobs",
+    short: "FJ",
+    color: "#e87722",
+  },
+  linkedin_people: {
+    label: "LinkedIn People",
+    short: "LIP",
+    color: "#0a66c2",
+  },
+  seed: {
+    label: "Sample",
+    short: "SEED",
+    color: "#6b7280",
+  },
+};
+
+function sourceMeta(source: string) {
+  return SOURCE_META[source] ?? {
+    label: source || "Unknown",
+    short: (source || "?").slice(0, 3).toUpperCase(),
+    color: "#6b7280",
+  };
+}
+
 const PLACEHOLDER_QUERY = "senior frontend engineer, remote, TypeScript";
 const PLACEHOLDER_CANDIDATE_QUERY = "Java, Kafka, payments, microservices, banking";
 
@@ -59,6 +96,8 @@ export default function Home() {
   const [taskId, setTaskId] = useState<string | null>(null);
   const [results, setResults] = useState<SearchResult[]>([]);
   const [verdicts, setVerdicts] = useState<Record<string, Verdict>>({});
+  // Which sources are shown. Empty set = show all. Populated after a search.
+  const [activeSources, setActiveSources] = useState<Set<string>>(new Set());
   const [takeoverActive, setTakeoverActive] = useState(false);
   const [browserSession, setBrowserSession] = useState<BrowserSessionView | null>(null);
   const [sessionBusy, setSessionBusy] = useState(false);
@@ -75,6 +114,28 @@ export default function Home() {
 
   const isRunning = phase === "running";
   const judgedCount = Object.keys(verdicts).length;
+
+  /** Reset the source filter to show all sources present in a result set. */
+  function syncSourceFilter(newResults: SearchResult[]) {
+    setActiveSources(new Set(newResults.map((r) => r.source)));
+  }
+
+  /** Toggle a source in the filter (empty set means "show all"). */
+  function toggleSource(source: string) {
+    setActiveSources((prev) => {
+      const next = new Set(prev);
+      if (next.has(source)) {
+        next.delete(source);
+      } else {
+        next.add(source);
+      }
+      return next;
+    });
+  }
+
+  const shownResults = results.filter(
+    (r) => activeSources.size === 0 || activeSources.has(r.source)
+  );
 
   // Load past searches on mount.
   useEffect(() => {
@@ -151,6 +212,7 @@ export default function Home() {
 
       setPhase("completed");
       setResults(response.results ?? []);
+      syncSourceFilter(response.results ?? []);
       setTimeline((prev) =>
         addEvent(
           prev,
@@ -191,6 +253,7 @@ export default function Home() {
       if (response.status === "completed") {
         setPhase("completed");
         setResults(response.results ?? []);
+        syncSourceFilter(response.results ?? []);
         setTaskId(item.task_id);
         setMode(item.type);
         setQuery(item.query);
@@ -491,6 +554,37 @@ export default function Home() {
               </span>
             </div>
 
+            {results.length > 0 && (
+              <div className="source-distribution">
+                {Object.entries(
+                  results.reduce<Record<string, number>>((acc, r) => {
+                    acc[r.source] = (acc[r.source] || 0) + 1;
+                    return acc;
+                  }, {})
+                )
+                  .sort(([, a], [, b]) => b - a)
+                  .map(([source, count]) => {
+                    const meta = sourceMeta(source);
+                    const active = activeSources.size === 0 || activeSources.has(source);
+                    return (
+                      <button
+                        key={source}
+                        className={`source-chip${active ? "" : " muted"}`}
+                        onClick={() => toggleSource(source)}
+                        title={`${active ? "Hide" : "Show"} ${meta.label} results`}
+                      >
+                        <span
+                          className="source-dot"
+                          style={{ backgroundColor: meta.color }}
+                        />
+                        {meta.label}
+                        <span className="source-count">{count}</span>
+                      </button>
+                    );
+                  })}
+              </div>
+            )}
+
             {results.length === 0 ? (
               <div className="empty">
                 {phase === "running"
@@ -499,9 +593,13 @@ export default function Home() {
                     ? "Search failed — check the agent logs and try again."
                     : "Run a search to see ranked results here."}
               </div>
+            ) : shownResults.length === 0 ? (
+              <div className="empty">
+                No results match the selected sources — try toggling the filter chips above.
+              </div>
             ) : (
               <div className="results-list">
-                {results.map((r) => (
+                {shownResults.map((r) => (
                   <ResultCard
                     key={r.id}
                     result={r}
@@ -638,6 +736,7 @@ function ResultCard({
   const subtitle =
     result.subtitle ?? result.company ?? "Unknown";
   const location = result.location ?? "";
+  const source = sourceMeta(result.source);
 
   return (
     <article
@@ -650,6 +749,16 @@ function ResultCard({
           <span className="company">
             {subtitle}
             {location ? ` · ${location}` : ""}
+          </span>
+          <span className="result-source-row">
+            <span
+              className="source-badge"
+              style={{ backgroundColor: `${source.color}1a`, borderColor: source.color }}
+              title={`Source: ${source.label}`}
+            >
+              <span className="source-dot" style={{ backgroundColor: source.color }} />
+              {source.label}
+            </span>
           </span>
         </div>
         <span className={`score-badge ${scoreClass}`} title="Match score (0-100)">

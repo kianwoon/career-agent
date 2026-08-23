@@ -476,6 +476,79 @@ body {
   color: var(--text-muted);
 }
 
+/* ------------------------ source badges & filter ------------------ */
+
+.result-source-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.source-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  text-transform: uppercase;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  padding: 2px 9px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.source-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* Filter bar above the results list. */
+.source-distribution {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+
+.source-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 11px;
+  cursor: pointer;
+  transition: opacity 0.15s ease, border-color 0.15s ease;
+}
+
+.source-chip:hover {
+  border-color: var(--accent);
+}
+
+.source-chip.muted {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+
+.source-count {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
 .evidence-list {
   list-style: none;
   margin: 0 0 10px;
