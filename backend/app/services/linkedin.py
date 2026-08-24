@@ -126,11 +126,23 @@ async def _connect_with_best_session() -> tuple[Any, Any] | None:
          browser+profile that holds the login. This is the primary path on
          Koyeb and locally.
       2. Stored (encrypted) session replayed in a fresh Chromium — fallback
-         when no CDP browser is reachable.
+         when no CDP browser is reachable OR the CDP browser isn't logged in.
+
+    The CDP browser is only used if it's actually logged in to LinkedIn.
+    Otherwise we fall back to the stored session (which routes through the
+    residential proxy and holds valid cookies).
     """
-    # 1. Prefer CDP: the persistent browser is the one that's actually logged in.
+    # 1. Try CDP: the persistent browser is the one that's actually logged in.
     try:
-        return await _connect()
+        pw, page = await _connect()
+        if await _is_logged_in(page):
+            return pw, page
+        logger.info("CDP browser not logged in to LinkedIn, falling back to stored session")
+        try:
+            await page.close()
+            await pw.stop()
+        except Exception:
+            pass
     except BrowserError:
         logger.info("CDP browser unavailable, falling back to stored session")
 
@@ -161,6 +173,29 @@ async def _connect_with_best_session() -> tuple[Any, Any] | None:
         logger.info("Stored session %s expired or invalid", row.id)
 
     return None, None
+
+
+async def _is_logged_in(page: Any) -> bool:
+    """Check whether the connected browser is logged in to LinkedIn."""
+    try:
+        await page.goto(
+            "https://www.linkedin.com/feed/",
+            timeout=20_000,
+            wait_until="domcontentloaded",
+        )
+        url = page.url
+        title = await page.title()
+        logged_in = (
+            "/login" not in url
+            and "/uas/login" not in url
+            and "authwall" not in url
+            and "Sign in" not in title
+        )
+        logger.info("CDP LinkedIn login check: %s -> logged_in=%s", url, logged_in)
+        return logged_in
+    except Exception as exc:
+        logger.warning("CDP login check failed: %s", exc)
+        return False
 
 
 async def _extract_jobs(page: Any) -> list[dict[str, Any]]:
