@@ -12,8 +12,54 @@ set -e
 PROFILE_DIR="${BROWSER_PROFILE_DIR:-/data/browser-profile}"
 CDP_PORT="${CDP_PORT:-9222}"
 API_PORT="${API_PORT:-8000}"
+# Residential proxy via Cloudflare: the Mac exposes an HTTP CONNECT proxy on
+# cdp-proxy.draftproof.app (through the Cloudflare tunnel). cloudflared access
+# tcp creates a LOCAL TCP pipe on this port that forwards to that hostname.
+PROXY_LOCAL_PORT="${PROXY_LOCAL_PORT:-1080}"
+CDP_PROXY_HOSTNAME="${CDP_PROXY_HOSTNAME:-cdp-proxy.draftproof.app}"
 
 mkdir -p "$PROFILE_DIR"
+
+# ---------------------------------------------------------------------------
+# 1. Residential proxy: connect to the Mac's HTTP CONNECT proxy via Cloudflare.
+#    cloudflared access tcp creates a local TCP pipe (localhost:$PROXY_LOCAL_PORT)
+#    that tunnels through Cloudflare to http-proxy.py on the Mac (home IP).
+#    Chromium uses it as an HTTP proxy with PROXY_USERNAME/PROXY_PASSWORD.
+# ---------------------------------------------------------------------------
+PROXY_SETUP=0
+if command -v cloudflared >/dev/null 2>&1 && [ -n "${CDP_PROXY_HOSTNAME:-}" ]; then
+  echo "=== Starting cloudflared access tcp -> $CDP_PROXY_HOSTNAME (localhost:$PROXY_LOCAL_PORT) ==="
+  cloudflared access tcp \
+    --hostname "$CDP_PROXY_HOSTNAME" \
+    --url "localhost:$PROXY_LOCAL_PORT" \
+    > /tmp/cloudflared-access.log 2>&1 &
+  CLOUDFLARED_PID=$!
+  echo "cloudflared access PID $CLOUDFLARED_PID"
+  # Wait for the local TCP pipe to accept connections.
+  for i in $(seq 1 20); do
+    if (exec 3<>"/dev/tcp/127.0.0.1/$PROXY_LOCAL_PORT") 2>/dev/null; then
+      exec 3>&- 3<&-
+      echo "Proxy pipe ready on localhost:$PROXY_LOCAL_PORT after ${i}s"
+      PROXY_SETUP=1
+      break
+    fi
+    sleep 1
+  done
+fi
+
+# The proxy URL Chromium will use. If we set up the access pipe, use it;
+# otherwise fall back to PROXY_URL env (e.g. a real residential proxy service).
+PROXY_URL_FINAL=""
+if [ "$PROXY_SETUP" = "1" ]; then
+  PROXY_URL_FINAL="http://127.0.0.1:$PROXY_LOCAL_PORT"
+elif [ -n "${PROXY_URL:-}" ]; then
+  PROXY_URL_FINAL="$PROXY_URL"
+fi
+if [ -n "$PROXY_URL_FINAL" ]; then
+  echo "PROXY_URL=$PROXY_URL_FINAL"
+  echo "PROXY_USERNAME=${PROXY_USERNAME:-}"
+  echo "PROXY_PASSWORD=${PROXY_PASSWORD:+<set>}"
+fi
 
 echo "=== Starting persistent headless Chromium (CDP :$CDP_PORT) ==="
 # Resolve the chromium binary installed by playwright.
@@ -24,14 +70,17 @@ if [ -z "$CHROME_BIN" ]; then
 fi
 echo "Using chromium: $CHROME_BIN"
 
-# Optional proxy: route ALL browser traffic through a remote IP (e.g.
-# residential proxy). Set PROXY_URL=socks5://host:port (Chromium's
-# --proxy-server does NOT accept credentials; use an unauthenticated endpoint
-# or whitelist by IP with microsocks -w).
+# Chromium --proxy-server does NOT accept inline credentials. But when the
+# API connects via CDP it drives Chromium; the proxy auth is applied by
+# Playwright's launch(proxy={...}) in session.py/browser.py. For the
+# persistent CDP Chromium, we pass --proxy-server without creds — the auth is
+# handled by Playwright when it launches its OWN browser for replay/capture.
+# The persistent CDP browser is used for human-takeover/capture; searches use
+# Playwright-launched browsers that DO get the proxy creds.
 PROXY_ARGS=()
-if [ -n "${PROXY_URL:-}" ]; then
-  echo "Using proxy: $PROXY_URL"
-  PROXY_ARGS+=(--proxy-server="$PROXY_URL")
+if [ -n "$PROXY_URL_FINAL" ]; then
+  echo "Chromium using proxy: $PROXY_URL_FINAL"
+  PROXY_ARGS+=(--proxy-server="$PROXY_URL_FINAL")
 fi
 
 "$CHROME_BIN" \

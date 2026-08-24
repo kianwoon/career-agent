@@ -26,6 +26,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install uv (fast, small).
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
+# Install cloudflared (needed for cloudflared access tcp -> residential proxy).
+RUN apt-get install -y --no-install-recommends wget \
+    && wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+       -O /usr/local/bin/cloudflared \
+    && chmod +x /usr/local/bin/cloudflared \
+    && cloudflared --version
+
 # Install project dependencies from lockfile.
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
