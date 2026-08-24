@@ -50,6 +50,7 @@ def _configure_handlers() -> None:
         "app.services.pacing",
         "app.services.cache",
         "app.services.linkedin",
+        "app.services.linkedin_people",
         "app.services.browser",
         "app.agent",
         "app.api",
