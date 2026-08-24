@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.config import get_settings
+from app.services.proxy import proxy_config as _proxy_config
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +74,7 @@ class BrowserSession:
             self._pw = pw
             return
         self._pw = pw
-        browser = await pw.chromium.launch(headless=True)
+        browser = await pw.chromium.launch(headless=True, proxy=_proxy_config())
         self._page = await browser.new_page()
         logger.info("Browser session %s started", self.session_id)
 

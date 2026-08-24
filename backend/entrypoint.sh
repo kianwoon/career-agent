@@ -24,6 +24,16 @@ if [ -z "$CHROME_BIN" ]; then
 fi
 echo "Using chromium: $CHROME_BIN"
 
+# Optional proxy: route ALL browser traffic through a remote IP (e.g.
+# residential proxy). Set PROXY_URL=socks5://host:port (Chromium's
+# --proxy-server does NOT accept credentials; use an unauthenticated endpoint
+# or whitelist by IP with microsocks -w).
+PROXY_ARGS=()
+if [ -n "${PROXY_URL:-}" ]; then
+  echo "Using proxy: $PROXY_URL"
+  PROXY_ARGS+=(--proxy-server="$PROXY_URL")
+fi
+
 "$CHROME_BIN" \
   --headless=new \
   --user-data-dir="$PROFILE_DIR" \
@@ -34,6 +44,7 @@ echo "Using chromium: $CHROME_BIN"
   --disable-software-rasterizer \
   --no-sandbox \
   --disable-features=TranslateUI \
+  "${PROXY_ARGS[@]}" \
   > /tmp/chrome.log 2>&1 &
 
 CHROME_PID=$!

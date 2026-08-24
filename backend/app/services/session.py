@@ -23,6 +23,7 @@ from typing import Any
 
 from app.models.orm import BrowserSession
 from app.services.encryption import decrypt_session_state, encrypt_session_state
+from app.services.proxy import proxy_config
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +112,7 @@ async def replay_session(session: BrowserSession) -> str:
 
     pw = await async_playwright().start()
     try:
-        browser = await pw.chromium.launch(headless=True)
+        browser = await pw.chromium.launch(headless=True, proxy=proxy_config())
         ctx = await browser.new_context()
         await ctx.add_cookies(state.get("cookies", []))
         page = await ctx.new_page()
@@ -220,7 +221,7 @@ async def connect_with_stored_session(
     state = json.loads(decrypt_session_state(session_state_blob))
     pw = await async_playwright().start()
     try:
-        browser = await pw.chromium.launch(headless=True)
+        browser = await pw.chromium.launch(headless=True, proxy=proxy_config())
         ctx = await browser.new_context()
         await ctx.add_cookies(state.get("cookies", []))
         page = await ctx.new_page()
