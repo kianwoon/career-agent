@@ -56,7 +56,9 @@ elif [ -n "${PROXY_URL:-}" ]; then
   PROXY_URL_FINAL="$PROXY_URL"
 fi
 if [ -n "$PROXY_URL_FINAL" ]; then
-  echo "PROXY_URL=$PROXY_URL_FINAL"
+  # Export so app.services.proxy.proxy_config() picks it up for Playwright.
+  export PROXY_URL="$PROXY_URL_FINAL"
+  echo "PROXY_URL=$PROXY_URL"
   echo "PROXY_USERNAME=${PROXY_USERNAME:-}"
   echo "PROXY_PASSWORD=${PROXY_PASSWORD:+<set>}"
 fi
@@ -70,18 +72,11 @@ if [ -z "$CHROME_BIN" ]; then
 fi
 echo "Using chromium: $CHROME_BIN"
 
-# Chromium --proxy-server does NOT accept inline credentials. But when the
-# API connects via CDP it drives Chromium; the proxy auth is applied by
-# Playwright's launch(proxy={...}) in session.py/browser.py. For the
-# persistent CDP Chromium, we pass --proxy-server without creds — the auth is
-# handled by Playwright when it launches its OWN browser for replay/capture.
-# The persistent CDP browser is used for human-takeover/capture; searches use
-# Playwright-launched browsers that DO get the proxy creds.
-PROXY_ARGS=()
-if [ -n "$PROXY_URL_FINAL" ]; then
-  echo "Chromium using proxy: $PROXY_URL_FINAL"
-  PROXY_ARGS+=(--proxy-server="$PROXY_URL_FINAL")
-fi
+# NOTE: the persistent CDP Chromium does NOT use the proxy — Chromium's
+# --proxy-server cannot pass credentials, and http-proxy requires auth.
+# Searches use Playwright-launched browsers (via session.py/browser.py) which
+# DO pass proxy credentials through PROXY_URL/PROXY_USERNAME/PROXY_PASSWORD.
+# The CDP browser is only for human takeover/capture and stays direct.
 
 "$CHROME_BIN" \
   --headless=new \
@@ -93,7 +88,6 @@ fi
   --disable-software-rasterizer \
   --no-sandbox \
   --disable-features=TranslateUI \
-  "${PROXY_ARGS[@]}" \
   > /tmp/chrome.log 2>&1 &
 
 CHROME_PID=$!
