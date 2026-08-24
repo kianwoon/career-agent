@@ -25,6 +25,9 @@ from app.services.pacing import pacing
 logger = logging.getLogger(__name__)
 
 BRAVE_CDP_URL = os.getenv("BRAVE_CDP_URL", "http://localhost:9222")
+# Optional auth header for CDP connections (e.g. "X-Auth-Token: abc123").
+# Format: "HeaderName: HeaderValue". Used for CDP tunnel auth.
+CDP_AUTH_HEADER = os.getenv("CDP_AUTH_HEADER", "")
 
 # Stable hooks discovered by probing the live people-search page.
 # Profile links are a[href*="/in/"]; each candidate card is the ancestor
@@ -58,7 +61,7 @@ async def _connect() -> tuple[Any, Any]:
     pw = None
     try:
         pw = await async_playwright().start()
-        browser = await pw.chromium.connect_over_cdp(BRAVE_CDP_URL)
+        browser = await pw.chromium.connect_over_cdp(BRAVE_CDP_URL, headers=_cdp_headers())
         ctx = browser.contexts[0]
         page = await ctx.new_page()
         return pw, page
@@ -66,6 +69,14 @@ async def _connect() -> tuple[Any, Any]:
         if pw:
             await pw.stop()
         raise BrowserError(f"Failed to connect to Brave CDP at {BRAVE_CDP_URL}: {exc}") from exc
+
+
+def _cdp_headers() -> dict[str, str] | None:
+    """Parse CDP_AUTH_HEADER ('Name: Value') into a headers dict, or None."""
+    if not CDP_AUTH_HEADER:
+        return None
+    name, _, value = CDP_AUTH_HEADER.partition(":")
+    return {name.strip(): value.strip()}
 
 
 async def _extract_candidates(page: Any) -> list[dict[str, Any]]:

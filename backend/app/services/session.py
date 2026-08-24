@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from datetime import UTC, datetime
 from typing import Any
 
@@ -25,10 +26,21 @@ from app.services.encryption import decrypt_session_state, encrypt_session_state
 
 logger = logging.getLogger(__name__)
 
-BRAVE_CDP_URL = "http://localhost:9222"  # same default as adapters
+BRAVE_CDP_URL = os.getenv("BRAVE_CDP_URL", "http://localhost:9222")  # same default as adapters
+# Optional auth header for CDP connections (e.g. "X-Auth-Token: abc123").
+# Format: "HeaderName: HeaderValue". Used for CDP tunnel auth.
+CDP_AUTH_HEADER = os.getenv("CDP_AUTH_HEADER", "")
 
 # Which session-state we keep per domain (Playwright storage_state format).
 STORAGE_STATE_DOMAINS = ["linkedin.com", "www.linkedin.com"]
+
+
+def _cdp_headers() -> dict[str, str] | None:
+    """Parse CDP_AUTH_HEADER ('Name: Value') into a headers dict, or None."""
+    if not CDP_AUTH_HEADER:
+        return None
+    name, _, value = CDP_AUTH_HEADER.partition(":")
+    return {name.strip(): value.strip()}
 
 
 async def capture_from_cdp(session: BrowserSession) -> BrowserSession:
@@ -42,7 +54,7 @@ async def capture_from_cdp(session: BrowserSession) -> BrowserSession:
 
     pw = await async_playwright().start()
     try:
-        browser = await pw.chromium.connect_over_cdp(BRAVE_CDP_URL)
+        browser = await pw.chromium.connect_over_cdp(BRAVE_CDP_URL, headers=_cdp_headers())
         ctx = browser.contexts[0]
         # Ensure a page exists on the target domain so cookies/localStorage load.
         page = await ctx.new_page()
