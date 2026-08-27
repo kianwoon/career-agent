@@ -138,11 +138,16 @@ async def wizard_start(
             logger.warning("Could not decrypt source session: %s", exc)
 
     start_url = source.base_url
-    wiz = WizardSession(source.id, req.flow_type or "login")
+    wiz = WizardSession(source.id, req.flow_type or "login", domain=source.domain)
     try:
         await wiz.start(start_url, storage_state)
     except Exception as exc:
-        raise HTTPException(502, f"Could not launch wizard browser: {exc}")
+        await wiz.close()
+        raise HTTPException(
+            502,
+            "Could not open wizard browser. Ensure the CDP browser bridge is "
+            f"reachable (BRAVE_CDP_URL). Details: {exc}",
+        )
 
     _wizards[wizard_id] = wiz
     return WizardStartResponse(wizard_id=wizard_id, mode=req.mode, start_url=start_url)

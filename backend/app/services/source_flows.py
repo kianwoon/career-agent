@@ -44,14 +44,16 @@ class WizardSession:
     the backend polls that buffer. Password fields are never recorded.
     """
 
-    def __init__(self, source_id: str, flow_type: str) -> None:
+    def __init__(self, source_id: str, flow_type: str, domain: str | None = None) -> None:
         self.source_id = source_id
         self.flow_type = flow_type
+        self.domain = domain
         self.pw = None
         self.browser = None
         self.context = None
         self.page = None
         self.events: list[dict[str, Any]] = []
+        self._cdp = False
 
     _INIT_SCRIPT = """
     () => {
@@ -96,11 +98,29 @@ class WizardSession:
     """
 
     async def start(self, start_url: str, storage_state: dict | None = None) -> None:
+        from app.services.session import BRAVE_CDP_URL, _cdp_headers
+
         self.pw = await async_playwright().start()
-        self.browser = await self.pw.chromium.launch(
-            headless=False, proxy=_proxy_config()
+        self._cdp = False
+        try:
+            # Preferred: drive the user's visible browser via CDP (works
+            # in a headless container — the browser runs on the user's Mac).
+            browser = await self.pw.chromium.connect_over_cdp(
+                BRAVE_CDP_URL, headers=_cdp_headers()
+            )
+            self._cdp = True
+        except Exception as exc:
+            logger.warning("CDP connect failed (%s); falling back to headed launch", exc)
+            browser = await self.pw.chromium.launch(
+                headless=False, proxy=_proxy_config()
+            )
+        self.browser = browser
+        # CDP: reuse the default context (real profile — already logged in).
+        self.context = (
+            browser.contexts[0]
+            if self._cdp and browser.contexts
+            else await browser.new_context(storage_state=storage_state)
         )
-        self.context = await self.browser.new_context(storage_state=storage_state)
         await self.context.add_init_script(self._INIT_SCRIPT)
         self.page = await self.context.new_page()
         await self.page.goto(start_url, timeout=45_000, wait_until="domcontentloaded")
@@ -119,18 +139,39 @@ class WizardSession:
         return fresh
 
     async def capture_state(self) -> dict[str, Any]:
-        """Grab cookies + final URL + page title snapshot for verification."""
+        """Grab cookies + final URL + page title snapshot for verification.
+
+        On CDP the default context holds the user's whole profile, so filter
+        cookies to the wizard's source domain.
+        """
         assert self.context and self.page
         state = await self.context.storage_state()
+        if self.domain:
+            state["cookies"] = [
+                c for c in state.get("cookies", [])
+                if self.domain in (c.get("domain") or "")
+            ]
+            state.setdefault("origins", [])
         return {"storage_state": state, "url": self.page.url, "title": await self.page.title()}
 
     async def close(self) -> None:
-        for closer in (self.context, self.browser):
+        # Close only our tab; never the user's browser.
+        try:
+            if self.page:
+                await self.page.close()
+        except Exception:
+            pass
+        if not self._cdp:
             try:
-                if closer:
-                    await closer.close()
+                if self.context:
+                    await self.context.close()
             except Exception:
                 pass
+        try:
+            if self.browser:
+                await self.browser.close()  # CDP: disconnects only
+        except Exception:
+            pass
         try:
             if self.pw:
                 await self.pw.stop()
