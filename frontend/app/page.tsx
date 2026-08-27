@@ -854,7 +854,7 @@ export default function Home() {
                         )}
                         {shotLoading && !shotError && !shotUrl && (
                           <div className="wizard-shot-loading">
-                            <span className="spinner" aria-hidden /> Starting browser on {s.domain}… (up to 30s)
+                            <span className="spinner" aria-hidden /> Loading {s.domain} in the secure browser… this can take up to 30s
                           </div>
                         )}
                         {shotError && (

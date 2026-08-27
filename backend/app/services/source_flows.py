@@ -77,7 +77,36 @@ class WizardSession:
         )
         self.page = await self.context.new_page()
         await self.page.goto(start_url, timeout=45_000, wait_until="domcontentloaded")
+        await self._wait_until_rendered()
         self.touch()
+
+    async def _wait_until_rendered(self, timeout_s: float = 20.0) -> None:
+        """Wait until the site's JS app has actually rendered content.
+
+        Many sites (React/Angular SPAs) serve a near-empty shell with a
+        'Loading…' placeholder; domcontentloaded fires long before real
+        content. Poll the body text until it's substantial (or timeout).
+        """
+        deadline = asyncio.get_event_loop().time() + timeout_s
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                info = await self.page.evaluate(
+                    """() => ({
+                      textLen: (document.body?.innerText || '').length,
+                      loading: /\\bloading\\b/i.test(
+                        (document.body?.innerText || '').slice(0, 400)
+                      ),
+                      nodes: document.body?.querySelectorAll('*').length || 0,
+                    })"""
+                )
+                # Consider it rendered when there's real text and enough DOM,
+                # and it isn't showing a bare "Loading…" placeholder.
+                if info.get("textLen", 0) > 200 and info.get("nodes", 0) > 150 and not info.get("loading"):
+                    return
+            except Exception:
+                pass  # navigation in flight
+            await asyncio.sleep(0.5)
+        logger.info("_wait_until_rendered timed out after %ss — continuing", timeout_s)
 
     def touch(self) -> None:
         self.last_activity = asyncio.get_event_loop().time()
@@ -94,12 +123,27 @@ class WizardSession:
     ) -> bytes | None:
         """Live PNG of the wizard page (optionally clipped + upscaled).
 
+        If the page still shows a bare loading placeholder, wait briefly for
+        the app to render so the preview isn't a blank frame.
+
         scale=2 uses the device scale factor for a sharper, phone-scannable
         shot (used for QR crops).
         """
         if self.page is None:
             return None
         try:
+            # Don't capture a "Loading…" shell — give the app a moment.
+            try:
+                bare = await self.page.evaluate(
+                    """() => {
+                      const t = (document.body?.innerText || '').trim();
+                      return t.length < 50 && /loading/i.test(t);
+                    }"""
+                )
+                if bare:
+                    await asyncio.wait_for(self._wait_until_rendered(10.0), timeout=12.0)
+            except Exception:
+                pass
             self.touch()
             return await self.page.screenshot(
                 type="png",
