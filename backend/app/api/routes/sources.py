@@ -277,6 +277,41 @@ async def wizard_click(source_id: str, req: WizardClick, mode: str = "login") ->
     return await wiz.click_at(req.x, req.y)
 
 
+class WizardType(BaseModel):
+    text: str = Field(..., min_length=1, max_length=500)
+
+
+@router.post("/{source_id}/wizard/type")
+async def wizard_type(source_id: str, req: WizardType, mode: str = "login") -> dict:
+    """Type into the focused element (click a field in the preview first)."""
+    wiz = await _wiz(source_id, mode)
+    return await wiz.type_text(req.text)
+
+
+class WizardKey(BaseModel):
+    key: str = Field(..., min_length=1, max_length=20)
+
+
+@router.post("/{source_id}/wizard/key")
+async def wizard_key(source_id: str, req: WizardKey, mode: str = "login") -> dict:
+    """Press a named key (Enter, Tab, Escape…) in the wizard browser."""
+    wiz = await _wiz(source_id, mode)
+    return await wiz.press_key(req.key)
+
+
+class WizardScroll(BaseModel):
+    x: int = Field(..., ge=0)
+    y: int = Field(..., ge=0)
+    delta_y: int = Field(...)
+
+
+@router.post("/{source_id}/wizard/scroll")
+async def wizard_scroll(source_id: str, req: WizardScroll, mode: str = "login") -> dict:
+    """Scroll the wizard page (wheel) at screenshot coordinates."""
+    wiz = await _wiz(source_id, mode)
+    return await wiz.scroll_at(req.x, req.y, req.delta_y)
+
+
 @router.post("/{source_id}/wizard/{mode}/complete", response_model=WizardCompleteResponse)
 async def wizard_complete(
     source_id: str,

@@ -423,6 +423,37 @@ class WizardSession:
         self.touch()
         return {"ok": True, "x": x, "y": y, "viewport": vp}
 
+    async def type_text(self, text: str) -> dict[str, Any]:
+        """Type into the currently-focused element (after a preview click).
+
+        Full remote-control path for CAPTCHA/MFA/anything: the user clicks a
+        field in the screenshot (focuses it server-side), then types here.
+        """
+        assert self.page, "wizard not started"
+        await page_keyboard_type(self.page, text)
+        self.touch()
+        return {"ok": True, "typed": len(text)}
+
+    async def press_key(self, key: str) -> dict[str, Any]:
+        """Press a named key (Enter, Tab, Escape…) in the remote browser."""
+        assert self.page, "wizard not started"
+        allowed = {"Enter", "Tab", "Escape", "Backspace", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"}
+        if key not in allowed:
+            return {"ok": False, "reason": f"key must be one of {sorted(allowed)}"}
+        await self.page.keyboard.press(key)
+        await asyncio.sleep(1.0)
+        self.touch()
+        return {"ok": True, "key": key}
+
+    async def scroll_at(self, x: int, y: int, delta_y: int) -> dict[str, Any]:
+        """Scroll the remote page (wheel) at screenshot coordinates."""
+        assert self.page, "wizard not started"
+        await self.page.mouse.move(x, y)
+        await self.page.mouse.wheel(0, delta_y)
+        await asyncio.sleep(0.8)
+        self.touch()
+        return {"ok": True, "delta_y": delta_y}
+
     async def mark_logged_in(self) -> None:
         self.logged_in = True
         self.touch()
@@ -558,6 +589,19 @@ MAX_PAGES = 5
 # session has expired and a human must re-login via the wizard.
 _LOGIN_URL_PATTERNS = ("login", "signin", "sign-in", "log-in", "auth", "sso")
 _LOGIN_TEXT_PATTERNS = ("sign in", "log in", "login to", "sign up")
+
+
+async def page_keyboard_type(page: Any, text: str) -> None:
+    """Type text via the keyboard API with human-like jitter.
+
+    keyboard.type() handles every character (press() rejects '@' etc.).
+    """
+    import random
+
+    for word in text.split(" "):
+        await page.keyboard.type(word, delay=random.uniform(60, 160))
+        await page.keyboard.type(" ", delay=50)
+        await asyncio.sleep(random.uniform(0.05, 0.2))
 
 
 async def _looks_logged_out(page: Any, base_domain: str) -> str | None:

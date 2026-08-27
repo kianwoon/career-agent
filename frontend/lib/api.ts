@@ -143,6 +143,38 @@ export async function wizardClick(
   return postJson(`${base}/api/v1/sources/${sourceId}/wizard/click?mode=${mode}`, { x, y });
 }
 
+/** Type into the focused element of the wizard browser (click a field in the preview first). */
+export async function wizardType(
+  sourceId: string,
+  mode: string,
+  text: string
+): Promise<{ ok: boolean; reason?: string }> {
+  const base = await resolveApiBase();
+  return postJson(`${base}/api/v1/sources/${sourceId}/wizard/type?mode=${mode}`, { text });
+}
+
+/** Press a named key (Enter, Tab, Escape…) in the wizard browser. */
+export async function wizardKey(
+  sourceId: string,
+  mode: string,
+  key: string
+): Promise<{ ok: boolean; reason?: string }> {
+  const base = await resolveApiBase();
+  return postJson(`${base}/api/v1/sources/${sourceId}/wizard/key?mode=${mode}`, { key });
+}
+
+/** Scroll the wizard page at screenshot coordinates. */
+export async function wizardScroll(
+  sourceId: string,
+  mode: string,
+  x: number,
+  y: number,
+  deltaY: number
+): Promise<{ ok: boolean }> {
+  const base = await resolveApiBase();
+  return postJson(`${base}/api/v1/sources/${sourceId}/wizard/scroll?mode=${mode}`, { x, y, delta_y: deltaY });
+}
+
 /** URL for the live wizard screenshot (used as <img src>).
  * zoom=qr returns an enlarged crop of any QR code (for phone-scan login). */
 export async function wizardScreenshotUrl(

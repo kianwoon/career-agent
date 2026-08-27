@@ -21,6 +21,9 @@ import {
   wizardCancel,
   wizardScreenshotUrl,
   wizardClick,
+  wizardType,
+  wizardKey,
+  wizardScroll,
   type SearchMode,
   type SearchResult,
   type Evidence,
@@ -1038,6 +1041,15 @@ export default function Home() {
                                 : "Site uses QR login? Toggle QR mode and scan with your phone."}
                             </span>
                           </div>
+                          <RemoteControlRow
+                            sourceId={s.id}
+                            onAction={async (act) => {
+                              if (act.kind === "type") await wizardType(s.id, "login", act.text ?? "");
+                              else if (act.kind === "key") await wizardKey(s.id, "login", act.key ?? "Enter");
+                              else if (act.kind === "scroll") await wizardScroll(s.id, "login", 640, 450, act.deltaY ?? 400);
+                              refreshWizardShot(s);
+                            }}
+                          />
                           <div className="wizard-cred-row">
                             <input
                               type="text"
@@ -1670,5 +1682,112 @@ function SourceAvatar({ name, domain }: { name: string; domain: string }) {
         (name || "?").slice(0, 2).toUpperCase()
       )}
     </span>
+  );
+}
+
+/* ------------------------- Wizard remote control -------------------- */
+
+type RemoteAction =
+  | { kind: "type"; text: string }
+  | { kind: "key"; key: string }
+  | { kind: "scroll"; deltaY: number };
+
+/**
+ * Keyboard/scroll controls for the wizard preview. Click the preview to focus
+ * a field (server-side click), then type here — text mirrors to the remote
+ * browser. Covers CAPTCHA, OTP, MFA, any interactive login step.
+ */
+function RemoteControlRow({
+  sourceId,
+  onAction,
+}: {
+  sourceId: string;
+  onAction: (action: RemoteAction) => Promise<void>;
+}) {
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [showId, setShowId] = useState(`rc-${sourceId}`);
+
+  async function run(action: RemoteAction) {
+    setBusy(true);
+    try {
+      await onAction(action);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="wizard-cred-row remote-control-row">
+      <input
+        key={showId}
+        type="text"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={async (e) => {
+          if (e.key === "Enter" && text.trim()) {
+            e.preventDefault();
+            await run({ kind: "type", text });
+            setText("");
+          }
+        }}
+        placeholder="Click a field in the preview, then type here →"
+        aria-label="Remote type into browser"
+        disabled={busy}
+      />
+      <button
+        className="btn small primary"
+        disabled={busy || !text.trim()}
+        onClick={async (e) => {
+          e.preventDefault();
+          await run({ kind: "type", text });
+          setText("");
+        }}
+      >
+        Type
+      </button>
+      <button
+        className="btn small"
+        disabled={busy}
+        onClick={async (e) => {
+          e.preventDefault();
+          await run({ kind: "key", key: "Enter" });
+        }}
+      >
+        ⏎ Enter
+      </button>
+      <button
+        className="btn small"
+        disabled={busy}
+        onClick={async (e) => {
+          e.preventDefault();
+          await run({ kind: "key", key: "Tab" });
+        }}
+      >
+        Tab
+      </button>
+      <button
+        className="btn small"
+        disabled={busy}
+        onClick={async (e) => {
+          e.preventDefault();
+          await run({ kind: "scroll", deltaY: 400 });
+        }}
+        title="Scroll the remote page down"
+      >
+        ↓
+      </button>
+      <button
+        className="btn small"
+        disabled={busy}
+        onClick={async (e) => {
+          e.preventDefault();
+          await run({ kind: "scroll", deltaY: -400 });
+        }}
+        title="Scroll the remote page up"
+      >
+        ↑
+      </button>
+    </div>
   );
 }
