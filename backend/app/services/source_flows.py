@@ -87,26 +87,111 @@ class WizardSession:
 
     # ---- UI-driven interaction ------------------------------------------
 
-    async def screenshot(self) -> bytes | None:
-        """Live PNG of the wizard page (scaled for fast polling)."""
+    async def screenshot(
+        self,
+        clip: dict[str, float] | None = None,
+        scale: float | None = None,
+    ) -> bytes | None:
+        """Live PNG of the wizard page (optionally clipped + upscaled).
+
+        scale=2 uses the device scale factor for a sharper, phone-scannable
+        shot (used for QR crops).
+        """
         if self.page is None:
             return None
         try:
             self.touch()
-            return await self.page.screenshot(type="png", quality=None, full_page=False)
+            return await self.page.screenshot(
+                type="png",
+                full_page=False,
+                clip=clip,
+                scale="device" if scale == 2 else "css",
+            )
         except Exception as exc:
             logger.debug("screenshot failed: %s", exc)
+            return None
+
+    async def locate_qr_region(self) -> tuple[float, float, float, float] | None:
+        """Find a QR code on the page and return (x, y, width, height) in
+        CSS pixels, padded for scannability. None if nothing QR-like exists.
+
+        Detection heuristics: <img>/<canvas>/div whose class/id/alt hints at
+        QR, or a roughly square image near a 'scan' label.
+        """
+        if self.page is None:
+            return None
+        try:
+            region = await self.page.evaluate(
+                """() => {
+                  const hint = /(qr|qrcode|qr-code|scanme|scan-me|barcode)/i;
+                  const cands = [];
+                  for (const el of document.querySelectorAll('img, canvas, div, iframe')) {
+                    const r = el.getBoundingClientRect();
+                    if (r.width < 80 || r.height < 80) continue;
+                    const aspect = r.width / r.height;
+                    if (aspect < 0.7 || aspect > 1.4) continue;  // QRs are square-ish
+                    const label = [
+                      el.id, el.className && String(el.className),
+                      el.getAttribute('alt'), el.getAttribute('aria-label'),
+                      el.getAttribute('title'),
+                    ].filter(Boolean).join(' ');
+                    const nearText = (el.closest('div,section')?.innerText || '').slice(0, 300);
+                    const hinted = hint.test(label) || /scan/i.test(nearText);
+                    if (hinted) cands.push(r);
+                  }
+                  if (!cands.length) return null;
+                  // Largest hinted square wins.
+                  cands.sort((a, b) => b.width * b.height - a.width * a.height);
+                  const r = cands[0];
+                  const pad = Math.max(30, r.width * 0.15);
+                  return {
+                    x: Math.max(0, r.x - pad),
+                    y: Math.max(0, r.y - pad),
+                    width: r.width + pad * 2,
+                    height: r.height + pad * 2,
+                  };
+                }"""
+            )
+            if not region:
+                return None
+            self.touch()
+            return (
+                float(region["x"]),
+                float(region["y"]),
+                float(region["width"]),
+                float(region["height"]),
+            )
+        except Exception as exc:
+            logger.debug("locate_qr_region failed: %s", exc)
             return None
 
     async def status(self) -> dict[str, Any]:
         if self.page is None:
             return {"url": "", "title": "", "logged_in": self.logged_in}
         try:
-            return {
-                "url": self.page.url,
-                "title": await self.page.title(),
-                "logged_in": self.logged_in,
-            }
+            url = self.page.url
+            title = await self.page.title()
+            # Auto-detect completed login: the page is on the source domain
+            # (or a post-login dashboard) and no longer login-shaped. Covers
+            # QR-code flows where the phone does the auth.
+            if not self.logged_in and url:
+                low = url.lower()
+                on_domain = not self.domain or self.domain in low
+                login_shaped = any(
+                    p in low for p in ("login", "signin", "sign-in", "log-in", "auth", "sso")
+                )
+                if on_domain and not login_shaped:
+                    # Extra confirmation: page has meaningful content.
+                    try:
+                        text_len = await self.page.evaluate(
+                            "() => (document.body?.innerText || '').length"
+                        )
+                    except Exception:
+                        text_len = 0
+                    if text_len > 100:
+                        self.logged_in = True
+                        logger.info("Wizard login auto-detected as complete (url=%s)", url[:80])
+            return {"url": url, "title": title, "logged_in": self.logged_in}
         except Exception:
             return {"url": "", "title": "", "logged_in": self.logged_in}
 

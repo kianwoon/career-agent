@@ -156,15 +156,38 @@ async def _wiz(source_id: str, mode: str) -> WizardSession:
 
 
 @router.get("/{source_id}/wizard/screenshot")
-async def wizard_screenshot(source_id: str, mode: str = "login"):
-    """Live PNG of the wizard browser. The UI polls this for a live view."""
+async def wizard_screenshot(source_id: str, mode: str = "login", zoom: str = "page"):
+    """Live PNG of the wizard browser. The UI polls this for a live view.
+
+    zoom=page  — full viewport (default)
+    zoom=qr    — locate a QR code region on the page and return an enlarged
+                 crop, so a phone can scan it directly from the preview.
+    """
     from fastapi import Response
 
     wiz = await _wiz(source_id, mode)
-    png = await wiz.screenshot()
+    if zoom != "qr":
+        png = await wiz.screenshot()
+        if png is None:
+            raise HTTPException(502, "Screenshot unavailable — browser may be navigating")
+        return Response(content=png, media_type="image/png")
+
+    crop = await wiz.locate_qr_region()
+    if crop is None:
+        # No QR found — fall back to the full page.
+        png = await wiz.screenshot()
+        if png is None:
+            raise HTTPException(502, "Screenshot unavailable")
+        return Response(content=png, media_type="image/png")
+    x, y, w, h = crop
+    png = await wiz.screenshot(clip={"x": x, "y": y, "width": w, "height": h}, scale=2)
     if png is None:
-        raise HTTPException(502, "Screenshot unavailable — browser may be navigating")
-    return Response(content=png, media_type="image/png")
+        raise HTTPException(502, "Screenshot unavailable")
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={"X-QR-Region": f"{x},{y},{w},{h}"},
+    )
 
 
 @router.get("/{source_id}/wizard/status")

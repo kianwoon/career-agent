@@ -1232,3 +1232,19 @@ body {
   border-radius: 6px;
   font-size: 13px;
 }
+
+.wizard-shot-qr {
+  width: min(420px, 100%);
+  margin: 0 auto;
+  cursor: default;
+  image-rendering: pixelated;
+}
+
+.wizard-login-done {
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: rgba(53, 180, 111, 0.12);
+  border: 1px solid var(--green, #35b46f);
+  font-size: 13px;
+  font-weight: 600;
+}

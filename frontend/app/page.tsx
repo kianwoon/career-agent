@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   startSearch,
   fetchTaskResults,
@@ -13,6 +13,7 @@ import {
   createSource,
   deleteSource,
   wizardStart,
+  wizardStatus,
   wizardCredentials,
   wizardMfa,
   wizardComplete,
@@ -120,6 +121,9 @@ export default function Home() {
   const [wizardPass, setWizardPass] = useState("");
   const [wizardMfaCode, setWizardMfaCode] = useState("");
   const [shotUrl, setShotUrl] = useState<string | null>(null);
+  const [qrMode, setQrMode] = useState(false);
+  const [loginDone, setLoginDone] = useState(false);
+  const loginDoneRef = useRef(false);
   const [takeoverActive, setTakeoverActive] = useState(false);
   const [browserSession, setBrowserSession] = useState<BrowserSessionView | null>(null);
   const [sessionBusy, setSessionBusy] = useState(false);
@@ -235,8 +239,26 @@ export default function Home() {
       );
 
       // Live view: the UI polls the screenshot endpoint via <img> refresh.
+      setQrMode(false);
+      setLoginDone(false);
       const url = await wizardScreenshotUrl(source.id, mode);
       setShotUrl(`${url}&t=${Date.now()}`);
+      // Watch for login completion (QR/SSO flows: nothing typed by hand).
+      const poll = setInterval(async () => {
+        try {
+          const st = await wizardStatus(source.id, "login");
+          if (st.logged_in && !loginDoneRef.current) {
+            loginDoneRef.current = true;
+            setLoginDone(true);
+            setTimeline((prev) =>
+              addEvent(prev, "success", "Sign-in detected! Press Done to save this session.")
+            );
+          }
+        } catch {
+          /* wizard may have completed */
+        }
+      }, 3000);
+      (window as unknown as { __wizLoginPoll?: ReturnType<typeof setInterval> }).__wizLoginPoll = poll;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setTimeline((prev) =>
@@ -253,9 +275,15 @@ export default function Home() {
     }
   }
 
-  async function handleWizardDone(source: SourceView, mode: "login" | "record", flowType?: "find_jobs" | "find_candidates", queryHint?: string) {
+  function clearWizPolls() {
     const poll = (window as unknown as { __wizPoll?: ReturnType<typeof setInterval> }).__wizPoll;
     if (poll) clearInterval(poll);
+    const lp = (window as unknown as { __wizLoginPoll?: ReturnType<typeof setInterval> }).__wizLoginPoll;
+    if (lp) clearInterval(lp);
+  }
+
+  async function handleWizardDone(source: SourceView, mode: "login" | "record", flowType?: "find_jobs" | "find_candidates", queryHint?: string) {
+    clearWizPolls();
     setWizardBusy(`${source.id}:${mode}:${flowType ?? ""}`);
     try {
       const res = await wizardComplete(source.id, mode, queryHint);
@@ -274,8 +302,7 @@ export default function Home() {
   }
 
   async function handleWizardCancel(source: SourceView, mode: string) {
-    const poll = (window as unknown as { __wizPoll?: ReturnType<typeof setInterval> }).__wizPoll;
-    if (poll) clearInterval(poll);
+    clearWizPolls();
     await wizardCancel(source.id, mode).catch(() => {});
     setWizardBusy(null);
     setWizardHint(null);
@@ -321,9 +348,20 @@ export default function Home() {
     }
   }
 
-  function refreshWizardShot(source: SourceView) {
-    wizardScreenshotUrl(source.id, "login").then((url) => setShotUrl(`${url}&t=${Date.now()}`)).catch(() => {});
+  function refreshWizardShot(source: SourceView, zoom: "page" | "qr" = qrMode ? "qr" : "page") {
+    wizardScreenshotUrl(source.id, "login", zoom)
+      .then((url) => setShotUrl(`${url}&t=${Date.now()}`))
+      .catch(() => {});
   }
+
+  // QR codes expire fast: auto-refresh the QR crop while QR mode is on.
+  useEffect(() => {
+    if (!qrMode || !wizardBusy) return;
+    const id = setInterval(() => {
+      setShotUrl((cur) => (cur ? `${cur.split("&t=")[0]}&t=${Date.now()}` : cur));
+    }, 5000);
+    return () => clearInterval(id);
+  }, [qrMode, wizardBusy]);
 
   async function handleDeleteSource(source: SourceView) {
     await deleteSource(source.id).catch(() => {});
@@ -770,13 +808,17 @@ export default function Home() {
 
                     {wizardBusy?.startsWith(`${s.id}:login`) && (
                       <div className="wizard-browser">
+                        {loginDone && (
+                          <div className="wizard-login-done">✅ Sign-in detected — press Done to save this session.</div>
+                        )}
                         {shotUrl && (
                           /* eslint-disable-next-line @next/next/no-img-element */
                           <img
-                            className="wizard-shot"
+                            className={`wizard-shot ${qrMode ? "wizard-shot-qr" : ""}`}
                             src={shotUrl}
                             alt="Live browser preview"
                             onClick={(e) => {
+                              if (qrMode) return; // QR crop: no click-through
                               // click-through: forward coordinates to the backend
                               const rect = (e.target as HTMLImageElement).getBoundingClientRect();
                               const scaleX = 1280 / rect.width;
@@ -787,7 +829,20 @@ export default function Home() {
                             }}
                           />
                         )}
-                        <button className="btn small" onClick={() => refreshWizardShot(s)}>↻ Refresh preview</button>
+                        <div className="wizard-cred-row">
+                          <button className="btn small" onClick={() => refreshWizardShot(s)}>↻ Refresh preview</button>
+                          <button
+                            className={`btn small ${qrMode ? "primary" : ""}`}
+                            onClick={() => { const next = !qrMode; setQrMode(next); refreshWizardShot(s, next ? "qr" : "page"); }}
+                          >
+                            {qrMode ? "📱 QR mode: ON" : "📱 QR code login"}
+                          </button>
+                          <span className="wizard-hint">
+                            {qrMode
+                              ? "Auto-refreshing the QR every 5s — scan it with your phone."
+                              : "Site uses QR login? Toggle QR mode and scan with your phone."}
+                          </span>
+                        </div>
                         <div className="wizard-cred-row">
                           <input
                             type="text"

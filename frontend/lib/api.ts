@@ -132,15 +132,17 @@ export async function wizardClick(
   return postJson(`${base}/api/v1/sources/${sourceId}/wizard/click?mode=${mode}`, { x, y });
 }
 
-/** URL for the live wizard screenshot (used as <img src>). */
+/** URL for the live wizard screenshot (used as <img src>).
+ * zoom=qr returns an enlarged crop of any QR code (for phone-scan login). */
 export async function wizardScreenshotUrl(
   sourceId: string,
-  mode: string
+  mode: string,
+  zoom: "page" | "qr" = "page"
 ): Promise<string> {
   const base = await resolveApiBase();
   const key = await resolveApiKey();
   // Include the API key as a query param because <img> cannot set headers.
-  return `${base}/api/v1/sources/${sourceId}/wizard/screenshot?mode=${mode}&api_key=${encodeURIComponent(key)}`;
+  return `${base}/api/v1/sources/${sourceId}/wizard/screenshot?mode=${mode}&zoom=${zoom}&api_key=${encodeURIComponent(key)}`;
 }
 
 export async function wizardComplete(
