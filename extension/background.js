@@ -52,9 +52,13 @@ function connect() {
         reply(msg.id, false, null, String(e && e.message ? e.message : e))
       );
     };
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       setBadge(false);
       ws = null;
+      // Code 4000 = the server replaced us with a newer connection (e.g. the
+      // service worker woke up again). Do NOT reconnect in that case — the
+      // newer connection is alive; reconnecting would ping-pong forever.
+      if (ev && ev.code === 4000) return;
       scheduleReconnect();
     };
   });
