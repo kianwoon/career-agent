@@ -10,18 +10,18 @@ chrome.storage.local.get(["apiBase"]).then(({ apiBase }) => {
 });
 
 async function checkStatus() {
-  try {
-    const apiBase = apiInput.value.trim().replace(/\/+$/, "");
-    const res = await fetch(`${apiBase}/api/v1/agent/status`);
-    const data = await res.json();
-    statusEl.textContent = data.connected
-      ? "● Connected to Career Agent"
-      : "○ API reachable, waiting for agent…";
-    statusEl.className = data.connected ? "ok" : "down";
-  } catch (e) {
-    statusEl.textContent = "○ API unreachable";
-    statusEl.className = "down";
-  }
+  // The extension's own WS badge (set by the service worker) is the source of
+  // truth — the API requires an X-API-Key for REST, which the popup doesn't
+  // have, so a 401 on /status doesn't mean the agent link is down.
+  chrome.action.getBadgeText({}, (text) => {
+    if (text === "ON") {
+      statusEl.textContent = "● Connected to Career Agent";
+      statusEl.className = "ok";
+    } else {
+      statusEl.textContent = "○ Not connected — retrying every 5s…";
+      statusEl.className = "down";
+    }
+  });
 }
 
 document.getElementById("save").addEventListener("click", () => {
