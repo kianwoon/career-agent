@@ -20,7 +20,7 @@ def test_templatize_binds_query_param():
         {"action": "submit", "selector": "form#search"},
         {"action": "click", "selector": "button.filter", "text": "Full-time"},
     ]
-    steps, card = templatize(events, query_hint="python developer")
+    steps, _card = templatize(events, query_hint="python developer")
     fills = [s for s in steps if s["action"] == "fill"]
     assert len(fills) == 1
     assert fills[0]["param"] == "query"

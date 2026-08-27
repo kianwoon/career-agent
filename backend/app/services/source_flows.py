@@ -18,14 +18,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 
 from playwright.async_api import async_playwright
 
-from app.config import get_settings
-from app.services.encryption import decrypt_session_state, encrypt_session_state
+from app.services.encryption import decrypt_session_state
 from app.services.proxy import proxy_config as _proxy_config
 
 logger = logging.getLogger(__name__)
@@ -347,4 +345,4 @@ async def _extract_page(page: Any, card_selectors: dict[str, str] | None) -> lis
 
 def domain_of(url: str) -> str:
     netloc = urlparse(url).netloc.lower()
-    return netloc[4:] if netloc.startswith("www.") else netloc
+    return netloc.removeprefix("www.")
