@@ -1224,29 +1224,29 @@ body {
   flex-direction: column;
   gap: 8px;
   padding: 12px;
-  border: 1px solid var(--border, #dde3ea);
+  border: 1px solid var(--border, #242c3a);
   border-radius: 10px;
-  background: var(--bg-panel, #fff);
+  background: var(--bg-elev, #151a23);
   cursor: pointer;
   user-select: none;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .source-card:hover {
-  border-color: var(--accent, #2563eb);
+  border-color: var(--accent, #4f8cff);
 }
 
 .source-card.ready {
-  border-color: var(--green, #35b46f);
+  border-color: color-mix(in srgb, var(--green, #34d399) 55%, var(--border, #242c3a));
 }
 
 .source-card.selected {
-  border-color: var(--accent, #2563eb);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent, #2563eb) 20%, transparent);
+  border-color: var(--accent, #4f8cff);
+  box-shadow: 0 0 0 2px var(--accent-soft, rgba(79, 140, 255, 0.12));
 }
 
 .source-card.locked {
-  opacity: 0.75;
+  opacity: 0.6;
 }
 
 .source-card-top {
@@ -1270,8 +1270,8 @@ body {
   width: 34px;
   height: 34px;
   border-radius: 8px;
-  background: color-mix(in srgb, var(--accent, #2563eb) 12%, transparent);
-  color: var(--accent, #2563eb);
+  background: var(--accent-soft, rgba(79, 140, 255, 0.12));
+  color: var(--accent, #4f8cff);
   font-size: 13px;
   font-weight: 700;
   letter-spacing: 0.02em;
@@ -1287,6 +1287,7 @@ body {
 .source-card-name {
   font-size: 13px;
   font-weight: 600;
+  color: var(--text, #e7eaf0);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1294,7 +1295,7 @@ body {
 
 .source-card-domain {
   font-size: 11px;
-  color: var(--text-secondary, #8899aa);
+  color: var(--text-muted, #8b94a7);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1315,21 +1316,34 @@ body {
 }
 
 .status-pill.ok {
-  color: var(--green, #1e9e5f);
-  border-color: color-mix(in srgb, var(--green, #1e9e5f) 40%, transparent);
-  background: color-mix(in srgb, var(--green, #1e9e5f) 8%, transparent);
+  color: var(--green, #34d399);
+  border-color: color-mix(in srgb, var(--green, #34d399) 35%, transparent);
+  background: var(--green-soft, rgba(52, 211, 153, 0.12));
 }
 
 .status-pill.warn {
-  color: var(--orange, #c47d17);
-  border-color: color-mix(in srgb, var(--orange, #c47d17) 40%, transparent);
-  background: color-mix(in srgb, var(--orange, #c47d17) 8%, transparent);
+  color: #fbbf24;
+  border-color: color-mix(in srgb, #fbbf24 35%, transparent);
+  background: rgba(251, 191, 36, 0.1);
 }
 
 .status-pill.off {
-  color: var(--text-secondary, #8899aa);
-  border-color: var(--border, #dde3ea);
+  color: var(--text-muted, #8b94a7);
+  border-color: var(--border, #242c3a);
   background: transparent;
+}
+
+.source-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  border-top: 1px solid var(--border, #242c3a);
+  padding-top: 8px;
+}
+
+.source-card .source-card-actions .btn.small {
+  font-size: 11px;
+  padding: 3px 8px;
 }
 
 .source-card .source-remove {

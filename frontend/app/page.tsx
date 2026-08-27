@@ -206,6 +206,12 @@ export default function Home() {
     });
   }
 
+  /** Expand the "Add a new source" setup section so wizard UI is visible. */
+  function openSetupSection() {
+    const details = document.querySelector("details.add-source") as HTMLDetailsElement | null;
+    if (details) details.open = true;
+  }
+
   async function handleAddSource() {
     if (!newSourceName.trim() || !newSourceUrl.trim()) return;
     setWizardBusy("create");
@@ -891,6 +897,48 @@ export default function Home() {
                         </span>
                       </div>
                       {!ready && <span className="source-warn">Setup needed for {mode === "jobs" ? "job" : "candidate"} search</span>}
+                      <div className="source-card-actions">
+                        <button
+                          className="btn small"
+                          disabled={!!wizardBusy || isRunning}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            handleWizard(s, "login");
+                            openSetupSection();
+                          }}
+                          title={s.has_session ? "Sign in again (session may have expired)" : "Sign in to this site"}
+                        >
+                          {s.has_session ? "Re-login" : "Login"}
+                        </button>
+                        {s.has_session && (
+                          <>
+                            <button
+                              className="btn small"
+                              disabled={!!wizardBusy || isRunning}
+                              onClick={(e) => {
+                                e.preventDefault();
+                                handleWizard(s, "record", "find_jobs");
+                                openSetupSection();
+                              }}
+                              title="Re-record the job-search flow"
+                            >
+                              {s.flows.find_jobs === "active" ? "Re-record jobs" : "Record jobs"}
+                            </button>
+                            <button
+                              className="btn small"
+                              disabled={!!wizardBusy || isRunning}
+                              onClick={(e) => {
+                                e.preventDefault();
+                                handleWizard(s, "record", "find_candidates");
+                                openSetupSection();
+                              }}
+                              title="Re-record the candidate-search flow"
+                            >
+                              {s.flows.find_candidates === "active" ? "Re-record candidates" : "Record candidates"}
+                            </button>
+                          </>
+                        )}
+                      </div>
                     </label>
                   );
                 })}
