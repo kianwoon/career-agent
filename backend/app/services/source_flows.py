@@ -699,7 +699,13 @@ async def discover_flow(
               visible: !!(el.offsetWidth || el.offsetHeight),
             }))"""
         )
-        visible_inputs = [i for i in inputs if i.get("visible")]
+        # Renumber so the LLM's array position == the "index" it should reply
+        # with. (Filtering by visibility keeps original DOM indices, which do
+        # NOT line up with the list the LLM actually sees — LinkedIn has hidden
+        # inputs that shifted every position and broke the lookup.)
+        visible_inputs = [
+            {**i, "index": pos} for pos, i in enumerate(inputs) if i.get("visible")
+        ]
 
         raw_json = await llm.chat(
             "You are a web-automation expert. Given a list of form inputs from a "
@@ -716,7 +722,18 @@ async def discover_flow(
         idx = json.loads(m.group(0)).get("index")
         chosen = next((i for i in visible_inputs if i["index"] == idx), None)
         if not chosen:
-            raise RuntimeError("LLM picked a search box that is not on the page")
+            # Fallback: first visible text/search input (skip email/password/
+            # hidden-ish boxes) so one bad LLM answer doesn't kill recording.
+            candidates_inputs = [
+                i for i in visible_inputs
+                if i.get("type") in ("", "text", "search")
+            ]
+            chosen = candidates_inputs[0] if candidates_inputs else None
+        if not chosen:
+            raise RuntimeError(
+                "No usable search box found on the page — the site may not "
+                "have loaded, or requires login first."
+            )
 
         sel = (
             f"#{chosen['id']}" if chosen["id"]
