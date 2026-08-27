@@ -148,6 +148,13 @@ async def _run_task(
             task.workflow_state = "complete"
             if result_state.get("error"):
                 task.error = result_state["error"]
+            # Persist per-source issues (expired logins etc.) as JSON in the
+            # error column so GET /tasks/{id}/results can surface them.
+            source_issues = result_state.get("source_issues") or []
+            if source_issues:
+                import json as _json
+
+                task.error = _json.dumps({"source_issues": source_issues})
             task.completed_at = datetime.utcnow()
 
             # Persist ranked results (jobs or candidates) + match evaluations.
@@ -370,11 +377,27 @@ async def get_task_results(
                 )
             )
 
+    # Surface per-source failures (e.g. expired login) so the UI can prompt
+    # a re-login instead of silently missing results.
+    source_issues: list[str] = []
+    if task.error:
+        import json as _json
+
+        try:
+            payload = _json.loads(task.error)
+            if isinstance(payload, dict):
+                source_issues = payload.get("source_issues", [])
+            else:
+                source_issues = []
+        except (ValueError, TypeError):
+            source_issues = []
+
     return SearchTaskResult(
         task_id=task.id,
         status=TaskStatus(task.status),
         results=results,
         summary=f"{len(results)} ranked results",
+        source_issues=source_issues,
     )
 
 

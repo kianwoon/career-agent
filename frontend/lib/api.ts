@@ -163,6 +163,8 @@ export interface SearchResponse {
   status: "pending" | "running" | "paused" | "waiting_approval" | "completed" | "failed";
   results: SearchResult[];
   summary?: string | null;
+  /** Per-source failures, e.g. "MyCareersFuture: Session expired: ...". */
+  source_issues?: string[];
 }
 
 export interface TaskStatus {

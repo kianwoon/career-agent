@@ -36,6 +36,7 @@ class AgentState(TypedDict, total=False):
     needs_human: bool
     human_reason: str | None
     source_ids: list[str] | None
+    source_issues: list[dict[str, str]]
 
 
 def _log(state: AgentState, step: str, detail: str | None = None, url: str | None = None) -> list[ActivityEvent]:
@@ -114,7 +115,7 @@ async def _safe_search(
 
 async def _search_custom_sources(
     state: AgentState,
-) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+) -> tuple[list[dict[str, Any]], list[str], list[str], list[dict[str, str]]]:
     """Run templatized flows for all selected/enabled custom sources.
 
     Returns (raw_results, ok_labels, failed_labels).
@@ -140,12 +141,14 @@ async def _search_custom_sources(
     raw: list[dict[str, Any]] = []
     ok: list[str] = []
     failed: list[str] = []
+    issues: list[dict[str, str]] = []
 
     async def _run_one(source: Source) -> None:
         flow = flows_by_source.get(source.id)
         flow_type = "find_jobs" if state.get("type") == SearchType.jobs else "find_candidates"
         if flow is None or flow.flow_type != flow_type:
             failed.append(f"{source.name}: no {flow_type} flow")
+            issues.append({"source": source.name, "reason": f"no {flow_type} flow recorded"})
             return
         result = await execute_flow(
             base_url=source.base_url,
@@ -154,10 +157,18 @@ async def _search_custom_sources(
             storage_state_encrypted=source.session_state,
             card_selectors=flow.steps[-1] if flow.steps and flow.steps[-1].get("card") else None,
         )
-        # Stash card_selectors on the flow so executor can find them.
         results = result.get("results", [])
         if result.get("needs_human") or not results:
-            failed.append(f"{source.name}: {result.get('human_reason', 'no results')}")
+            reason = result.get("human_reason", "no results")
+            failed.append(f"{source.name}: {reason}")
+            issues.append({"source": source.name, "reason": reason})
+            # If the session expired, flag the flow so setup shows "Re-login".
+            if "expired" in reason.lower() or "login" in reason.lower():
+                async with async_session() as db2:
+                    db_flow = await db2.get(SourceFlow, flow.id)
+                    if db_flow:
+                        db_flow.status = "broken"
+                        await db2.commit()
             return
         for r in results:
             r.setdefault("source", source.name)
@@ -166,7 +177,7 @@ async def _search_custom_sources(
         ok.append(f"{source.name}: {len(results)}")
 
     await asyncio.gather(*(_run_one(s) for s in sources))
-    return raw, ok, failed
+    return raw, ok, failed, issues
 
 
 async def run_search(state: AgentState) -> AgentState:
@@ -183,7 +194,9 @@ async def run_search(state: AgentState) -> AgentState:
     # -------------------------------------------------------
     # Custom user-registered sources (templatized flows)
     # -------------------------------------------------------
-    custom_raw, custom_ok, custom_failed = await _search_custom_sources(state)
+    custom_raw, custom_ok, custom_failed, custom_issues = await _search_custom_sources(state)
+    # Stash structured per-source issues so the API can surface them.
+    state = {**state, "source_issues": custom_issues}
 
     # -------------------------------------------------------
     # Jobs -> run LinkedIn + MyCareersFuture + FastJobs in parallel

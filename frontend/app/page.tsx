@@ -202,6 +202,11 @@ export default function Home() {
     return wizardBusy?.includes(":find_candidates") ? "find_candidates" : "find_jobs";
   }
 
+  /** Prepend a timeline event (helper for multi-event blocks). */
+  function addEventPrev(kind: TimelineEvent["kind"], text: string) {
+    setTimeline((prev) => addEvent(prev, kind, text));
+  }
+
   async function handleWizard(source: SourceView, mode: "login" | "record", flowType?: "find_jobs" | "find_candidates") {
     const key = `${source.id}:${mode}:${flowType ?? ""}`;
     setWizardBusy(key);
@@ -354,6 +359,16 @@ export default function Home() {
       setPhase("completed");
       setResults(response.results ?? []);
       syncSourceFilter(response.results ?? []);
+      // Surface per-source failures — prompt re-login for expired sessions.
+      for (const issue of response.source_issues ?? []) {
+        const expired = /expired|login|sign in/i.test(issue);
+        addEventPrev(
+          expired ? "warn" : "info",
+          expired
+            ? `⚠️ ${issue} — open "Add a new source" and press the Login button for this source to re-authenticate.`
+            : `Source issue: ${issue}`
+        );
+      }
       setTimeline((prev) =>
         addEvent(
           prev,

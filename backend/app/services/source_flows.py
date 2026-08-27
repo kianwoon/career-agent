@@ -277,6 +277,34 @@ def templatize(
 MAX_PAGES = 5
 PAGE_WAIT_S = 2.5
 
+# Common login-page signals. If the flow lands on one of these, the saved
+# session has expired and a human must re-login via the wizard.
+_LOGIN_URL_PATTERNS = ("login", "signin", "sign-in", "log-in", "auth", "sso")
+_LOGIN_TEXT_PATTERNS = ("sign in", "log in", "login to", "sign up")
+
+
+async def _looks_logged_out(page: Any, base_domain: str) -> str | None:
+    """Return a human_reason if the page looks like a login wall, else None."""
+    try:
+        url = page.url.lower()
+        title = (await page.title()).lower()
+    except Exception:
+        return None
+    if base_domain not in url:
+        # Redirected off the source site — often an SSO/login redirect.
+        return f"Redirected away from {base_domain} to {url[:120]} — session likely expired"
+    if any(p in url for p in _LOGIN_URL_PATTERNS):
+        return f"Session expired: {base_domain} redirected to a login page"
+    if any(p in title for p in _LOGIN_TEXT_PATTERNS):
+        return f"Session expired: page title is '{title[:80]}'"
+    try:
+        body = (await page.evaluate("() => document.body?.innerText?.slice(0, 2000) || ''")).lower()
+        if any(p in body[:600] for p in _LOGIN_TEXT_PATTERNS):
+            return f"Session expired: {base_domain} is showing a sign-in prompt"
+    except Exception:
+        pass
+    return None
+
 
 async def execute_flow(
     base_url: str,
@@ -288,6 +316,8 @@ async def execute_flow(
     """Replay a templatized flow and extract results.
 
     Returns {"results": [...], "needs_human": bool, "human_reason": str|None}.
+    If the site bounces us to a login page (expired cookies), the reason
+    says so explicitly so the UI can prompt a re-login.
     """
     state = None
     if storage_state_encrypted:
@@ -296,6 +326,7 @@ async def execute_flow(
         except Exception as exc:
             logger.warning("Could not decrypt source session state: %s", exc)
 
+    base_domain = domain_of(base_url)
     pw = await async_playwright().start()
     try:
         browser = await pw.chromium.launch(headless=True, proxy=_proxy_config())
@@ -311,6 +342,11 @@ async def execute_flow(
                 "needs_human": True,
                 "human_reason": f"Could not reach {base_url}: {exc}",
             }
+
+        # Session check right after landing.
+        logged_out = await _looks_logged_out(page, base_domain)
+        if logged_out:
+            return {"results": [], "needs_human": True, "human_reason": logged_out}
 
         error: str | None = None
         for step in steps:
@@ -333,6 +369,10 @@ async def execute_flow(
         pag = next((s for s in steps if s.get("repeat") == "paginate"), None)
         seen_urls: set[str] = set()
         for page_num in range(MAX_PAGES):
+            # Mid-flow session check: sites can bounce to login after search.
+            bounced = await _looks_logged_out(page, base_domain)
+            if bounced:
+                return {"results": [], "needs_human": True, "human_reason": bounced}
             page_results = await _extract_page(page, card_selectors)
             new = [r for r in page_results if r.get("url") and r["url"] not in seen_urls]
             if not new:
@@ -347,11 +387,12 @@ async def execute_flow(
             except Exception:
                 break  # no more pages
         if not results:
-            return {
-                "results": [],
-                "needs_human": True,
-                "human_reason": error or f"No results extracted from {base_url} — flow may be broken",
-            }
+            reason = error or (
+                f"No results extracted from {base_url} — if the site requires "
+                "login, re-run the Login step in source setup; otherwise the "
+                "recorded flow may need re-recording"
+            )
+            return {"results": [], "needs_human": True, "human_reason": reason}
         return {"results": results, "needs_human": False, "human_reason": None}
     finally:
         try:

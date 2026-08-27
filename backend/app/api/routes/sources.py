@@ -173,9 +173,10 @@ async def wizard_complete(
     db: AsyncSession = Depends(get_db),
 ) -> WizardCompleteResponse:
     source = await _get_source(source_id, db)
-    wiz = _wizards.pop(f"wiz-{source_id}-{mode}")
+    wiz = _wizards.get(f"wiz-{source_id}-{mode}")
     if wiz is None:
-        raise HTTPException(404, "No active wizard session")
+        raise HTTPException(404, "No active wizard session (already completed or expired)")
+    _wizards.pop(f"wiz-{source_id}-{mode}", None)
 
     try:
         await wiz.drain_events()
@@ -193,7 +194,20 @@ async def wizard_complete(
             raise HTTPException(400, "Invalid wizard mode")
 
         flow_type = wiz.flow_type
+        if not wiz.events:
+            raise HTTPException(
+                422,
+                "No interactions were recorded. Check that event polling is "
+                "working (the browser tab must stay open on the source site), "
+                "then record the flow again.",
+            )
         steps, card_selectors = templatize(wiz.events, req.query_hint)
+        if card_selectors is None:
+            raise HTTPException(
+                422,
+                "No result card was marked. During recording, Alt-click one "
+                "of the search-result cards, then press Done again.",
+            )
 
         recording = SourceRecording(
             source_id=source.id, flow_type=flow_type, events=wiz.events
@@ -210,12 +224,13 @@ async def wizard_complete(
         ).scalar_one_or_none()
 
         if existing:
-            existing.steps = steps
+            existing.steps = steps + ([{"card": card_selectors["card"]}] if card_selectors else [])
             existing.status = "active"
             existing.last_verified_at = datetime.utcnow()
             flow = existing
         else:
-            flow = SourceFlow(source_id=source.id, flow_type=flow_type, steps=steps)
+            embed = [{"card": card_selectors["card"]}] if card_selectors else []
+            flow = SourceFlow(source_id=source.id, flow_type=flow_type, steps=steps + embed)
             db.add(flow)
 
         await db.commit()

@@ -144,6 +144,8 @@ class SearchTaskResult(BaseModel):
     status: TaskStatus
     results: list[MatchResult] = Field(default_factory=list)
     summary: str | None = None
+    # Populated when sources failed (e.g. expired login) — "Source: reason".
+    source_issues: list[str] = Field(default_factory=list)
 
 
 class ActivityEvent(BaseModel):
