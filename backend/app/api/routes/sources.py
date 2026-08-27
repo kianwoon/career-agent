@@ -288,7 +288,12 @@ async def wizard_complete(
 
         steps = discovered["steps"]
         card = discovered["card"]
-        embed = [{"card": card}] if card else []
+        embed = []
+        if card:
+            step: dict[str, Any] = {"card": card}
+            if discovered.get("fields"):
+                step["fields"] = discovered["fields"]
+            embed.append(step)
 
         recording = SourceRecording(
             source_id=source.id, flow_type=flow_type, events=discovered.get("raw", [])
@@ -316,7 +321,11 @@ async def wizard_complete(
         await db.commit()
         await db.refresh(flow)
         return WizardCompleteResponse(
-            flow_id=flow.id, steps=steps, card_selectors={"card": card} if card else None
+            flow_id=flow.id,
+            steps=steps,
+            card_selectors=(
+                {"card": card, "fields": discovered.get("fields", {})} if card else None
+            ),
         )
     finally:
         await wiz.close()

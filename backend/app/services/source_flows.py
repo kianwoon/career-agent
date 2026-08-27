@@ -806,11 +806,75 @@ async def discover_flow(
         if not count:
             raise RuntimeError("LLM-selected card selector matched nothing on the page")
 
+        # --- Step 4: discover inner field selectors (title/company/etc.) ---
+        # Grab one real card's inner structure for the LLM to map fields.
+        card_fields: dict[str, str] = {}
+        try:
+            sample = await page.evaluate(
+                """(card) => {
+                  const el = document.querySelector(card);
+                  if (!el) return null;
+                  const describe = (root) => Array.from(root.querySelectorAll('*')).slice(0, 40).map((n, i) => ({
+                    i,
+                    tag: n.tagName.toLowerCase(),
+                    cls: (n.className && typeof n.className === 'string') ? n.className.slice(0, 80) : '',
+                    text: (n.children.length === 0 ? (n.innerText || '').trim().slice(0, 120) : ''),
+                  }));
+                  const link = el.matches('a') ? el : el.querySelector('a');
+                  return { desc: describe(el), href: link ? link.href : '' };
+                }""",
+                card,
+            )
+        except Exception:
+            sample = None
+
+        if sample and sample.get("desc"):
+            fields_for_llm = [
+                "title" if flow_type == "find_jobs" else "name",
+                "company",
+                "location",
+                "salary",
+            ]
+            raw_json = await llm.chat(
+                "You are a web-automation expert. Below is the DOM structure of ONE "
+                f"{'job' if flow_type == 'find_jobs' else 'candidate'} result card. "
+                "For each field I need, give a CSS selector (relative to the card element) "
+                "that extracts its text. Use tag+class of the deepest matching node. "
+                "If a field isn't present use null. Reply with ONLY JSON: "
+                '{"selectors": {"title": "...", "company": "...", "location": "...", "salary": null}}. '
+                "Fields I need: " + ", ".join(fields_for_llm) + ". No other text.",
+                json.dumps(sample["desc"], indent=1),
+            )
+            if raw_json:
+                m = re.search(r"\{.*\}", raw_json, re.DOTALL)
+                if m:
+                    try:
+                        parsed_fields = json.loads(m.group(0)).get("selectors", {})
+                        for key, field_sel in parsed_fields.items():
+                            if field_sel and isinstance(field_sel, str):
+                                # sanity: selector must match inside the card
+                                try:
+                                    ok = await page.locator(f"{card} {field_sel}").first.count()
+                                except Exception:
+                                    ok = 0
+                                if ok:
+                                    card_fields[key] = field_sel
+                    except Exception as exc:
+                        logger.debug("field-selector parse failed: %s", exc)
+        logger.info("discover_flow field selectors: %s", card_fields or "none")
+
         steps = [
             {"action": "fill", "selector": sel, "param": "query"},
             {"action": "press", "selector": sel, "key": "Enter"},
         ]
-        return {"steps": steps, "card": card, "raw": [{"discovered": True, "url": page.url}]}
+        fields = {"title": "", "url": ""}
+        fields.update(card_fields)
+        return {
+            "steps": steps,
+            "card": card,
+            "fields": fields,
+            "raw": [{"discovered": True, "url": page.url}],
+        }
     finally:
         if own_browser and session:
             await session.close()
