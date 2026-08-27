@@ -263,6 +263,35 @@ class WizardSession:
             "input[type='tel']",
         ])
         pass_sel = await _find(["input[type='password']"])
+
+        # Landing on a sign-UP page (e.g. LinkedIn /authwall "Join LinkedIn")?
+        # The login form is behind a "Sign in" link — click it, wait for the
+        # login form to render, then re-probe.
+        if not (user_sel and pass_sel):
+            sign_in_link = await _find([
+                "a:has-text('Sign in')",
+                "a:has-text('Log in')",
+                "a[data-testid='sign-in-link']",
+                "a:has-text('Already on LinkedIn')",
+            ])
+            if sign_in_link:
+                from app.services.pacing import pacing
+
+                await pacing.human_delay("commit")
+                await self.page.click(sign_in_link, timeout=5_000)
+                try:
+                    await self.page.wait_for_load_state("domcontentloaded", timeout=10_000)
+                except Exception:
+                    pass
+                await pacing.human_pause_reading((1.5, 3.0))
+                user_sel = await _find([
+                    "input[type='email']",
+                    "input[type='text'][name*='user' i]",
+                    "input[type='text'][name*='email' i]",
+                    "input[type='text']:not([name*='search' i])",
+                ])
+                pass_sel = await _find(["input[type='password']"])
+
         if not user_sel or not pass_sel:
             return {
                 "ok": False,
