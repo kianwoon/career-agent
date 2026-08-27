@@ -40,6 +40,7 @@ function connect() {
     ws.onopen = () => {
       console.log("[career-agent] connected to", wsUrl);
       setBadge(true);
+      startPing();
     };
     ws.onmessage = (ev) => {
       let msg;
@@ -53,6 +54,7 @@ function connect() {
       );
     };
     ws.onclose = (ev) => {
+      stopPing();
       setBadge(false);
       ws = null;
       // Code 4000 = the server replaced us with a newer connection (e.g. the
@@ -103,6 +105,12 @@ async function handleMessage(msg) {
         break;
       case "run_flow":
         data = await cmdRunFlow(params.baseUrl, params.query, params.steps);
+        break;
+      case "discover_flow":
+        data = await cmdDiscoverFlow(params.baseUrl, params.query, params.flowType);
+        break;
+      case "get_cookies":
+        data = await cmdGetCookies(params.url);
         break;
       default:
         return reply(id, false, null, `Unknown action: ${action}`);
@@ -291,8 +299,171 @@ async function cmdRunFlow(baseUrl, query, steps) {
   return { results };
 }
 
+// --- keepalive: survive MV3 service-worker suspension ---------------------
+// Brave/Chrome suspend idle service workers after ~30s, killing the WS.
+// Two mechanisms combat this:
+//  1. WS activity ping every 20s (resets the idle timer while connected)
+//  2. chrome.alarms every 1 minute (wakes the worker even after suspension,
+//     restarting connect() if the socket dropped)
+
+const PING_INTERVAL_MS = 20000;
+let pingTimer = null;
+
+function startPing() {
+  stopPing();
+  pingTimer = setInterval(() => {
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ note: "ping" }));
+    }
+  }, PING_INTERVAL_MS);
+}
+
+function stopPing() {
+  if (pingTimer) {
+    clearInterval(pingTimer);
+    pingTimer = null;
+  }
+}
+
+// Alarms fire even when the worker was suspended — this is the recovery path.
+chrome.alarms.create("keepalive", { periodInMinutes: 1 });
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === "keepalive" && (!ws || ws.readyState !== 1)) {
+    console.log("[career-agent] alarm: reconnecting");
+    connect();
+  }
+});
+
 // --- boot -----------------------------------------------------------------
 
 connect();
 chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onInstalled.addListener(connect);
+
+// --- agent-mode: discovery + cookie capture -------------------------------
+
+/** Capture cookies for a domain as a Playwright storage_state "cookies" array. */
+async function cmdGetCookies(url) {
+  const u = new URL(url);
+  const cookies = await chrome.cookies.getAll({ domain: u.hostname });
+  return cookies.map((c) => ({
+    name: c.name,
+    value: c.value,
+    domain: c.domain,
+    path: c.path,
+    expires: c.expirationDate || -1,
+    httpOnly: c.httpOnly,
+    secure: c.secure,
+    sameSite: c.sameSite === "unspecified" ? "Lax" : c.sameSite,
+  }));
+}
+
+/**
+ * Discover a search flow in the user's browser:
+ * 1. Find the main search box on the site's homepage
+ * 2. Fill the query + press Enter
+ * 3. Wait for results, detect repeated card containers
+ * Returns the same step JSON the server-side recorder produces.
+ */
+async function cmdDiscoverFlow(baseUrl, query, flowType) {
+  const u = new URL(baseUrl);
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab || !tab.id) throw new Error("No active tab — open a tab and retry");
+
+  // Ensure we're on the site (don't navigate if already deep on the site).
+  if (!tab.url || !tab.url.includes(u.hostname)) {
+    await cmdNavigate(baseUrl);
+  }
+  await new Promise((r) => setTimeout(r, 1500));
+
+  // Step 1: find the most search-like visible input.
+  const findRes = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    world: "MAIN",
+    func: () => {
+      const inputs = Array.from(
+        document.querySelectorAll("input[type='search'], input[name*='query' i], input[name*='search' i], input[placeholder*='search' i], input[aria-label*='search' i], input[type='text']")
+      );
+      const visible = inputs.filter((el) => el.offsetWidth || el.offsetHeight);
+      const el = visible[0];
+      if (!el) return null;
+      el.scrollIntoView({ block: "center" });
+      if (el.id) return "#" + CSS.escape(el.id);
+      if (el.name) return `${el.tagName.toLowerCase()}[name="${el.name}"]`;
+      return `${el.tagName.toLowerCase()}[type="${el.type}"]`;
+    },
+    args: [],
+  });
+  const searchSel = findRes && findRes[0] && findRes[0].result;
+  if (!searchSel) throw new Error("No search box found on the page");
+
+  const steps = [
+    { action: "navigate", url: baseUrl },
+    { action: "fill", selector: searchSel, param: "query" },
+    { action: "press", key: "Enter" },
+    { action: "wait", seconds: 3 },
+  ];
+
+  await cmdFill(searchSel, query);
+  await cmdPress("Enter");
+  await new Promise((r) => setTimeout(r, 3500));
+
+  // Step 3: detect repeated card containers.
+  const cardRes = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    world: "MAIN",
+    func: () => {
+      const scored = [];
+      for (const el of document.querySelectorAll("article, li, div, section")) {
+        if (!el.querySelector("a")) continue;
+        const textLen = (el.innerText || "").length;
+        if (textLen < 60) continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 150 || rect.height < 40) continue;
+        const siblings = el.parentElement
+          ? Array.from(el.parentElement.children).filter((c) => c.tagName === el.tagName).length
+          : 1;
+        if (siblings >= 2) {
+          let sel = el.tagName.toLowerCase();
+          if (el.id && document.querySelectorAll("#" + CSS.escape(el.id)).length === 1) {
+            sel += "#" + CSS.escape(el.id);
+          } else if (el.className && typeof el.className === "string") {
+            const cls = el.className.trim().split(/\s+/)[0];
+            if (cls) sel += "." + CSS.escape(cls);
+          }
+          scored.push({ sel, textLen });
+        }
+      }
+      scored.sort((a, b) => b.textLen - a.textLen);
+      return scored.slice(0, 5).map((s) => s.sel);
+    },
+    args: [],
+  });
+  const cardCandidates = (cardRes && cardRes[0] && cardRes[0].result) || [];
+  if (cardCandidates.length === 0) {
+    throw new Error("Could not find repeated result cards — search for something first, then retry");
+  }
+
+  // Field mapping: probe the first card for common sub-selectors.
+  const card = cardCandidates[0];
+  const fieldRes = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    world: "MAIN",
+    func: (cardSel) => {
+      const c = document.querySelector(cardSel);
+      if (!c) return {};
+      const link = c.querySelector("a h1, a h2, a h3, a [class*='title'], a");
+      const fields = {};
+      if (link) {
+        const tag = link.tagName.toLowerCase();
+        fields.title = tag + (link.className && typeof link.className === "string" && link.className.trim() ? "." + link.className.trim().split(/\s+/)[0] : "");
+      }
+      return fields;
+    },
+    args: [card],
+  });
+  const fields = (fieldRes && fieldRes[0] && fieldRes[0].result) || {};
+
+  steps.push({ card, fields });
+  return { steps, card, fields, raw: [] };
+}

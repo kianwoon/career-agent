@@ -3,7 +3,7 @@
   "name": "Career Agent Browser",
   "version": "1.0.0",
   "description": "Lets the Career Agent cloud run job/candidate searches in YOUR logged-in browser. No tunnels, no server browsers, no blocks.",
-  "permissions": ["scripting", "tabs", "debugger", "storage"],
+  "permissions": ["scripting", "tabs", "debugger", "storage", "alarms"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js" },
   "action": {

@@ -138,7 +138,9 @@ class AgentRegistry:
                 else:
                     fut.set_exception(RuntimeError(msg.get("error") or "Agent command failed"))
         else:
-            logger.info("Agent note: %.120s", msg)
+            msg_note = msg.get("note", "")
+            if msg_note != "ping":
+                logger.info("Agent note: %.120s", msg)
 
 
 agent_registry = AgentRegistry()
