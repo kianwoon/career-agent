@@ -494,12 +494,28 @@ async def _looks_logged_out(page: Any, base_domain: str) -> str | None:
         return f"Session expired: {base_domain} redirected to a login page"
     if any(p in title for p in _LOGIN_TEXT_PATTERNS):
         return f"Session expired: page title is '{title[:80]}'"
+    # Body-text check: a "Log in" BUTTON in the header is normal even for
+    # signed-in users (MCF shows one always). Only treat it as a login wall
+    # when the page looks like an actual login FORM: a visible password
+    # field, or a short page dominated by login wording.
     try:
-        body = (await page.evaluate("() => document.body?.innerText?.slice(0, 2000) || ''")).lower()
-        if any(p in body[:600] for p in _LOGIN_TEXT_PATTERNS):
+        probe = await page.evaluate(
+            """() => {
+              const t = (document.body?.innerText || '').trim();
+              const pw = document.querySelector("input[type='password']");
+              const pwVisible = !!(pw && (pw.offsetWidth || pw.offsetHeight));
+              return { len: t.length, pwVisible,
+                       head: t.slice(0, 400).toLowerCase() };
+            }"""
+        )
+        if probe.get("pwVisible"):
+            return f"Session expired: {base_domain} is showing a login form"
+        if probe.get("len", 0) < 400 and any(
+            p in probe.get("head", "") for p in _LOGIN_TEXT_PATTERNS
+        ):
             return f"Session expired: {base_domain} is showing a sign-in prompt"
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("login-probe failed: %s", exc)
     return None
 
 
