@@ -272,9 +272,19 @@ export default function Home() {
             );
           }
         } catch (e2) {
-          setTimeline((prev) =>
-            addEvent(prev, "warn", `Auto-record failed: ${e2 instanceof Error ? e2.message : e2}`)
-          );
+          const msg = e2 instanceof Error ? e2.message : String(e2);
+          // 404 = the wizard session was already completed (user pressed Done
+          // while auto-record was running) or cancelled — the Done/Cancel path
+          // reports its own outcome, so don't double-report as a failure.
+          if (msg.includes("404")) {
+            setTimeline((prev) =>
+              addEvent(prev, "info", "Auto-record session already ended (Done pressed or wizard cancelled).")
+            );
+          } else {
+            setTimeline((prev) =>
+              addEvent(prev, "warn", `Auto-record failed: ${msg}`)
+            );
+          }
         } finally {
           clearWizPolls();
           setWizardBusy(null);
@@ -944,11 +954,12 @@ export default function Home() {
                         )}
                         <button
                           className="btn small"
-                          disabled={!wizardBusy?.startsWith(`${s.id}:`)}
+                          disabled={wizardBusy !== `${s.id}:login:` || !wizardBusy}
                           onClick={(e) => {
                             e.preventDefault();
                             handleWizardDone(s, wizardActiveMode(s), wizardActiveFlow(s), query);
                           }}
+                          title={wizardBusy === `${s.id}:login:` ? "Save this session" : "Auto-record completes on its own — no Done needed"}
                         >
                           Done
                         </button>
