@@ -189,19 +189,21 @@ class PacingService:
 
         Simulates a real person: short pause before clicking, per-character
         delays (60-160ms with occasional longer hesitations between words).
+
+        Uses keyboard.type() — press() rejects non-key-name characters like
+        '@' or '.' on headless Linux and throws (that was the 500 on LinkedIn
+        sign-in).
         """
         await self.human_delay("commit")
         await page.click(selector, timeout=10_000)
         await asyncio.sleep(random.uniform(0.2, 0.6))
-        # Type char-by-char; press() sends proper key events per character.
-        for ch in text:
-            await page.keyboard.press(ch) if len(ch) == 1 else None
-            if len(ch) != 1:  # multi-char chunk (safety) — insert as text
-                await page.keyboard.insert_text(ch)
-            await asyncio.sleep(random.uniform(0.06, 0.16))
-            if ch == " " and random.random() < 0.25:
-                # Occasional thinking pause mid-sentence.
-                await asyncio.sleep(random.uniform(0.3, 1.0))
+        for word in text.split(" "):
+            await page.keyboard.type(word, delay=random.uniform(60, 160))
+            if word is not text.split(" ")[-1]:
+                # Type the space, sometimes with a thinking pause after it.
+                await page.keyboard.type(" ", delay=50)
+                if random.random() < 0.25:
+                    await asyncio.sleep(random.uniform(0.3, 1.0))
 
 
 # Process-global pacing budget.

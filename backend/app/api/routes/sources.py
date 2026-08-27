@@ -235,7 +235,13 @@ class WizardCredentials(BaseModel):
 async def wizard_credentials(source_id: str, req: WizardCredentials, mode: str = "login") -> dict:
     """Type credentials into the visible login form (UI-driven sign-in)."""
     wiz = await _wiz(source_id, mode)
-    result = await wiz.fill_credentials(req.username, req.password, req.submit)
+    try:
+        result = await wiz.fill_credentials(req.username, req.password, req.submit)
+    except Exception as exc:
+        # Browser-level failures (unknown key, navigation race) should not 500 —
+        # the wizard stays open and the user can retry or do it via the preview.
+        logger.warning("fill_credentials raised on %s: %s", source_id, exc)
+        result = {"ok": False, "reason": f"Browser error while filling the form: {exc}"}
     if result.get("ok"):
         # Heuristic: if we're no longer on a login-looking page, mark logged in.
         url = result.get("url", "").lower()
