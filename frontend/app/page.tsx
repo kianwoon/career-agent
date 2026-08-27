@@ -1035,7 +1035,7 @@ export default function Home() {
                             />
                             <button
                               className="btn small primary"
-                              disabled={!!wizardBusy || !wizardUser || !wizardPass}
+                              disabled={(!wizardBusy?.startsWith(`${s.id}:`) && !!wizardBusy) || !wizardUser || !wizardPass}
                               onClick={(e) => { e.preventDefault(); handleWizardCredentials(s); }}
                             >
                               Sign in
