@@ -732,6 +732,18 @@ async def discover_flow(
     assert page is not None
 
     try:
+        # --- Step 0: login-wall guard ---------------------------------------
+        # Guest browsing may work on the landing page, but LinkedIn (and
+        # similar) bounce to an authwall on/after search. Detect it NOW so
+        # the user gets "re-login" instead of a cryptic card-discovery failure
+        # 40 seconds later.
+        wall = await _looks_logged_out(page, domain_of(base_url))
+        if wall:
+            raise RuntimeError(
+                f"{wall} Auto-record needs a signed-in session — press "
+                "'Re-login' on this source first, then record the flow again."
+            )
+
         # --- Step 1: identify the search input -----------------------------
         inputs = await page.evaluate(
             """() => Array.from(document.querySelectorAll('input, textarea')).map((el, i) => ({
@@ -801,10 +813,19 @@ async def discover_flow(
         # SPA/infinite-scroll sites (LinkedIn, MCF) render results in waves;
         # poll until repeated cards appear, with human "reading" pauses.
         cards = []
-        for _ in range(10):  # up to ~45s
+        for i in range(10):  # up to ~45s
             cards = await page.evaluate(_CARD_DISCOVERY_JS)
             if cards:
                 break
+            # The wall can appear AFTER the search submit — bail out early
+            # with the actionable message instead of timing out cryptically.
+            if i >= 2:  # give the results page a fair chance first
+                wall = await _looks_logged_out(page, domain_of(base_url))
+                if wall:
+                    raise RuntimeError(
+                        f"{wall} Bounced to a login wall during the search — "
+                        "press 'Re-login' on this source first, then record again."
+                    )
             await pacing.human_delay("read")
 
         # --- Step 3: identify result cards ---------------------------------

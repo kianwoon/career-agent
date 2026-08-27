@@ -161,6 +161,12 @@ async def wizard_start(
             logger.warning("Could not decrypt source session: %s", exc)
 
     wiz = WizardSession(source.id, req.flow_type or "login", domain=source.domain)
+    logger.info(
+        "Wizard start %s/%s: session_state=%s",
+        source_id,
+        req.mode,
+        "present" if storage_state else "NONE (logged-out guest browsing)",
+    )
     try:
         await wiz.start(start_url, storage_state)
     except Exception as exc:
