@@ -133,7 +133,7 @@ async def _search_custom_sources(
 
     source_ids = state.get("source_ids")
     async with async_session() as db:
-        stmt = select(Source).where(Source.enabled == True)
+        stmt = select(Source).where(Source.enabled.is_(True))
         if source_ids:
             stmt = stmt.where(Source.id.in_(source_ids))
         sources = (await db.execute(stmt)).scalars().all()
@@ -240,7 +240,7 @@ async def run_search(state: AgentState) -> AgentState:
             enabled_domains = set(
                 (
                     await db.execute(
-                        select(Source.domain).where(Source.enabled == True)  # noqa: E712
+                        select(Source.domain).where(Source.enabled.is_(True))
                     )
                 ).scalars().all()
             )

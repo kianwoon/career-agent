@@ -374,7 +374,8 @@ export default function Home() {
 
   async function handleWizardCredentials(source: SourceView) {
     if (!wizardUser || !wizardPass) return;
-    setWizardBusy(`${source.id}:login:`);
+    // Keep the wizard key set: the browser session is still live and the
+    // in-card preview must stay mounted until Done/Cancel ends the wizard.
     try {
       const res = await wizardCredentials(source.id, "login", wizardUser, wizardPass);
       if (!res.ok) {
@@ -389,8 +390,6 @@ export default function Home() {
       setShotUrl(`${url}&t=${Date.now()}`);
     } catch (e) {
       setTimeline((prev) => addEvent(prev, "warn", `Sign-in error: ${e instanceof Error ? e.message : e}`));
-    } finally {
-      setWizardBusy(null);
     }
   }
 
@@ -865,7 +864,7 @@ export default function Home() {
                   const ready = s.has_session && (mode === "jobs" ? s.flows.find_jobs === "active" : s.flows.find_candidates === "active");
                   const enabled = s.enabled;
                   return (
-                    <label
+                    <div
                       key={s.id}
                       className={`source-card ${ready ? "ready" : ""} ${enabled ? "selected" : ""} ${isRunning || !s.enabled ? "locked" : ""} ${wizardBusy?.startsWith(`${s.id}:`) ? "wizard-active" : ""}`}
                       title={`${s.domain} — ${enabled ? (ready ? "ready" : "enabled, setup incomplete") : "disabled — checkbox to include"}`}
@@ -1071,7 +1070,7 @@ export default function Home() {
                           "{query || "software engineer"}" and finding the result cards. Watch the activity feed — this takes ~30s.
                         </span>
                       )}
-                    </label>
+                    </div>
                   );
                 })}
 
