@@ -124,6 +124,7 @@ export default function Home() {
   const [qrMode, setQrMode] = useState(false);
   const [loginDone, setLoginDone] = useState(false);
   const [shotLoading, setShotLoading] = useState(false);
+  const [reloginNeeded, setReloginNeeded] = useState<string | null>(null);
   const [shotError, setShotError] = useState(false);
   const loginDoneRef = useRef(false);
   const __wizLoginPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -464,6 +465,7 @@ export default function Home() {
 
   async function handleRunSearch() {
     if (!query.trim() || isRunning) return;
+    setReloginNeeded(null);
     setPhase("running");
     setResults([]);
     setVerdicts({});
@@ -508,11 +510,12 @@ export default function Home() {
       }
       if (response.status === "paused") {
         setPhase("error");
+        setReloginNeeded("A source session has expired. Re-login, then run the search again.");
         setTimeline((prev) =>
           addEvent(
             prev,
             "warn",
-            "Search paused — the browser session needs human attention (MFA/CAPTCHA/expired login)."
+            "Search paused — a source session expired and needs re-login (password or QR scan)."
           )
         );
         return;
@@ -756,6 +759,22 @@ export default function Home() {
           <strong>Human takeover active.</strong> The agent is paused; you are
           in manual control. Review results below and approve or reject before
           returning control.
+        </div>
+      )}
+
+      {reloginNeeded && (
+        <div className="banner relogin-banner" role="alert">
+          <strong>🔑 Re-login required.</strong> {reloginNeeded}
+          <button
+            className="btn small primary"
+            onClick={() => {
+              const details = document.querySelector("details.add-source") as HTMLDetailsElement | null;
+              if (details) details.open = true;
+              details?.scrollIntoView({ behavior: "smooth", block: "center" });
+            }}
+          >
+            Open source setup
+          </button>
         </div>
       )}
 

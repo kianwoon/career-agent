@@ -1266,3 +1266,16 @@ body {
   height: 0;
   overflow: hidden;
 }
+
+.relogin-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  margin-bottom: 12px;
+  border: 1px solid var(--orange, #e08b1f);
+  border-radius: 8px;
+  background: rgba(224, 139, 31, 0.08);
+  font-size: 14px;
+}

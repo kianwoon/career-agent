@@ -197,6 +197,28 @@ async def run_search(state: AgentState) -> AgentState:
     custom_raw, custom_ok, custom_failed, custom_issues = await _search_custom_sources(state)
     # Stash structured per-source issues so the API can surface them.
     state = {**state, "source_issues": custom_issues}
+    # A source requiring login is a hard blocker: pause for human re-login
+    # (QR scan / credentials) even if other sources returned results.
+    expired = [
+        i for i in custom_issues
+        if any(k in i.get("reason", "").lower() for k in ("expired", "login", "sign in"))
+    ]
+    if expired:
+        return {
+            **state,
+            "raw_results": [],
+            "results": [],
+            "needs_human": True,
+            "human_reason": (
+                "Re-login required: "
+                + "; ".join(f"{i['source']} ({i['reason']})" for i in expired)
+            ),
+            "timeline": _log(
+                state,
+                "RUN SEARCH",
+                "Paused — source session expired: " + ", ".join(i["source"] for i in expired),
+            ),
+        }
 
     # -------------------------------------------------------
     # Jobs -> run LinkedIn + MyCareersFuture + FastJobs in parallel
