@@ -112,6 +112,7 @@ export default function Home() {
   const [newSourceName, setNewSourceName] = useState("");
   const [newSourceUrl, setNewSourceUrl] = useState("");
   const [wizardBusy, setWizardBusy] = useState<string | null>(null);
+  const [wizardHint, setWizardHint] = useState<string | null>(null);
   const [takeoverActive, setTakeoverActive] = useState(false);
   const [browserSession, setBrowserSession] = useState<BrowserSessionView | null>(null);
   const [sessionBusy, setSessionBusy] = useState(false);
@@ -198,7 +199,20 @@ export default function Home() {
     setWizardBusy(key);
     try {
       await wizardStart(source.id, mode, flowType);
-      setTimeline((prev) => addEvent(prev, "action", `Wizard started for ${source.name} (${mode}${flowType ? ` ${flowType}` : ""}). A browser window opened — drive it, then press Done.`));
+      const stepLabel =
+        mode === "login"
+          ? "Sign in to the site in the browser window that just opened."
+          : flowType === "find_jobs"
+            ? "In the browser window: search for a job like a normal user (e.g. type a role and press search)."
+            : "In the browser window: search for a candidate like a normal user.";
+      setTimeline((prev) =>
+        addEvent(prev, "action", `Setup started for ${source.name}. ${stepLabel} When finished, press "Done" here.`)
+      );
+      setWizardHint(
+        mode === "login"
+          ? `A browser tab opened on ${source.domain}. Sign in there, then come back and press Done.`
+          : `${"1) Do ONE search like a normal user.  2) Alt-click a result card to mark it (required).  3) Press Done."}`
+      );
 
       // Poll events while the user drives the wizard browser.
       const poll = setInterval(() => {
@@ -206,7 +220,17 @@ export default function Home() {
       }, 1500);
       (window as unknown as { __wizPoll?: ReturnType<typeof setInterval> }).__wizPoll = poll;
     } catch (e) {
-      setTimeline((prev) => addEvent(prev, "warn", `Wizard start failed: ${e instanceof Error ? e.message : e}`));
+      const msg = e instanceof Error ? e.message : String(e);
+      setTimeline((prev) =>
+        addEvent(
+          prev,
+          "warn",
+          msg.includes("CDP")
+            ? "Could not reach your browser. Start the browser bridge on your computer (run ./tunnel.sh start), then try again."
+            : `Wizard start failed: ${msg}`
+        )
+      );
+      setWizardHint(null);
       setWizardBusy(null);
     }
   }
@@ -227,6 +251,7 @@ export default function Home() {
       setTimeline((prev) => addEvent(prev, "warn", `Wizard complete failed: ${e instanceof Error ? e.message : e}`));
     } finally {
       setWizardBusy(null);
+      setWizardHint(null);
     }
   }
 
@@ -235,6 +260,7 @@ export default function Home() {
     if (poll) clearInterval(poll);
     await wizardCancel(source.id, mode).catch(() => {});
     setWizardBusy(null);
+    setWizardHint(null);
     setTimeline((prev) => addEvent(prev, "info", "Wizard cancelled."));
   }
 
@@ -671,7 +697,8 @@ export default function Home() {
                       </button>
                     </div>
                     <span className="wizard-hint">
-                      In the wizard browser: sign in / perform one search. Alt-click a result card to mark it as the result template.
+                      {wizardHint ??
+                        "Use the buttons above to set up this source, one step at a time."}
                     </span>
                   </div>
                 ))}
@@ -708,7 +735,8 @@ export default function Home() {
           </div>
         </section>
 
-        <section className="panel history-panel">
+        {wizardBusy === null && (
+          <section className="panel history-panel">
           <div className="panel-head">
             <h2>Past Searches</h2>
             <button className="link-btn" onClick={loadHistory} disabled={sessionBusy}>
@@ -743,6 +771,7 @@ export default function Home() {
             </ul>
           )}
         </section>
+        )}
 
         <div className="columns">
           <section className="panel results-panel">
