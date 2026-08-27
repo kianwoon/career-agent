@@ -242,18 +242,28 @@ class WizardSession:
     async def fill_credentials(self, username: str, password: str, submit: bool = True) -> dict[str, Any]:
         """Type credentials into the best-matching fields on the current page."""
         assert self.page, "wizard not started"
+        from app.services.pacing import pacing
 
-        async def _find(selectors: list[str]) -> str | None:
-            for sel in selectors:
-                try:
-                    el = self.page.locator(sel).first
-                    if await el.count() > 0 and await el.is_visible():
-                        return sel
-                except Exception as exc:
-                    logger.debug("selector probe failed for %s: %s", sel, exc)
+        async def _find(selectors: list[str], retries: int = 3) -> str | None:
+            """Probe for a visible field, retrying — SPA forms render late."""
+            for attempt in range(retries):
+                for sel in selectors:
+                    try:
+                        el = self.page.locator(sel).first
+                        if await el.count() > 0 and await el.is_visible():
+                            return sel
+                    except Exception as exc:
+                        logger.debug("selector probe failed for %s: %s", sel, exc)
+                if attempt < retries - 1:
+                    # LinkedIn's authwall form is client-rendered; give it time.
+                    await pacing.human_pause_reading((1.5, 2.5))
             return None
 
+        # LinkedIn's authwall login form uses stable ids — probe them FIRST
+        # (the generic name/type probes can miss its custom markup).
         user_sel = await _find([
+            "#session_key",
+            "input[name='session_key']",
             "input[type='email']",
             "input[type='text'][name*='user' i]",
             "input[type='text'][id*='user' i]",
@@ -262,21 +272,33 @@ class WizardSession:
             "input[type='text']:not([name*='search' i])",
             "input[type='tel']",
         ])
-        pass_sel = await _find(["input[type='password']"])
+        pass_sel = await _find([
+            "#session_password",
+            "input[name='session_password']",
+            "input[type='password']",
+        ])
+
+        # If we have LinkedIn's known login fields by id but they don't report
+        # visible (off-screen variant), still use them — Playwright can fill
+        # offscreen inputs, and submitting works.
+        if not (user_sel and pass_sel):
+            fallback_user = await self.page.locator("#session_key, input[name='session_key']").first.count()
+            fallback_pass = await self.page.locator("#session_password, input[name='session_password']").first.count()
+            if fallback_user and fallback_pass:
+                user_sel = user_sel or "#session_key"
+                pass_sel = pass_sel or "#session_password"
 
         # Landing on a sign-UP page (e.g. LinkedIn /authwall "Join LinkedIn")?
         # The login form is behind a "Sign in" link — click it, wait for the
         # login form to render, then re-probe.
         if not (user_sel and pass_sel):
             sign_in_link = await _find([
+                "a[data-testid='sign-in-link']",
                 "a:has-text('Sign in')",
                 "a:has-text('Log in')",
-                "a[data-testid='sign-in-link']",
                 "a:has-text('Already on LinkedIn')",
-            ])
+            ], retries=1)
             if sign_in_link:
-                from app.services.pacing import pacing
-
                 await pacing.human_delay("commit")
                 await self.page.click(sign_in_link, timeout=5_000)
                 try:
@@ -285,14 +307,35 @@ class WizardSession:
                     pass
                 await pacing.human_pause_reading((1.5, 3.0))
                 user_sel = await _find([
+                    "#session_key",
+                    "input[name='session_key']",
                     "input[type='email']",
                     "input[type='text'][name*='user' i]",
                     "input[type='text'][name*='email' i]",
                     "input[type='text']:not([name*='search' i])",
                 ])
-                pass_sel = await _find(["input[type='password']"])
+                pass_sel = await _find([
+                    "#session_password",
+                    "input[name='session_password']",
+                    "input[type='password']",
+                ])
 
         if not user_sel or not pass_sel:
+            # Diagnostic: what does the page actually show?
+            try:
+                probe = await self.page.evaluate(
+                    """() => ({
+                      url: location.href.slice(0, 120),
+                      title: document.title.slice(0, 60),
+                      inputs: Array.from(document.querySelectorAll('input')).slice(0, 8).map(i => ({
+                        id: i.id, name: i.name, type: i.type,
+                        visible: !!(i.offsetWidth || i.offsetHeight),
+                      })),
+                    })"""
+                )
+                logger.warning("fill_credentials failed. Page: %s", probe)
+            except Exception:
+                pass
             return {
                 "ok": False,
                 "reason": "No username/password fields visible on the page — "
