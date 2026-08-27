@@ -1377,28 +1377,85 @@ body {
   padding: 0 2px;
 }
 
-.add-source {
-  font-size: 13px;
-}
-
-.add-source summary {
-  cursor: pointer;
-  color: var(--blue, #4f8cff);
-  font-weight: 600;
-}
-
 .add-source-body {
   display: flex;
   gap: 8px;
-  margin: 8px 0;
   flex-wrap: wrap;
 }
 
 .add-source-body input {
+  flex: 1;
+  min-width: 120px;
   padding: 6px 10px;
-  border: 1px solid var(--border, #dde3ea);
+  border: 1px solid var(--border, #242c3a);
   border-radius: 6px;
   font-size: 13px;
+  background: var(--bg-elev-2, #1b2230);
+  color: var(--text, #e7eaf0);
+}
+
+.add-source-card {
+  border-style: dashed;
+  border-color: var(--border, #242c3a);
+  background: transparent;
+  cursor: default;
+  justify-content: flex-start;
+}
+
+.add-source-card:hover {
+  border-color: var(--accent, #4f8cff);
+}
+
+.add-source-card .add-avatar {
+  background: var(--accent-soft, rgba(79, 140, 255, 0.12));
+  color: var(--accent, #4f8cff);
+  font-size: 26px;
+  font-weight: 400;
+}
+
+.source-card.wizard-active {
+  grid-column: 1 / -1;
+  cursor: default;
+}
+
+.source-card .wizard-browser {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.source-card .wizard-shot {
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid var(--border, #242c3a);
+}
+
+.source-card .wizard-shot-qr {
+  width: 320px;
+  max-width: 100%;
+}
+
+.source-card .wizard-cred-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.source-card .wizard-cred-row input {
+  flex: 1;
+  min-width: 110px;
+  padding: 6px 10px;
+  border: 1px solid var(--border, #242c3a);
+  border-radius: 6px;
+  font-size: 13px;
+  background: var(--bg-elev-2, #1b2230);
+  color: var(--text, #e7eaf0);
+}
+
+.source-card .wizard-hint {
+  font-size: 11px;
+  color: var(--text-muted, #8b94a7);
 }
 
 .wizard-steps {

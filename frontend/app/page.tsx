@@ -206,12 +206,6 @@ export default function Home() {
     });
   }
 
-  /** Expand the "Add a new source" setup section so wizard UI is visible. */
-  function openSetupSection() {
-    const details = document.querySelector("details.add-source") as HTMLDetailsElement | null;
-    if (details) details.open = true;
-  }
-
   async function handleAddSource() {
     if (!newSourceName.trim() || !newSourceUrl.trim()) return;
     setWizardBusy("create");
@@ -795,12 +789,12 @@ export default function Home() {
           <button
             className="btn small primary"
             onClick={() => {
-              const details = document.querySelector("details.add-source") as HTMLDetailsElement | null;
-              if (details) details.open = true;
-              details?.scrollIntoView({ behavior: "smooth", block: "center" });
+              document
+                .querySelector(".sources-panel")
+                ?.scrollIntoView({ behavior: "smooth", block: "center" });
             }}
           >
-            Open source setup
+            Open sources
           </button>
         </div>
       )}
@@ -850,15 +844,18 @@ export default function Home() {
               )}
             </div>
 
-            {customSources.length > 0 && (
-              <div className="sources-grid">
-                {customSources.map((s) => {
+            {customSources.length === 0 && (
+              <span className="sources-empty">No custom sources yet — add one below.</span>
+            )}
+
+            <div className="sources-grid">
+              {customSources.map((s) => {
                   const ready = s.has_session && (mode === "jobs" ? s.flows.find_jobs === "active" : s.flows.find_candidates === "active");
                   const selected = selectedSourceIds.has(s.id);
                   return (
                     <label
                       key={s.id}
-                      className={`source-card ${ready ? "ready" : ""} ${selected ? "selected" : ""} ${isRunning || !ready ? "locked" : ""}`}
+                      className={`source-card ${ready ? "ready" : ""} ${selected ? "selected" : ""} ${isRunning || !ready ? "locked" : ""} ${wizardBusy?.startsWith(`${s.id}:`) ? "wizard-active" : ""}`}
                       title={`${s.domain} — ${ready ? "ready" : "setup incomplete"}`}
                     >
                       <div className="source-card-top">
@@ -902,7 +899,6 @@ export default function Home() {
                           onClick={(e) => {
                             e.preventDefault();
                             handleWizard(s, "login");
-                            openSetupSection();
                           }}
                           title={s.has_session ? "Sign in again (session may have expired)" : "Sign in to this site"}
                         >
@@ -916,7 +912,6 @@ export default function Home() {
                               onClick={(e) => {
                                 e.preventDefault();
                                 handleWizard(s, "record", "find_jobs");
-                                openSetupSection();
                               }}
                               title="Re-record the job-search flow"
                             >
@@ -928,7 +923,6 @@ export default function Home() {
                               onClick={(e) => {
                                 e.preventDefault();
                                 handleWizard(s, "record", "find_candidates");
-                                openSetupSection();
                               }}
                               title="Re-record the candidate-search flow"
                             >
@@ -936,185 +930,174 @@ export default function Home() {
                             </button>
                           </>
                         )}
+                        <button
+                          className="btn small"
+                          disabled={!wizardBusy?.startsWith(`${s.id}:`)}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            handleWizardDone(s, wizardActiveMode(s), wizardActiveFlow(s), query);
+                          }}
+                        >
+                          Done
+                        </button>
+                        <button
+                          className="btn small"
+                          disabled={!wizardBusy?.startsWith(`${s.id}:`) || wizardBusy === `${s.id}:login:`}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            handleWizardCancel(s, wizardActiveMode(s));
+                          }}
+                        >
+                          Cancel
+                        </button>
                       </div>
+                      {wizardBusy?.startsWith(`${s.id}:login`) && (
+                        <div className="wizard-browser">
+                          {loginDone && (
+                            <div className="wizard-login-done">✅ Sign-in detected — press Done to save this session.</div>
+                          )}
+                          {shotLoading && !shotError && !shotUrl && (
+                            <div className="wizard-shot-loading">
+                              <span className="spinner" aria-hidden /> Loading {s.domain} in the secure browser… this can take up to 30s
+                            </div>
+                          )}
+                          {shotError && (
+                            <div className="wizard-shot-loading">
+                              Preview unavailable.{" "}
+                              <button className="btn small" onClick={(e) => { e.preventDefault(); setShotError(false); setShotLoading(true); refreshWizardShot(s); }}>
+                                Retry
+                              </button>
+                            </div>
+                          )}
+                          {shotUrl && (
+                            /* eslint-disable-next-line @next/next/no-img-element */
+                            <img
+                              className={`wizard-shot ${qrMode ? "wizard-shot-qr" : ""}`}
+                              src={shotUrl}
+                              alt="Live browser preview"
+                              onLoad={() => { setShotLoading(false); setShotError(false); }}
+                              onError={() => { setShotLoading(false); setShotError(true); }}
+                              onClick={(e) => {
+                                if (qrMode) return; // QR crop: no click-through
+                                // click-through: forward coordinates to the backend
+                                const rect = (e.target as HTMLImageElement).getBoundingClientRect();
+                                const scaleX = 1280 / rect.width;
+                                const scaleY = 900 / rect.height;
+                                wizardClick(s.id, "login", Math.round((e.clientX - rect.left) * scaleX), Math.round((e.clientY - rect.top) * scaleY))
+                                  .then(() => refreshWizardShot(s))
+                                  .catch(() => {});
+                              }}
+                            />
+                          )}
+                          <div className="wizard-cred-row">
+                            <button className="btn small" onClick={(e) => { e.preventDefault(); refreshWizardShot(s); }}>↻ Refresh preview</button>
+                            <button
+                              className={`btn small ${qrMode ? "primary" : ""}`}
+                              onClick={(e) => { e.preventDefault(); const next = !qrMode; setQrMode(next); refreshWizardShot(s, next ? "qr" : "page"); }}
+                            >
+                              {qrMode ? "📱 QR mode: ON" : "📱 QR code login"}
+                            </button>
+                            <span className="wizard-hint">
+                              {qrMode
+                                ? "Auto-refreshing the QR every 5s — scan it with your phone."
+                                : "Site uses QR login? Toggle QR mode and scan with your phone."}
+                            </span>
+                          </div>
+                          <div className="wizard-cred-row">
+                            <input
+                              type="text"
+                              value={wizardUser}
+                              onChange={(e) => setWizardUser(e.target.value)}
+                              placeholder="Username / email"
+                              aria-label="Username"
+                              autoComplete="off"
+                            />
+                            <input
+                              type="password"
+                              value={wizardPass}
+                              onChange={(e) => setWizardPass(e.target.value)}
+                              placeholder="Password"
+                              aria-label="Password"
+                              autoComplete="new-password"
+                            />
+                            <button
+                              className="btn small primary"
+                              disabled={!!wizardBusy || !wizardUser || !wizardPass}
+                              onClick={(e) => { e.preventDefault(); handleWizardCredentials(s); }}
+                            >
+                              Sign in
+                            </button>
+                          </div>
+                          <div className="wizard-cred-row">
+                            <input
+                              type="text"
+                              value={wizardMfaCode}
+                              onChange={(e) => setWizardMfaCode(e.target.value)}
+                              placeholder="MFA / OTP code (if asked)"
+                              aria-label="MFA code"
+                              maxLength={10}
+                            />
+                            <button
+                              className="btn small"
+                              disabled={!wizardMfaCode}
+                              onClick={(e) => { e.preventDefault(); handleWizardMfa(s); }}
+                            >
+                              Submit code
+                            </button>
+                          </div>
+                          <span className="wizard-hint">
+                            The site runs in a secure browser on the server. Sign in here
+                            (credentials are typed into the page, never stored). Handle any
+                            CAPTCHA/MFA in the preview by clicking it, then press Done once signed in.
+                          </span>
+                        </div>
+                      )}
+                      {wizardBusy?.startsWith(`${s.id}:record`) && (
+                        <span className="wizard-hint">
+                          Auto-recording in progress: the agent is visiting {s.domain}, searching for
+                          "{query || "software engineer"}" and finding the result cards. Watch the activity feed — this takes ~30s.
+                        </span>
+                      )}
                     </label>
                   );
                 })}
-              </div>
-            )}
 
-            <details className="add-source">
-              <summary>Add a new source</summary>
-              <div className="add-source-body">
-                <input
-                  type="text"
-                  value={newSourceName}
-                  onChange={(e) => setNewSourceName(e.target.value)}
-                  placeholder="Name, e.g. FastJob"
-                  aria-label="Source name"
-                />
-                <input
-                  type="text"
-                  value={newSourceUrl}
-                  onChange={(e) => setNewSourceUrl(e.target.value)}
-                  placeholder="URL, e.g. fastjob.com"
-                  aria-label="Source URL"
-                />
-                <button className="btn" onClick={handleAddSource} disabled={wizardBusy === "create" || !newSourceName.trim() || !newSourceUrl.trim()}>
-                  Add
-                </button>
-              </div>
-              {customSources
-                .filter((s) => !s.has_session || !s.flows.find_jobs || !s.flows.find_candidates)
-                .map((s) => (
-                  <div key={s.id} className="wizard-steps">
-                    <strong>{s.name}</strong> setup:
-                    <div className="wizard-actions">
-                      <button className="btn small" disabled={!!wizardBusy} onClick={() => handleWizard(s, "login")}>
-                        {s.has_session ? "Re-login" : "1. Login"}
-                      </button>
-                      {s.has_session && (
-                        <>
-                          <button className="btn small" disabled={!!wizardBusy} onClick={() => handleWizard(s, "record", "find_jobs")}>
-                            {s.flows.find_jobs === "active" ? "Re-record" : "2. Auto-record"} jobs flow
-                          </button>
-                          <button className="btn small" disabled={!!wizardBusy} onClick={() => handleWizard(s, "record", "find_candidates")}>
-                            {s.flows.find_candidates === "active" ? "Re-record" : "3. Auto-record"} candidates flow
-                          </button>
-                        </>
-                      )}
-                      <button
-                        className="btn small"
-                        disabled={!wizardBusy?.startsWith(`${s.id}:`)}
-                        onClick={() => handleWizardDone(s, wizardActiveMode(s), wizardActiveFlow(s), query)}
-                      >
-                        Done
-                      </button>
-                      <button
-                        className="btn small"
-                        disabled={!wizardBusy?.startsWith(`${s.id}:`) || wizardBusy === `${s.id}:login:`}
-                        onClick={() => handleWizardCancel(s, wizardActiveMode(s))}
-                      >
-                        Cancel
-                      </button>
+                {/* Add-a-source card */}
+                <div className="source-card add-source-card">
+                  <div className="source-card-top">
+                    <span className="source-card-avatar add-avatar" aria-hidden="true">+</span>
+                    <div className="source-card-id">
+                      <span className="source-card-name">Add a new source</span>
+                      <span className="source-card-domain">any job or candidate site</span>
                     </div>
-
-                    {wizardBusy?.startsWith(`${s.id}:login`) && (
-                      <div className="wizard-browser">
-                        {loginDone && (
-                          <div className="wizard-login-done">✅ Sign-in detected — press Done to save this session.</div>
-                        )}
-                        {shotLoading && !shotError && !shotUrl && (
-                          <div className="wizard-shot-loading">
-                            <span className="spinner" aria-hidden /> Loading {s.domain} in the secure browser… this can take up to 30s
-                          </div>
-                        )}
-                        {shotError && (
-                          <div className="wizard-shot-loading">
-                            Preview unavailable.{" "}
-                            <button className="btn small" onClick={() => { setShotError(false); setShotLoading(true); refreshWizardShot(s); }}>
-                              Retry
-                            </button>
-                          </div>
-                        )}
-                        {shotUrl && (
-                          /* eslint-disable-next-line @next/next/no-img-element */
-                          <img
-                            className={`wizard-shot ${qrMode ? "wizard-shot-qr" : ""}`}
-                            src={shotUrl}
-                            alt="Live browser preview"
-                            onLoad={() => { setShotLoading(false); setShotError(false); }}
-                            onError={() => { setShotLoading(false); setShotError(true); }}
-                            onClick={(e) => {
-                              if (qrMode) return; // QR crop: no click-through
-                              // click-through: forward coordinates to the backend
-                              const rect = (e.target as HTMLImageElement).getBoundingClientRect();
-                              const scaleX = 1280 / rect.width;
-                              const scaleY = 900 / rect.height;
-                              wizardClick(s.id, "login", Math.round((e.clientX - rect.left) * scaleX), Math.round((e.clientY - rect.top) * scaleY))
-                                .then(() => refreshWizardShot(s))
-                                .catch(() => {});
-                            }}
-                          />
-                        )}
-                        <div className="wizard-cred-row">
-                          <button className="btn small" onClick={() => refreshWizardShot(s)}>↻ Refresh preview</button>
-                          <button
-                            className={`btn small ${qrMode ? "primary" : ""}`}
-                            onClick={() => { const next = !qrMode; setQrMode(next); refreshWizardShot(s, next ? "qr" : "page"); }}
-                          >
-                            {qrMode ? "📱 QR mode: ON" : "📱 QR code login"}
-                          </button>
-                          <span className="wizard-hint">
-                            {qrMode
-                              ? "Auto-refreshing the QR every 5s — scan it with your phone."
-                              : "Site uses QR login? Toggle QR mode and scan with your phone."}
-                          </span>
-                        </div>
-                        <div className="wizard-cred-row">
-                          <input
-                            type="text"
-                            value={wizardUser}
-                            onChange={(e) => setWizardUser(e.target.value)}
-                            placeholder="Username / email"
-                            aria-label="Username"
-                            autoComplete="off"
-                          />
-                          <input
-                            type="password"
-                            value={wizardPass}
-                            onChange={(e) => setWizardPass(e.target.value)}
-                            placeholder="Password"
-                            aria-label="Password"
-                            autoComplete="new-password"
-                          />
-                          <button
-                            className="btn small primary"
-                            disabled={!!wizardBusy || !wizardUser || !wizardPass}
-                            onClick={() => handleWizardCredentials(s)}
-                          >
-                            Sign in
-                          </button>
-                        </div>
-                        <div className="wizard-cred-row">
-                          <input
-                            type="text"
-                            value={wizardMfaCode}
-                            onChange={(e) => setWizardMfaCode(e.target.value)}
-                            placeholder="MFA / OTP code (if asked)"
-                            aria-label="MFA code"
-                            maxLength={10}
-                          />
-                          <button
-                            className="btn small"
-                            disabled={!wizardMfaCode}
-                            onClick={() => handleWizardMfa(s)}
-                          >
-                            Submit code
-                          </button>
-                        </div>
-                        <span className="wizard-hint">
-                          The site runs in a secure browser on the server. Sign in here
-                          (credentials are typed into the page, never stored). Handle any
-                          CAPTCHA/MFA in the preview by clicking it, then press Done once signed in.
-                        </span>
-                      </div>
-                    )}
-                    {wizardBusy?.startsWith(`${s.id}:record`) && (
-                      <span className="wizard-hint">
-                        Auto-recording in progress: the agent is visiting {s.domain}, searching for
-                        "{query || "software engineer"}" and finding the result cards. Watch the activity feed — this takes ~30s.
-                      </span>
-                    )}
-                    {wizardBusy === null && (
-                      <span className="wizard-hint">
-                        {wizardHint ?? "Use the buttons above to set up this source, one step at a time."}
-                      </span>
-                    )}
                   </div>
-                ))}
-            </details>
-          </div>
+                  <div className="add-source-body">
+                    <input
+                      type="text"
+                      value={newSourceName}
+                      onChange={(e) => setNewSourceName(e.target.value)}
+                      placeholder="Name, e.g. FastJob"
+                      aria-label="Source name"
+                    />
+                    <input
+                      type="text"
+                      value={newSourceUrl}
+                      onChange={(e) => setNewSourceUrl(e.target.value)}
+                      placeholder="URL, e.g. fastjob.com"
+                      aria-label="Source URL"
+                    />
+                    <button
+                      className="btn small primary"
+                      onClick={handleAddSource}
+                      disabled={wizardBusy === "create" || !newSourceName.trim() || !newSourceUrl.trim()}
+                    >
+                      {wizardBusy === "create" ? "Adding…" : "Add source"}
+                     </button>
+                   </div>
+                 </div>
+               </div>
+           </div>
+
 
           <div className="task-status" role="status">
             <div className="task-status-row">
