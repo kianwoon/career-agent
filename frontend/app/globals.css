@@ -1196,3 +1196,39 @@ body {
   font-size: 11px;
   color: var(--text-secondary, #8899aa);
 }
+
+/* --------------------- Wizard browser preview ---------------------- */
+
+.wizard-browser {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border, #dde3ea);
+  border-radius: 8px;
+  background: var(--bg-subtle, #f7f9fb);
+}
+
+.wizard-shot {
+  width: 100%;
+  border: 1px solid var(--border, #dde3ea);
+  border-radius: 6px;
+  cursor: crosshair;
+  background: #fff;
+}
+
+.wizard-cred-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.wizard-cred-row input {
+  flex: 1 1 140px;
+  min-width: 120px;
+  padding: 6px 10px;
+  border: 1px solid var(--border, #dde3ea);
+  border-radius: 6px;
+  font-size: 13px;
+}

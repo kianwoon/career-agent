@@ -109,6 +109,11 @@ async def require_api_key(
         if request.url.path == public or request.url.path.startswith(public + "/"):
             return "public"
 
+    # Query-param fallback: <img src> cannot set custom headers, so the wizard
+    # screenshot endpoint is polled via GET .../screenshot?api_key=...
+    if not x_api_key:
+        x_api_key = request.query_params.get("api_key")
+
     if not x_api_key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

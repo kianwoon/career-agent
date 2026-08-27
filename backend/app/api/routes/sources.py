@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,8 +20,6 @@ from app.models.schemas import (
     SourceView,
     WizardCompleteRequest,
     WizardCompleteResponse,
-    WizardEvent,
-    WizardPollResponse,
     WizardStartRequest,
     WizardStartResponse,
 )
@@ -28,9 +27,9 @@ from app.services.encryption import encrypt_session_state
 from app.services.source_flows import (
     FLOW_TYPES,
     WizardSession,
+    discover_flow,
     domain_of,
     execute_flow,
-    templatize,
 )
 
 logger = logging.getLogger(__name__)
@@ -143,26 +142,81 @@ async def wizard_start(
         await wiz.start(start_url, storage_state)
     except Exception as exc:
         await wiz.close()
-        raise HTTPException(
-            502,
-            "Could not open wizard browser. Ensure the CDP browser bridge is "
-            f"reachable (BRAVE_CDP_URL). Details: {exc}",
-        )
+        raise HTTPException(502, f"Could not start wizard browser in container: {exc}")
 
     _wizards[wizard_id] = wiz
     return WizardStartResponse(wizard_id=wizard_id, mode=req.mode, start_url=start_url)
 
 
-@router.get("/{source_id}/wizard/events", response_model=WizardPollResponse)
-async def wizard_poll(source_id: str, mode: str = "record") -> WizardPollResponse:
+async def _wiz(source_id: str, mode: str) -> WizardSession:
     wiz = _wizards.get(f"wiz-{source_id}-{mode}")
     if wiz is None:
-        raise HTTPException(404, "No active wizard session")
-    fresh = await wiz.drain_events()
-    return WizardPollResponse(
-        events=[WizardEvent(**e) for e in fresh],
-        total_events=len(wiz.events),
-    )
+        raise HTTPException(404, "No active wizard session (expired or completed)")
+    return wiz
+
+
+@router.get("/{source_id}/wizard/screenshot")
+async def wizard_screenshot(source_id: str, mode: str = "login"):
+    """Live PNG of the wizard browser. The UI polls this for a live view."""
+    from fastapi import Response
+
+    wiz = await _wiz(source_id, mode)
+    png = await wiz.screenshot()
+    if png is None:
+        raise HTTPException(502, "Screenshot unavailable — browser may be navigating")
+    return Response(content=png, media_type="image/png")
+
+
+@router.get("/{source_id}/wizard/status")
+async def wizard_status(source_id: str, mode: str = "login") -> dict:
+    wiz = await _wiz(source_id, mode)
+    return await wiz.status()
+
+
+class WizardCredentials(BaseModel):
+    username: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=1)
+    submit: bool = True
+
+
+@router.post("/{source_id}/wizard/credentials")
+async def wizard_credentials(source_id: str, req: WizardCredentials, mode: str = "login") -> dict:
+    """Type credentials into the visible login form (UI-driven sign-in)."""
+    wiz = await _wiz(source_id, mode)
+    result = await wiz.fill_credentials(req.username, req.password, req.submit)
+    if result.get("ok"):
+        # Heuristic: if we're no longer on a login-looking page, mark logged in.
+        url = result.get("url", "").lower()
+        if not any(p in url for p in ("login", "signin", "sign-in", "auth")):
+            await wiz.mark_logged_in()
+    return result
+
+
+class WizardMfa(BaseModel):
+    code: str = Field(..., min_length=3, max_length=10)
+
+
+@router.post("/{source_id}/wizard/mfa")
+async def wizard_mfa(source_id: str, req: WizardMfa, mode: str = "login") -> dict:
+    wiz = await _wiz(source_id, mode)
+    result = await wiz.submit_mfa(req.code)
+    if result.get("ok"):
+        url = result.get("url", "").lower()
+        if not any(p in url for p in ("login", "signin", "sign-in", "auth", "verify", "mfa", "otp")):
+            await wiz.mark_logged_in()
+    return result
+
+
+class WizardClick(BaseModel):
+    x: int = Field(..., ge=0)
+    y: int = Field(..., ge=0)
+
+
+@router.post("/{source_id}/wizard/click")
+async def wizard_click(source_id: str, req: WizardClick, mode: str = "login") -> dict:
+    """Click at screenshot coordinates (for consent screens, cookies, etc.)."""
+    wiz = await _wiz(source_id, mode)
+    return await wiz.click_at(req.x, req.y)
 
 
 @router.post("/{source_id}/wizard/{mode}/complete", response_model=WizardCompleteResponse)
@@ -179,8 +233,6 @@ async def wizard_complete(
     _wizards.pop(f"wiz-{source_id}-{mode}", None)
 
     try:
-        await wiz.drain_events()
-
         if mode == "login":
             captured = await wiz.capture_state()
             source.session_state = encrypt_session_state(
@@ -193,24 +245,26 @@ async def wizard_complete(
         if mode != "record" or wiz.flow_type not in FLOW_TYPES:
             raise HTTPException(400, "Invalid wizard mode")
 
+        # LLM auto-record: drive the headless browser with the search query,
+        # then ask the LLM to identify the search box + result card structure.
         flow_type = wiz.flow_type
-        if not wiz.events:
-            raise HTTPException(
-                422,
-                "No interactions were recorded. Check that event polling is "
-                "working (the browser tab must stay open on the source site), "
-                "then record the flow again.",
+        try:
+            discovered = await discover_flow(
+                base_url=source.base_url,
+                query=req.query_hint or "software engineer",
+                flow_type=flow_type,
+                session=wiz,
             )
-        steps, card_selectors = templatize(wiz.events, req.query_hint)
-        if card_selectors is None:
-            raise HTTPException(
-                422,
-                "No result card was marked. During recording, Alt-click one "
-                "of the search-result cards, then press Done again.",
-            )
+        except Exception as exc:
+            logger.exception("discover_flow failed")
+            raise HTTPException(502, f"Auto-record failed: {exc}")
+
+        steps = discovered["steps"]
+        card = discovered["card"]
+        embed = [{"card": card}] if card else []
 
         recording = SourceRecording(
-            source_id=source.id, flow_type=flow_type, events=wiz.events
+            source_id=source.id, flow_type=flow_type, events=discovered.get("raw", [])
         )
         db.add(recording)
 
@@ -224,19 +278,18 @@ async def wizard_complete(
         ).scalar_one_or_none()
 
         if existing:
-            existing.steps = steps + ([{"card": card_selectors["card"]}] if card_selectors else [])
+            existing.steps = steps + embed
             existing.status = "active"
             existing.last_verified_at = datetime.utcnow()
             flow = existing
         else:
-            embed = [{"card": card_selectors["card"]}] if card_selectors else []
             flow = SourceFlow(source_id=source.id, flow_type=flow_type, steps=steps + embed)
             db.add(flow)
 
         await db.commit()
         await db.refresh(flow)
         return WizardCompleteResponse(
-            flow_id=flow.id, steps=steps, card_selectors=card_selectors
+            flow_id=flow.id, steps=steps, card_selectors={"card": card} if card else None
         )
     finally:
         await wiz.close()

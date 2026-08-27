@@ -13,9 +13,12 @@ import {
   createSource,
   deleteSource,
   wizardStart,
-  wizardPoll,
+  wizardCredentials,
+  wizardMfa,
   wizardComplete,
   wizardCancel,
+  wizardScreenshotUrl,
+  wizardClick,
   type SearchMode,
   type SearchResult,
   type Evidence,
@@ -113,6 +116,10 @@ export default function Home() {
   const [newSourceUrl, setNewSourceUrl] = useState("");
   const [wizardBusy, setWizardBusy] = useState<string | null>(null);
   const [wizardHint, setWizardHint] = useState<string | null>(null);
+  const [wizardUser, setWizardUser] = useState("");
+  const [wizardPass, setWizardPass] = useState("");
+  const [wizardMfaCode, setWizardMfaCode] = useState("");
+  const [shotUrl, setShotUrl] = useState<string | null>(null);
   const [takeoverActive, setTakeoverActive] = useState(false);
   const [browserSession, setBrowserSession] = useState<BrowserSessionView | null>(null);
   const [sessionBusy, setSessionBusy] = useState(false);
@@ -227,11 +234,9 @@ export default function Home() {
           : `${"1) Do ONE search like a normal user.  2) Alt-click a result card to mark it (required).  3) Press Done."}`
       );
 
-      // Poll events while the user drives the wizard browser.
-      const poll = setInterval(() => {
-        wizardPoll(source.id, mode).catch(() => clearInterval(poll));
-      }, 1500);
-      (window as unknown as { __wizPoll?: ReturnType<typeof setInterval> }).__wizPoll = poll;
+      // Live view: the UI polls the screenshot endpoint via <img> refresh.
+      const url = await wizardScreenshotUrl(source.id, mode);
+      setShotUrl(`${url}&t=${Date.now()}`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setTimeline((prev) =>
@@ -275,6 +280,49 @@ export default function Home() {
     setWizardBusy(null);
     setWizardHint(null);
     setTimeline((prev) => addEvent(prev, "info", "Wizard cancelled."));
+  }
+
+  async function handleWizardCredentials(source: SourceView) {
+    if (!wizardUser || !wizardPass) return;
+    setWizardBusy(`${source.id}:login:`);
+    try {
+      const res = await wizardCredentials(source.id, "login", wizardUser, wizardPass);
+      if (!res.ok) {
+        setTimeline((prev) => addEvent(prev, "warn", `Sign-in failed: ${res.reason ?? "unknown"}`));
+      } else if (!res.submitted) {
+        setTimeline((prev) => addEvent(prev, "info", "Credentials filled — check the preview, then submit if needed."));
+      } else {
+        setTimeline((prev) => addEvent(prev, "action", "Credentials submitted. If MFA/OTP is required, enter the code below. Once signed in, press Done."));
+      }
+      setWizardPass("");
+      const url = await wizardScreenshotUrl(source.id, "login");
+      setShotUrl(`${url}&t=${Date.now()}`);
+    } catch (e) {
+      setTimeline((prev) => addEvent(prev, "warn", `Sign-in error: ${e instanceof Error ? e.message : e}`));
+    } finally {
+      setWizardBusy(null);
+    }
+  }
+
+  async function handleWizardMfa(source: SourceView) {
+    if (!wizardMfaCode) return;
+    try {
+      const res = await wizardMfa(source.id, "login", wizardMfaCode);
+      if (!res.ok) {
+        setTimeline((prev) => addEvent(prev, "warn", `MFA failed: ${res.reason ?? "unknown"}`));
+      } else {
+        setTimeline((prev) => addEvent(prev, "action", "MFA submitted. Once signed in, press Done."));
+        setWizardMfaCode("");
+      }
+      const url = await wizardScreenshotUrl(source.id, "login");
+      setShotUrl(`${url}&t=${Date.now()}`);
+    } catch (e) {
+      setTimeline((prev) => addEvent(prev, "warn", `MFA error: ${e instanceof Error ? e.message : e}`));
+    }
+  }
+
+  function refreshWizardShot(source: SourceView) {
+    wizardScreenshotUrl(source.id, "login").then((url) => setShotUrl(`${url}&t=${Date.now()}`)).catch(() => {});
   }
 
   async function handleDeleteSource(source: SourceView) {
@@ -697,10 +745,10 @@ export default function Home() {
                       {s.has_session && (
                         <>
                           <button className="btn small" disabled={!!wizardBusy} onClick={() => handleWizard(s, "record", "find_jobs")}>
-                            {s.flows.find_jobs === "active" ? "Re-record" : "2. Record"} jobs flow
+                            {s.flows.find_jobs === "active" ? "Re-record" : "2. Auto-record"} jobs flow
                           </button>
                           <button className="btn small" disabled={!!wizardBusy} onClick={() => handleWizard(s, "record", "find_candidates")}>
-                            {s.flows.find_candidates === "active" ? "Re-record" : "3. Record"} candidates flow
+                            {s.flows.find_candidates === "active" ? "Re-record" : "3. Auto-record"} candidates flow
                           </button>
                         </>
                       )}
@@ -719,10 +767,87 @@ export default function Home() {
                         Cancel
                       </button>
                     </div>
-                    <span className="wizard-hint">
-                      {wizardHint ??
-                        "Use the buttons above to set up this source, one step at a time."}
-                    </span>
+
+                    {wizardBusy?.startsWith(`${s.id}:login`) && (
+                      <div className="wizard-browser">
+                        {shotUrl && (
+                          /* eslint-disable-next-line @next/next/no-img-element */
+                          <img
+                            className="wizard-shot"
+                            src={shotUrl}
+                            alt="Live browser preview"
+                            onClick={(e) => {
+                              // click-through: forward coordinates to the backend
+                              const rect = (e.target as HTMLImageElement).getBoundingClientRect();
+                              const scaleX = 1280 / rect.width;
+                              const scaleY = 900 / rect.height;
+                              wizardClick(s.id, "login", Math.round((e.clientX - rect.left) * scaleX), Math.round((e.clientY - rect.top) * scaleY))
+                                .then(() => refreshWizardShot(s))
+                                .catch(() => {});
+                            }}
+                          />
+                        )}
+                        <button className="btn small" onClick={() => refreshWizardShot(s)}>↻ Refresh preview</button>
+                        <div className="wizard-cred-row">
+                          <input
+                            type="text"
+                            value={wizardUser}
+                            onChange={(e) => setWizardUser(e.target.value)}
+                            placeholder="Username / email"
+                            aria-label="Username"
+                            autoComplete="off"
+                          />
+                          <input
+                            type="password"
+                            value={wizardPass}
+                            onChange={(e) => setWizardPass(e.target.value)}
+                            placeholder="Password"
+                            aria-label="Password"
+                            autoComplete="new-password"
+                          />
+                          <button
+                            className="btn small primary"
+                            disabled={!!wizardBusy || !wizardUser || !wizardPass}
+                            onClick={() => handleWizardCredentials(s)}
+                          >
+                            Sign in
+                          </button>
+                        </div>
+                        <div className="wizard-cred-row">
+                          <input
+                            type="text"
+                            value={wizardMfaCode}
+                            onChange={(e) => setWizardMfaCode(e.target.value)}
+                            placeholder="MFA / OTP code (if asked)"
+                            aria-label="MFA code"
+                            maxLength={10}
+                          />
+                          <button
+                            className="btn small"
+                            disabled={!wizardMfaCode}
+                            onClick={() => handleWizardMfa(s)}
+                          >
+                            Submit code
+                          </button>
+                        </div>
+                        <span className="wizard-hint">
+                          The site runs in a secure browser on the server. Sign in here
+                          (credentials are typed into the page, never stored). Handle any
+                          CAPTCHA/MFA in the preview by clicking it, then press Done once signed in.
+                        </span>
+                      </div>
+                    )}
+                    {wizardBusy?.startsWith(`${s.id}:record`) && (
+                      <span className="wizard-hint">
+                        Auto-recording: the agent will visit {s.domain}, find the search box
+                        and result cards automatically (takes ~30s). Use query "{query || "software engineer"}" as the test search.
+                      </span>
+                    )}
+                    {wizardBusy === null && (
+                      <span className="wizard-hint">
+                        {wizardHint ?? "Use the buttons above to set up this source, one step at a time."}
+                      </span>
+                    )}
                   </div>
                 ))}
             </details>

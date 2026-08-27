@@ -37,11 +37,16 @@ FLOW_TYPES = ("find_jobs", "find_candidates")
 
 
 class WizardSession:
-    """A headed browser the user drives manually; events are recorded.
+    """A HEADLESS browser running inside the container; the user drives it
+    remotely through the web UI (screenshots + typed credentials).
 
-    Recording strategy: inject an init script that listens to capture-phase
-    click/change/submit events and records them into window.__cbEvents;
-    the backend polls that buffer. Password fields are never recorded.
+    Cross-platform by design: nothing runs on the end user's machine —
+    no tunnel, no local browser, works identically on Windows/macOS/Linux.
+
+    The UI polls GET /wizard/screenshot for a live view and posts actions:
+    - credentials (username/password + submit)
+    - mfa code
+    - click (by coordinates from the screenshot)
     """
 
     def __init__(self, source_id: str, flow_type: str, domain: str | None = None) -> None:
@@ -53,97 +58,167 @@ class WizardSession:
         self.context = None
         self.page = None
         self.events: list[dict[str, Any]] = []
-        self._cdp = False
-
-    _INIT_SCRIPT = """
-    () => {
-      window.__cbEvents = [];
-      const sel = (el) => {
-        if (el.id) return '#' + CSS.escape(el.id);
-        if (el.name) return `${el.tagName.toLowerCase()}[name="${el.name}"]`;
-        const parts = [];
-        let node = el;
-        while (node && node !== document.body && parts.length < 4) {
-          let part = node.tagName.toLowerCase();
-          if (node.id) { parts.unshift('#' + CSS.escape(node.id)); break; }
-          const parent = node.parentElement;
-          if (parent) {
-            const same = Array.from(parent.children).filter(c => c.tagName === node.tagName);
-            if (same.length > 1) part += `:nth-of-type(${same.indexOf(node) + 1})`;
-          }
-          parts.unshift(part);
-          node = parent;
-        }
-        return parts.join(' > ');
-      };
-      document.addEventListener('click', (e) => {
-        if (e.altKey) {
-          const card = e.target.closest('[class]');
-          window.__cbEvents.push({action: 'mark_card', selector: sel(card), url: location.href});
-          e.preventDefault(); e.stopPropagation();
-          return;
-        }
-        const el = e.target.closest('a,button,[role=button],input[type=submit]') || e.target;
-        window.__cbEvents.push({action: 'click', selector: sel(el), text: (el.innerText || el.value || '').slice(0, 80), url: location.href});
-      }, true);
-      document.addEventListener('change', (e) => {
-        const el = e.target;
-        if (el.type === 'password') return;
-        window.__cbEvents.push({action: 'fill', selector: sel(el), value: String(el.value || '').slice(0, 200), url: location.href});
-      }, true);
-      document.addEventListener('submit', (e) => {
-        window.__cbEvents.push({action: 'submit', selector: sel(e.target), url: location.href});
-      }, true);
-    }
-    """
+        self.last_activity = asyncio.get_event_loop().time()
+        self.logged_in = False
 
     async def start(self, start_url: str, storage_state: dict | None = None) -> None:
-        from app.services.session import BRAVE_CDP_URL, _cdp_headers
-
         self.pw = await async_playwright().start()
-        self._cdp = False
-        try:
-            # Preferred: drive the user's visible browser via CDP (works
-            # in a headless container — the browser runs on the user's Mac).
-            browser = await self.pw.chromium.connect_over_cdp(
-                BRAVE_CDP_URL, headers=_cdp_headers()
-            )
-            self._cdp = True
-        except Exception as exc:
-            logger.warning("CDP connect failed (%s); falling back to headed launch", exc)
-            browser = await self.pw.chromium.launch(
-                headless=False, proxy=_proxy_config()
-            )
-        self.browser = browser
-        # CDP: reuse the default context (real profile — already logged in).
-        self.context = (
-            browser.contexts[0]
-            if self._cdp and browser.contexts
-            else await browser.new_context(storage_state=storage_state)
+        self.browser = await self.pw.chromium.launch(
+            headless=True, proxy=_proxy_config(),
+            args=["--disable-blink-features=AutomationControlled"],
         )
-        await self.context.add_init_script(self._INIT_SCRIPT)
+        self.context = await self.browser.new_context(
+            storage_state=storage_state,
+            viewport={"width": 1280, "height": 900},
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            ),
+        )
         self.page = await self.context.new_page()
         await self.page.goto(start_url, timeout=45_000, wait_until="domcontentloaded")
+        self.touch()
 
-    async def drain_events(self) -> list[dict[str, Any]]:
+    def touch(self) -> None:
+        self.last_activity = asyncio.get_event_loop().time()
+
+    async def age_s(self) -> float:
+        return asyncio.get_event_loop().time() - self.last_activity
+
+    # ---- UI-driven interaction ------------------------------------------
+
+    async def screenshot(self) -> bytes | None:
+        """Live PNG of the wizard page (scaled for fast polling)."""
         if self.page is None:
-            return []
+            return None
         try:
-            fresh = await self.page.evaluate("() => window.__cbEvents || []")
-            await self.page.evaluate("() => { window.__cbEvents = []; }")
-        except Exception as exc:  # page navigating — retry next poll
-            logger.debug("drain_events failed: %s", exc)
-            return []
-        if fresh:
-            self.events.extend(fresh)
-        return fresh
+            self.touch()
+            return await self.page.screenshot(type="png", quality=None, full_page=False)
+        except Exception as exc:
+            logger.debug("screenshot failed: %s", exc)
+            return None
+
+    async def status(self) -> dict[str, Any]:
+        if self.page is None:
+            return {"url": "", "title": "", "logged_in": self.logged_in}
+        try:
+            return {
+                "url": self.page.url,
+                "title": await self.page.title(),
+                "logged_in": self.logged_in,
+            }
+        except Exception:
+            return {"url": "", "title": "", "logged_in": self.logged_in}
+
+    async def fill_credentials(self, username: str, password: str, submit: bool = True) -> dict[str, Any]:
+        """Type credentials into the best-matching fields on the current page."""
+        assert self.page, "wizard not started"
+
+        async def _find(selectors: list[str]) -> str | None:
+            for sel in selectors:
+                try:
+                    el = self.page.locator(sel).first
+                    if await el.count() > 0 and await el.is_visible():
+                        return sel
+                except Exception as exc:
+                    logger.debug("selector probe failed for %s: %s", sel, exc)
+            return None
+
+        user_sel = await _find([
+            "input[type='email']",
+            "input[type='text'][name*='user' i]",
+            "input[type='text'][id*='user' i]",
+            "input[type='text'][name*='email' i]",
+            "input[type='text'][id*='email' i]",
+            "input[type='text']:not([name*='search' i])",
+            "input[type='tel']",
+        ])
+        pass_sel = await _find(["input[type='password']"])
+        if not user_sel or not pass_sel:
+            return {
+                "ok": False,
+                "reason": "No username/password fields visible on the page — "
+                          "navigate to the login form first (or use click to get there).",
+            }
+        await self.page.fill(user_sel, username, timeout=5_000)
+        await self.page.fill(pass_sel, password, timeout=5_000)
+        self.touch()
+        if not submit:
+            return {"ok": True, "submitted": False}
+        # Click a plausible submit button, else press Enter in the password box.
+        submit_sel = await _find([
+            "button[type='submit']",
+            "input[type='submit']",
+            "button:has-text('Sign in')",
+            "button:has-text('Log in')",
+            "button:has-text('Login')",
+        ])
+        if submit_sel:
+            await self.page.click(submit_sel, timeout=5_000)
+        else:
+            await self.page.press(pass_sel, "Enter", timeout=5_000)
+        await asyncio.sleep(3)
+        self.touch()
+        st = await self.status()
+        return {"ok": True, "submitted": True, **st}
+
+    async def submit_mfa(self, code: str) -> dict[str, Any]:
+        """Submit an OTP/MFA code into the first visible short text input."""
+        assert self.page, "wizard not started"
+        sel = None
+        for candidate in (
+            "input[autocomplete='one-time-code']",
+            "input[name*='otp' i]",
+            "input[id*='otp' i]",
+            "input[name*='code' i]",
+            "input[maxlength='6']",
+            "input[maxlength='4']",
+        ):
+            try:
+                el = self.page.locator(candidate).first
+                if await el.count() > 0 and await el.is_visible():
+                    sel = candidate
+                    break
+            except Exception as exc:
+                logger.debug("mfa probe failed for %s: %s", candidate, exc)
+                continue
+        if not sel:
+            return {"ok": False, "reason": "No MFA/OTP input found on the page"}
+        await self.page.fill(sel, code, timeout=5_000)
+        submit_sel = None
+        for candidate in ("button[type='submit']", "button:has-text('Verify')", "button:has-text('Submit')"):
+            try:
+                el = self.page.locator(candidate).first
+                if await el.count() > 0 and await el.is_visible():
+                    submit_sel = candidate
+                    break
+            except Exception as exc:
+                logger.debug("mfa submit probe failed: %s", exc)
+                continue
+        if submit_sel:
+            await self.page.click(submit_sel, timeout=5_000)
+        else:
+            await self.page.press(sel, "Enter", timeout=5_000)
+        await asyncio.sleep(3)
+        self.touch()
+        st = await self.status()
+        return {"ok": True, **st}
+
+    async def click_at(self, x: int, y: int) -> dict[str, Any]:
+        """Click the page at screenshot coordinates (scaled to viewport)."""
+        assert self.page, "wizard not started"
+        vp = self.page.viewport_size or {"width": 1280, "height": 900}
+        await self.page.mouse.click(x, y)
+        await asyncio.sleep(1.5)
+        self.touch()
+        return {"ok": True, "x": x, "y": y, "viewport": vp}
+
+    async def mark_logged_in(self) -> None:
+        self.logged_in = True
+        self.touch()
 
     async def capture_state(self) -> dict[str, Any]:
-        """Grab cookies + final URL + page title snapshot for verification.
-
-        On CDP the default context holds the user's whole profile, so filter
-        cookies to the wizard's source domain.
-        """
+        """Grab cookies + final URL + page title snapshot for saving."""
         assert self.context and self.page
         state = await self.context.storage_state()
         if self.domain:
@@ -155,21 +230,14 @@ class WizardSession:
         return {"storage_state": state, "url": self.page.url, "title": await self.page.title()}
 
     async def close(self) -> None:
-        # Close only our tab; never the user's browser.
         try:
-            if self.page:
-                await self.page.close()
+            if self.context:
+                await self.context.close()
         except Exception:
             pass
-        if not self._cdp:
-            try:
-                if self.context:
-                    await self.context.close()
-            except Exception:
-                pass
         try:
             if self.browser:
-                await self.browser.close()  # CDP: disconnects only
+                await self.browser.close()
         except Exception:
             pass
         try:
@@ -428,3 +496,168 @@ async def _extract_page(page: Any, card_selectors: dict[str, str] | None) -> lis
 def domain_of(url: str) -> str:
     netloc = urlparse(url).netloc.lower()
     return netloc.removeprefix("www.")
+
+
+# ---------------------------------------------------------------------------
+# LLM auto-record: discover a site's search flow without a human recording
+# ---------------------------------------------------------------------------
+
+
+async def discover_flow(
+    base_url: str,
+    query: str,
+    flow_type: str,
+    session: WizardSession | None = None,
+) -> dict[str, Any]:
+    """Automatically discover a site's search flow using the LLM.
+
+    Drives a headless browser: loads the site, asks the LLM to identify the
+    search input from the DOM, fills it, submits, then asks the LLM to
+    identify the result-card structure. Returns templatized steps.
+
+    Raises RuntimeError with a user-friendly message on failure.
+    """
+    import re
+
+    from app.services.llm import LLMService
+
+    llm = LLMService()
+    if not llm.enabled:
+        raise RuntimeError("LLM is not enabled (LLM_ENABLED/LLM_API_KEY) — auto-record unavailable")
+
+    own_browser = session is None
+    if own_browser:
+        session = WizardSession("discover", flow_type)
+        await session.start(base_url)
+    page = session.page
+    assert page is not None
+
+    try:
+        # --- Step 1: identify the search input -----------------------------
+        inputs = await page.evaluate(
+            """() => Array.from(document.querySelectorAll('input, textarea')).map((el, i) => ({
+              index: i,
+              tag: el.tagName.toLowerCase(),
+              type: el.type || '',
+              id: el.id || '',
+              name: el.name || '',
+              placeholder: el.placeholder || '',
+              ariaLabel: el.getAttribute('aria-label') || '',
+              visible: !!(el.offsetWidth || el.offsetHeight),
+            }))"""
+        )
+        visible_inputs = [i for i in inputs if i.get("visible")]
+
+        raw_json = await llm.chat(
+            "You are a web-automation expert. Given a list of form inputs from a "
+            "job/candidate listing website, pick the one that is the MAIN SEARCH BOX "
+            f"for searching {'jobs' if flow_type == 'find_jobs' else 'candidates'}. "
+            "Reply with ONLY a JSON object: {\"index\": <number>}. No other text.",
+            json.dumps(visible_inputs, indent=1),
+        )
+        if not raw_json:
+            raise RuntimeError("LLM did not respond")
+        m = re.search(r"\{[^}]*\}", raw_json, re.DOTALL)
+        if not m:
+            raise RuntimeError(f"Could not parse LLM response: {raw_json[:120]}")
+        idx = json.loads(m.group(0)).get("index")
+        chosen = next((i for i in visible_inputs if i["index"] == idx), None)
+        if not chosen:
+            raise RuntimeError("LLM picked a search box that is not on the page")
+
+        sel = (
+            f"#{chosen['id']}" if chosen["id"]
+            else f"{chosen['tag']}[name=\"{chosen['name']}\"]" if chosen["name"]
+            else chosen["tag"]
+        )
+
+        # --- Step 2: fill + submit ----------------------------------------
+        await page.fill(sel, query, timeout=10_000)
+        await page.keyboard.press("Enter")
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=15_000)
+        except Exception:
+            pass
+        await asyncio.sleep(3)
+
+        # --- Step 3: identify result cards ---------------------------------
+        candidates = await page.evaluate(
+            """() => {
+              const scored = [];
+              for (const el of document.querySelectorAll('article, li, div, section')) {
+                if (el.parentElement && el.parentElement.querySelectorAll(':scope > a').length === 0 && !el.querySelector('a')) continue;
+                const links = el.querySelectorAll('a');
+                if (links.length === 0) continue;
+                const textLen = (el.innerText || '').length;
+                const rect = el.getBoundingClientRect();
+                if (rect.width < 200 || rect.height < 40) continue;
+                // Card-like: repeated siblings with similar structure
+                const siblings = el.parentElement
+                  ? Array.from(el.parentElement.children).filter(
+                      c => c.tagName === el.tagName
+                    ).length
+                  : 1;
+                if (siblings >= 3) {
+                  scored.push({
+                    tag: el.tagName.toLowerCase(),
+                    cls: (el.className && typeof el.className === 'string') ? el.className.slice(0, 120) : '',
+                    id: el.id || '',
+                    siblings,
+                    textLen,
+                    links: links.length,
+                  });
+                }
+              }
+              // Prefer the most specific (deepest) repeated container
+              scored.sort((a, b) => b.textLen - a.textLen);
+              return scored.slice(0, 15);
+            }"""
+        )
+        if not candidates:
+            raise RuntimeError(
+                "Could not find repeated result cards on the results page — "
+                "the site may not have loaded results, or requires login."
+            )
+
+        raw_json = await llm.chat(
+            "You are a web-automation expert. Below are DOM element summaries from a "
+            f"{'job' if flow_type == 'find_jobs' else 'candidate'} search results page. "
+            "Pick the element that represents ONE search-result card (the repeated "
+            "item containing title/company/link). Reply with ONLY: "
+            "{\"index\": <number>, \"css_selector\": \"<css selector matching one card>\"}. "
+            "Build the css_selector from the tag + class (use a class, or an id if "
+            "unique). No other text.",
+            json.dumps(candidates, indent=1),
+        )
+        if not raw_json:
+            raise RuntimeError("LLM did not respond for card selection")
+        m = re.search(r"\{.*\}", raw_json, re.DOTALL)
+        if not m:
+            raise RuntimeError(f"Could not parse LLM card response: {raw_json[:120]}")
+        parsed = json.loads(m.group(0))
+        card = parsed.get("css_selector") or (
+            f"{candidates[0]['tag']}.{candidates[0]['cls'].split()[0]}"
+            if candidates[0].get("cls")
+            else candidates[0]["tag"]
+        )
+        # sanity: selector must match something
+        try:
+            count = await page.locator(card).count()
+        except Exception:
+            count = 0
+        if not count:
+            # fall back to tag + first class of top-scored element
+            top = candidates[0]
+            card = f"{top['tag']}.{top['cls'].split()[0]}" if top.get("cls") else top["tag"]
+            count = await page.locator(card).count()
+        if not count:
+            raise RuntimeError("LLM-selected card selector matched nothing on the page")
+
+        steps = [
+            {"action": "fill", "selector": sel, "param": "query"},
+            {"action": "press", "selector": sel, "key": "Enter"},
+        ]
+        return {"steps": steps, "card": card, "raw": [{"discovered": True, "url": page.url}]}
+    finally:
+        if own_browser and session:
+            await session.close()

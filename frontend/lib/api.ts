@@ -90,14 +90,57 @@ export async function wizardStart(
   );
 }
 
-export async function wizardPoll(
+export async function wizardStatus(
   sourceId: string,
   mode: string
-): Promise<WizardPollResponse> {
+): Promise<{ url: string; title: string; logged_in: boolean }> {
   const base = await resolveApiBase();
-  return getJson<WizardPollResponse>(
-    `${base}/api/v1/sources/${sourceId}/wizard/events?mode=${mode}`
-  );
+  return getJson(`${base}/api/v1/sources/${sourceId}/wizard/status?mode=${mode}`);
+}
+
+export async function wizardCredentials(
+  sourceId: string,
+  mode: string,
+  username: string,
+  password: string,
+  submit = true
+): Promise<{ ok: boolean; reason?: string; submitted?: boolean; url?: string }> {
+  const base = await resolveApiBase();
+  return postJson(`${base}/api/v1/sources/${sourceId}/wizard/credentials?mode=${mode}`, {
+    username,
+    password,
+    submit,
+  });
+}
+
+export async function wizardMfa(
+  sourceId: string,
+  mode: string,
+  code: string
+): Promise<{ ok: boolean; reason?: string; url?: string }> {
+  const base = await resolveApiBase();
+  return postJson(`${base}/api/v1/sources/${sourceId}/wizard/mfa?mode=${mode}`, { code });
+}
+
+export async function wizardClick(
+  sourceId: string,
+  mode: string,
+  x: number,
+  y: number
+): Promise<{ ok: boolean }> {
+  const base = await resolveApiBase();
+  return postJson(`${base}/api/v1/sources/${sourceId}/wizard/click?mode=${mode}`, { x, y });
+}
+
+/** URL for the live wizard screenshot (used as <img src>). */
+export async function wizardScreenshotUrl(
+  sourceId: string,
+  mode: string
+): Promise<string> {
+  const base = await resolveApiBase();
+  const key = await resolveApiKey();
+  // Include the API key as a query param because <img> cannot set headers.
+  return `${base}/api/v1/sources/${sourceId}/wizard/screenshot?mode=${mode}&api_key=${encodeURIComponent(key)}`;
 }
 
 export async function wizardComplete(
