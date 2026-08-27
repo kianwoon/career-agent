@@ -123,6 +123,8 @@ export default function Home() {
   const [shotUrl, setShotUrl] = useState<string | null>(null);
   const [qrMode, setQrMode] = useState(false);
   const [loginDone, setLoginDone] = useState(false);
+  const [shotLoading, setShotLoading] = useState(false);
+  const [shotError, setShotError] = useState(false);
   const loginDoneRef = useRef(false);
   const [takeoverActive, setTakeoverActive] = useState(false);
   const [browserSession, setBrowserSession] = useState<BrowserSessionView | null>(null);
@@ -241,6 +243,9 @@ export default function Home() {
       // Live view: the UI polls the screenshot endpoint via <img> refresh.
       setQrMode(false);
       setLoginDone(false);
+      loginDoneRef.current = false;
+      setShotLoading(true);
+      setShotError(false);
       const url = await wizardScreenshotUrl(source.id, mode);
       setShotUrl(`${url}&t=${Date.now()}`);
       // Watch for login completion (QR/SSO flows: nothing typed by hand).
@@ -362,6 +367,13 @@ export default function Home() {
     }, 5000);
     return () => clearInterval(id);
   }, [qrMode, wizardBusy]);
+  // Manual refresh shouldn't flash the loading panel for an already-loaded view.
+  useEffect(() => {
+    if (shotUrl) {
+      const t = setTimeout(() => setShotLoading(false), 4000);
+      return () => clearTimeout(t);
+    }
+  }, [shotUrl]);
 
   async function handleDeleteSource(source: SourceView) {
     await deleteSource(source.id).catch(() => {});
@@ -811,12 +823,27 @@ export default function Home() {
                         {loginDone && (
                           <div className="wizard-login-done">✅ Sign-in detected — press Done to save this session.</div>
                         )}
+                        {shotLoading && !shotError && (
+                          <div className="wizard-shot-loading">
+                            <span className="spinner" aria-hidden /> Starting browser on {s.domain}… (up to 30s)
+                          </div>
+                        )}
+                        {shotError && (
+                          <div className="wizard-shot-loading">
+                            Preview unavailable.{" "}
+                            <button className="btn small" onClick={() => { setShotError(false); setShotLoading(true); refreshWizardShot(s); }}>
+                              Retry
+                            </button>
+                          </div>
+                        )}
                         {shotUrl && (
                           /* eslint-disable-next-line @next/next/no-img-element */
                           <img
-                            className={`wizard-shot ${qrMode ? "wizard-shot-qr" : ""}`}
+                            className={`wizard-shot ${qrMode ? "wizard-shot-qr" : ""} ${shotLoading ? "wizard-shot-hidden" : ""}`}
                             src={shotUrl}
                             alt="Live browser preview"
+                            onLoad={() => { setShotLoading(false); setShotError(false); }}
+                            onError={() => { setShotLoading(false); setShotError(true); }}
                             onClick={(e) => {
                               if (qrMode) return; // QR crop: no click-through
                               // click-through: forward coordinates to the backend
