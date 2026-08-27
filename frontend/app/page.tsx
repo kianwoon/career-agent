@@ -126,6 +126,7 @@ export default function Home() {
   const [shotLoading, setShotLoading] = useState(false);
   const [shotError, setShotError] = useState(false);
   const loginDoneRef = useRef(false);
+  const __wizLoginPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [takeoverActive, setTakeoverActive] = useState(false);
   const [browserSession, setBrowserSession] = useState<BrowserSessionView | null>(null);
   const [sessionBusy, setSessionBusy] = useState(false);
@@ -256,7 +257,9 @@ export default function Home() {
       const url = await wizardScreenshotUrl(source.id, mode);
       setShotUrl(`${url}&t=${Date.now()}`);
       // Watch for login completion (QR/SSO flows: nothing typed by hand).
-      const poll = setInterval(async () => {
+      // Stops itself when the wizard disappears server-side (expired,
+      // completed elsewhere, or the API redeployed) so it never spams 404s.
+      const lp: ReturnType<typeof setInterval> = setInterval(async () => {
         try {
           const st = await wizardStatus(source.id, "login");
           if (st.logged_in && !loginDoneRef.current) {
@@ -266,11 +269,24 @@ export default function Home() {
               addEvent(prev, "success", "Sign-in detected! Press Done to save this session.")
             );
           }
-        } catch {
-          /* wizard may have completed */
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (msg.includes("404")) {
+            // Wizard session no longer exists server-side — stop polling.
+            clearInterval(lp);
+            setTimeline((prev) =>
+              addEvent(
+                prev,
+                "warn",
+                "Wizard session expired (server restarted or session completed). Press the Login button to start over."
+              )
+            );
+            setWizardBusy(null);
+            setShotUrl(null);
+          }
         }
       }, 3000);
-      (window as unknown as { __wizLoginPoll?: ReturnType<typeof setInterval> }).__wizLoginPoll = poll;
+      __wizLoginPollRef.current = lp;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setTimeline((prev) =>
@@ -290,8 +306,10 @@ export default function Home() {
   function clearWizPolls() {
     const poll = (window as unknown as { __wizPoll?: ReturnType<typeof setInterval> }).__wizPoll;
     if (poll) clearInterval(poll);
-    const lp = (window as unknown as { __wizLoginPoll?: ReturnType<typeof setInterval> }).__wizLoginPoll;
-    if (lp) clearInterval(lp);
+    if (__wizLoginPollRef.current) {
+      clearInterval(__wizLoginPollRef.current);
+      __wizLoginPollRef.current = null;
+    }
   }
 
   async function handleWizardDone(source: SourceView, mode: "login" | "record", flowType?: "find_jobs" | "find_candidates", queryHint?: string) {
