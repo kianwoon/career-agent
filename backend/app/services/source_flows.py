@@ -793,6 +793,14 @@ async def discover_flow(
             if candidates[0].get("cls")
             else candidates[0]["tag"]
         )
+        # Generalize indexed ids: #job-card-2 / div#job-card-2 are one card of
+        # many (job-card-0..N). Convert to a prefix attribute selector so all
+        # sibling cards match.
+        m = re.fullmatch(r"(\w*)#([a-zA-Z_-]+)-\d+", card)
+        if m:
+            tag, idbase = m.groups()
+            card = f"{tag}[id^='{idbase}-']" if tag else f"[id^='{idbase}-']"
+            logger.info("generalized card id selector to: %s", card)
         # sanity: selector must match something
         try:
             count = await page.locator(card).count()
