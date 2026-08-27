@@ -91,6 +91,11 @@ def plan_search(state: AgentState) -> AgentState:
     }
 
 
+async def _noop_search(reason: str) -> dict[str, Any]:
+    """Placeholder result for a disabled built-in source (skipped, not an error)."""
+    return {"raw_results": [], "needs_human": False, "human_reason": reason}
+
+
 async def _safe_search(
     fn: Any,
     query: str,
@@ -221,17 +226,39 @@ async def run_search(state: AgentState) -> AgentState:
         }
 
     # -------------------------------------------------------
-    # Jobs -> run LinkedIn + MyCareersFuture + FastJobs in parallel
+    # Jobs -> run enabled built-in adapters in parallel
+    # (LinkedIn + MyCareersFuture + FastJobs; each is a seeded Source row,
+    # so the user can disable any of them from the Sources UI)
     # -------------------------------------------------------
     if task_type == SearchType.jobs:
+        from sqlalchemy import select
+
+        from app.db import async_session
+        from app.models.orm import Source
+
+        async with async_session() as db:
+            enabled_domains = set(
+                (
+                    await db.execute(
+                        select(Source.domain).where(Source.enabled == True)  # noqa: E712
+                    )
+                ).scalars().all()
+            )
+
         from app.services.fastjobs import search_fastjobs_jobs
         from app.services.linkedin import search_linkedin_jobs
         from app.services.mycareersfuture import search_mycareersfuture_jobs
 
+        # Default to enabled when a row is missing (defensive; seeding should
+        # have created all built-ins).
+        li_on = "linkedin.com" in enabled_domains
+        mcf_on = "mycareersfuture.gov.sg" in enabled_domains
+        fj_on = "fastjobs.io" in enabled_domains
+
         li_result, mcf_result, fj_result = await asyncio.gather(
-            _safe_search(search_linkedin_jobs, query, location),
-            _safe_search(search_mycareersfuture_jobs, query, location),
-            _safe_search(search_fastjobs_jobs, query, location),
+            _safe_search(search_linkedin_jobs, query, location) if li_on else _noop_search("disabled"),
+            _safe_search(search_mycareersfuture_jobs, query, location) if mcf_on else _noop_search("disabled"),
+            _safe_search(search_fastjobs_jobs, query, location) if fj_on else _noop_search("disabled"),
         )
 
         raw: list[dict[str, Any]] = []
@@ -242,6 +269,8 @@ async def run_search(state: AgentState) -> AgentState:
         if li_ok:
             raw.extend(li_raw)
             timeline_events.append(f"LinkedIn: {len(li_raw)} jobs")
+        elif not li_on:
+            timeline_events.append("LinkedIn: disabled")
         else:
             timeline_events.append(f"LinkedIn blocked: {li_result.get('human_reason', 'unknown')}")
 
@@ -250,6 +279,8 @@ async def run_search(state: AgentState) -> AgentState:
         if mcf_ok:
             raw.extend(mcf_raw)
             timeline_events.append(f"MyCareersFuture: {len(mcf_raw)} jobs")
+        elif not mcf_on:
+            timeline_events.append("MyCareersFuture: disabled")
         else:
             timeline_events.append(f"MyCareersFuture: {mcf_result.get('human_reason', 'no results')}")
 
@@ -258,18 +289,25 @@ async def run_search(state: AgentState) -> AgentState:
         if fj_ok:
             raw.extend(fj_raw)
             timeline_events.append(f"FastJobs: {len(fj_raw)} jobs")
+        elif not fj_on:
+            timeline_events.append("FastJobs: disabled")
         else:
             timeline_events.append(f"FastJobs: {fj_result.get('human_reason', 'no results')}")
 
-        # Only flag a human bottleneck if ALL sources are blocked/failed.
-        all_blocked = not li_ok and not mcf_ok and not fj_ok and not custom_raw
+        # Only flag a human bottleneck if ALL *enabled* sources are blocked/failed.
+        all_blocked = (
+            not (li_ok or not li_on)
+            and not (mcf_ok or not mcf_on)
+            and not (fj_ok or not fj_on)
+            and not custom_raw
+        )
         if all_blocked:
             reasons = []
-            if li_result.get("human_reason"):
+            if li_on and li_result.get("human_reason"):
                 reasons.append(li_result["human_reason"])
-            if mcf_result.get("human_reason"):
+            if mcf_on and mcf_result.get("human_reason"):
                 reasons.append(mcf_result["human_reason"])
-            if fj_result.get("human_reason"):
+            if fj_on and fj_result.get("human_reason"):
                 reasons.append(fj_result["human_reason"])
             reasons.extend(custom_failed)
             return {

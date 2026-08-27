@@ -78,6 +78,17 @@ export async function deleteSource(id: string): Promise<void> {
   }
 }
 
+export async function updateSourceEnabled(id: string, enabled: boolean): Promise<SourceView> {
+  const base = await resolveApiBase();
+  const res = await fetch(`${base}/api/v1/sources/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) throw new Error(`Update failed with status ${res.status}`);
+  return res.json();
+}
+
 export async function wizardStart(
   sourceId: string,
   mode: "login" | "record",

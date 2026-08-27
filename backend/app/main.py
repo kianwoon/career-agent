@@ -33,6 +33,14 @@ async def lifespan(app: FastAPI):
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         logger.info("Database tables ensured")
+        # Seed built-in sources (LinkedIn, MyCareersFuture, FastJobs) as real
+        # rows so they appear as cards, can be disabled, and hold sessions.
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        from app.services.seed_sources import seed_builtin_sources
+
+        async with AsyncSession(engine) as db:
+            await seed_builtin_sources(db)
     except Exception as exc:  # startup must not hard-crash on DB hiccups
         logger.error("Could not initialize DB tables: %s", exc)
     # Startup: nothing heavy yet. Shutdown: close browser sessions.

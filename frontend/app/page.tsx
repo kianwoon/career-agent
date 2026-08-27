@@ -12,6 +12,7 @@ import {
   listSources,
   createSource,
   deleteSource,
+  updateSourceEnabled,
   wizardStart,
   wizardStatus,
   wizardCredentials,
@@ -112,7 +113,6 @@ export default function Home() {
   const [activeSources, setActiveSources] = useState<Set<string>>(new Set());
   // Pluggable sources (user-registered sites) + selected subset for searches.
   const [customSources, setCustomSources] = useState<SourceView[]>([]);
-  const [selectedSourceIds, setSelectedSourceIds] = useState<Set<string>>(new Set());
   const [newSourceName, setNewSourceName] = useState("");
   const [newSourceUrl, setNewSourceUrl] = useState("");
   const [wizardBusy, setWizardBusy] = useState<string | null>(null);
@@ -195,15 +195,6 @@ export default function Home() {
     } catch {
       /* ignore */
     }
-  }
-
-  function toggleSelectedSource(id: string) {
-    setSelectedSourceIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
   }
 
   async function handleAddSource() {
@@ -445,13 +436,35 @@ export default function Home() {
     if (shotUrl) setShotLoading(false);
   }, [shotUrl]);
 
+  /** Persisted include/exclude: PATCHes enabled; server stores the choice. */
+  async function handleToggleEnabled(source: SourceView) {
+    const next = !source.enabled;
+    // Optimistic update, rollback on failure.
+    setCustomSources((prev) =>
+      prev.map((s) => (s.id === source.id ? { ...s, enabled: next } : s))
+    );
+    try {
+      await updateSourceEnabled(source.id, next);
+      setTimeline((prev) =>
+        addEvent(
+          prev,
+          "info",
+          `${source.name} ${next ? "enabled" : "disabled"} — ${next ? "included in" : "excluded from"} searches.`
+        )
+      );
+    } catch {
+      setCustomSources((prev) =>
+        prev.map((s) => (s.id === source.id ? { ...s, enabled: !next } : s))
+      );
+      setTimeline((prev) =>
+        addEvent(prev, "warn", `Could not update ${source.name}.`)
+      );
+    }
+  }
+
   async function handleDeleteSource(source: SourceView) {
     await deleteSource(source.id).catch(() => {});
-    setSelectedSourceIds((prev) => {
-      const next = new Set(prev);
-      next.delete(source.id);
-      return next;
-    });
+    await reloadSources();
     await reloadSources();
     setTimeline((prev) => addEvent(prev, "info", `Source removed: ${source.name}.`));
   }
@@ -489,7 +502,9 @@ export default function Home() {
         query: query.trim(),
         mode,
         location: mode === "jobs" ? "Singapore" : undefined,
-        sources: selectedSourceIds.size ? Array.from(selectedSourceIds) : undefined,
+        // Enabled/disabled is persisted per source (PATCH /sources/{id});
+        // the backend runs all enabled sources.
+        sources: undefined,
       });
       setTaskId(task.task_id);
       setTimeline((prev) =>
@@ -836,11 +851,8 @@ export default function Home() {
           <div className="sources-panel">
             <div className="sources-row">
               <span className="sources-label">Sources:</span>
-              {customSources.length === 0 && (
-                <span className="sources-empty">built-in only (LinkedIn, MyCareersFuture, FastJobs) — add a site below</span>
-              )}
-              {selectedSourceIds.size === 0 && customSources.some((s) => s.has_session) && (
-                <span className="sources-empty">(all ready sources included)</span>
+              {customSources.some((s) => s.enabled) && (
+                <span className="sources-empty">checked sources are included in searches</span>
               )}
             </div>
 
@@ -851,20 +863,21 @@ export default function Home() {
             <div className="sources-grid">
               {customSources.map((s) => {
                   const ready = s.has_session && (mode === "jobs" ? s.flows.find_jobs === "active" : s.flows.find_candidates === "active");
-                  const selected = selectedSourceIds.has(s.id);
+                  const enabled = s.enabled;
                   return (
                     <label
                       key={s.id}
-                      className={`source-card ${ready ? "ready" : ""} ${selected ? "selected" : ""} ${isRunning || !ready ? "locked" : ""} ${wizardBusy?.startsWith(`${s.id}:`) ? "wizard-active" : ""}`}
-                      title={`${s.domain} — ${ready ? "ready" : "setup incomplete"}`}
+                      className={`source-card ${ready ? "ready" : ""} ${enabled ? "selected" : ""} ${isRunning || !s.enabled ? "locked" : ""} ${wizardBusy?.startsWith(`${s.id}:`) ? "wizard-active" : ""}`}
+                      title={`${s.domain} — ${enabled ? (ready ? "ready" : "enabled, setup incomplete") : "disabled — checkbox to include"}`}
                     >
                       <div className="source-card-top">
                         <input
                           type="checkbox"
                           className="source-card-check"
-                          checked={selected}
-                          onChange={() => toggleSelectedSource(s.id)}
-                          disabled={isRunning || !ready}
+                          checked={enabled}
+                          onChange={() => handleToggleEnabled(s)}
+                          disabled={isRunning}
+                          title={enabled ? "Included in searches — uncheck to disable" : "Disabled — check to include in searches"}
                         />
                         <SourceAvatar name={s.name} domain={s.domain} />
                         <div className="source-card-id">

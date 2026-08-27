@@ -106,6 +106,25 @@ async def delete_source(source_id: str, db: AsyncSession = Depends(get_db)) -> N
     await db.commit()
 
 
+class SourceEnabledUpdate(BaseModel):
+    enabled: bool
+
+
+@router.patch("/{source_id}", response_model=SourceView)
+async def update_source(
+    source_id: str, req: SourceEnabledUpdate, db: AsyncSession = Depends(get_db)
+) -> SourceView:
+    """Enable/disable a source (e.g. turn off a built-in like LinkedIn)."""
+    source = await _get_source(source_id, db)
+    source.enabled = req.enabled
+    await db.commit()
+    await db.refresh(source)
+    flows = (
+        await db.execute(select(SourceFlow).where(SourceFlow.source_id == source.id))
+    ).scalars().all()
+    return _source_view(source, list(flows))
+
+
 # ---------------------------------------------------------------------------
 # Guided wizard: login -> record -> complete
 # ---------------------------------------------------------------------------
