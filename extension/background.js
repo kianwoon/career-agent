@@ -22,13 +22,21 @@ async function loadConfig() {
 
 function connect() {
   loadConfig().then(() => {
-    const wsUrl = API_BASE.replace(/^http/, "ws") + "/api/v1/agent/ws";
+    const wsUrl =
+      API_BASE.replace(/^http:\/\//, "ws://").replace(/^https:\/\//, "wss://") +
+      "/api/v1/agent/ws";
     try {
       ws = new WebSocket(wsUrl);
     } catch (e) {
+      console.warn("[career-agent] WS construct failed:", e);
       scheduleReconnect();
       return;
     }
+    ws.onerror = (e) => {
+      // Fires on refused/failed connections — expected when the API is
+      // unreachable. onclose follows; reconnect is scheduled there.
+      console.log("[career-agent] WS error (will retry):", wsUrl);
+    };
     ws.onopen = () => {
       console.log("[career-agent] connected to", wsUrl);
       setBadge(true);
@@ -49,7 +57,6 @@ function connect() {
       ws = null;
       scheduleReconnect();
     };
-    ws.onerror = () => {};
   });
 }
 
