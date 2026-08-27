@@ -628,6 +628,14 @@ async def _extract_page(page: Any, card_selectors: dict[str, str] | None) -> lis
                 for (const [key, sel] of Object.entries(fields)) out[key] = get(sel);
                 const link = el.matches('a') ? el : el.querySelector('a');
                 out.url = link ? link.href : '';
+                // Fallbacks when field selectors are missing/empty (LLM only
+                // discovered the card, not inner fields): derive a title from
+                // the first heading or the card's leading text.
+                if (!out.title) {
+                  const h = el.querySelector('h1,h2,h3,h4,[class*="title" i],[class*="job" i] ');
+                  out.title = (h?.innerText || el.innerText || '').trim().split('\\n')[0].slice(0, 200);
+                }
+                out.title = out.title || '';
                 return out;
               });
             }""",
