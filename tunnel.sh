@@ -107,8 +107,10 @@ cmd_brave() {
     return 0
   fi
   warn "Brave is not exposing CDP on :$CDP_PORT."
-  warn "Launch Brave with remote debugging:"
-  warn "  open -a 'Brave Browser' --args --remote-debugging-port=$CDP_PORT --remote-allow-origins='*'"
+  warn "Launch Brave with remote debugging (extensions MUST be disabled —"
+  warn "they deadlock Playwright's CDP attach):"
+  warn "  osascript -e 'quit app \"Brave Browser\"'"
+  warn "  open -a 'Brave Browser' --args --remote-debugging-port=$CDP_PORT --remote-allow-origins='*' --disable-extensions"
   warn "Then re-run: $0 start"
   return 1
 }
