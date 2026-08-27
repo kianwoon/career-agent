@@ -35,6 +35,7 @@ class AgentState(TypedDict, total=False):
     error: str | None
     needs_human: bool
     human_reason: str | None
+    source_ids: list[str] | None
 
 
 def _log(state: AgentState, step: str, detail: str | None = None, url: str | None = None) -> list[ActivityEvent]:
@@ -111,6 +112,63 @@ async def _safe_search(
         }
 
 
+async def _search_custom_sources(
+    state: AgentState,
+) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+    """Run templatized flows for all selected/enabled custom sources.
+
+    Returns (raw_results, ok_labels, failed_labels).
+    """
+    from sqlalchemy import select
+
+    from app.db import async_session
+    from app.models.orm import Source, SourceFlow
+    from app.services.source_flows import execute_flow
+
+    source_ids = state.get("source_ids")
+    async with async_session() as db:
+        stmt = select(Source).where(Source.enabled == True)  # noqa: E712
+        if source_ids:
+            stmt = stmt.where(Source.id.in_(source_ids))
+        sources = (await db.execute(stmt)).scalars().all()
+        flows = (
+            await db.execute(select(SourceFlow).where(SourceFlow.status == "active"))
+        ).scalars().all()
+    flows_by_source: dict[str, SourceFlow] = {f.source_id: f for f in flows}
+
+    query = state.get("query", "")
+    raw: list[dict[str, Any]] = []
+    ok: list[str] = []
+    failed: list[str] = []
+
+    async def _run_one(source: Source) -> None:
+        flow = flows_by_source.get(source.id)
+        flow_type = "find_jobs" if state.get("type") == SearchType.jobs else "find_candidates"
+        if flow is None or flow.flow_type != flow_type:
+            failed.append(f"{source.name}: no {flow_type} flow")
+            return
+        result = await execute_flow(
+            base_url=source.base_url,
+            steps=flow.steps,
+            query=query,
+            storage_state_encrypted=source.session_state,
+            card_selectors=flow.steps[-1] if flow.steps and flow.steps[-1].get("card") else None,
+        )
+        # Stash card_selectors on the flow so executor can find them.
+        results = result.get("results", [])
+        if result.get("needs_human") or not results:
+            failed.append(f"{source.name}: {result.get('human_reason', 'no results')}")
+            return
+        for r in results:
+            r.setdefault("source", source.name)
+            r.setdefault("title", "")
+            raw.append(r)
+        ok.append(f"{source.name}: {len(results)}")
+
+    await asyncio.gather(*(_run_one(s) for s in sources))
+    return raw, ok, failed
+
+
 async def run_search(state: AgentState) -> AgentState:
     """RUN SEARCH: invoke all job-search adapters and merge the results.
 
@@ -121,6 +179,11 @@ async def run_search(state: AgentState) -> AgentState:
     query = state.get("query", "")
     location = state.get("location")
     task_type = state.get("type")
+
+    # -------------------------------------------------------
+    # Custom user-registered sources (templatized flows)
+    # -------------------------------------------------------
+    custom_raw, custom_ok, custom_failed = await _search_custom_sources(state)
 
     # -------------------------------------------------------
     # Jobs -> run LinkedIn + MyCareersFuture + FastJobs in parallel
@@ -164,7 +227,7 @@ async def run_search(state: AgentState) -> AgentState:
             timeline_events.append(f"FastJobs: {fj_result.get('human_reason', 'no results')}")
 
         # Only flag a human bottleneck if ALL sources are blocked/failed.
-        all_blocked = not li_ok and not mcf_ok and not fj_ok
+        all_blocked = not li_ok and not mcf_ok and not fj_ok and not custom_raw
         if all_blocked:
             reasons = []
             if li_result.get("human_reason"):
@@ -173,6 +236,7 @@ async def run_search(state: AgentState) -> AgentState:
                 reasons.append(mcf_result["human_reason"])
             if fj_result.get("human_reason"):
                 reasons.append(fj_result["human_reason"])
+            reasons.extend(custom_failed)
             return {
                 **state,
                 "raw_results": [],
@@ -180,6 +244,10 @@ async def run_search(state: AgentState) -> AgentState:
                 "human_reason": "; ".join(reasons) if reasons else "All job sources failed",
                 "timeline": _log(state, "RUN SEARCH", " | ".join(timeline_events)),
             }
+
+        raw.extend(custom_raw)
+        timeline_events.extend(f"Custom {label}" for label in custom_ok)
+        timeline_events.extend(custom_failed)
 
         return {
             **state,
@@ -205,6 +273,13 @@ async def run_search(state: AgentState) -> AgentState:
                 if not needs_human
                 else f"LinkedIn blocked: {human_reason}"
             )
+            if custom_raw:
+                raw = raw + custom_raw
+                needs_human = False
+                human_reason = None
+                detail += f" | Custom: {' | '.join(custom_ok)}"
+            elif custom_failed:
+                detail += f" | Custom: {' | '.join(custom_failed)}"
             return {
                 **state,
                 "raw_results": raw,

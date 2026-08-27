@@ -12,6 +12,104 @@ export interface SearchRequest {
   query: string;
   mode: SearchMode;
   location?: string;
+  /** Source IDs to include; empty/undefined = all enabled sources. */
+  sources?: string[];
+}
+
+/* --------------------------- Pluggable sources --------------------------- */
+
+export interface SourceView {
+  id: string;
+  name: string;
+  base_url: string;
+  domain: string;
+  enabled: boolean;
+  has_session: boolean;
+  flows: Record<string, string>;
+  created_at: string;
+}
+
+export interface WizardStartResponse {
+  wizard_id: string;
+  mode: string;
+  start_url: string;
+}
+
+export interface WizardEvent {
+  action: string;
+  selector: string;
+  text?: string;
+  value?: string;
+  url?: string;
+}
+
+export interface WizardPollResponse {
+  events: WizardEvent[];
+  total_events: number;
+}
+
+export interface WizardCompleteResponse {
+  flow_id?: string;
+  steps: Record<string, unknown>[];
+  card_selectors?: Record<string, unknown> | null;
+}
+
+export async function listSources(): Promise<SourceView[]> {
+  const base = await resolveApiBase();
+  return getJson<SourceView[]>(`${base}/api/v1/sources`);
+}
+
+export async function createSource(name: string, baseUrl: string): Promise<SourceView> {
+  const base = await resolveApiBase();
+  return postJson<SourceView>(`${base}/api/v1/sources`, { name, base_url: baseUrl });
+}
+
+export async function deleteSource(id: string): Promise<void> {
+  const base = await resolveApiBase();
+  await fetch(`${base}/api/v1/sources/${id}`, { method: "DELETE" });
+}
+
+export async function wizardStart(
+  sourceId: string,
+  mode: "login" | "record",
+  flowType?: "find_jobs" | "find_candidates"
+): Promise<WizardStartResponse> {
+  const base = await resolveApiBase();
+  return postJson<WizardStartResponse>(
+    `${base}/api/v1/sources/${sourceId}/wizard/start`,
+    { mode, flow_type: flowType }
+  );
+}
+
+export async function wizardPoll(
+  sourceId: string,
+  mode: string
+): Promise<WizardPollResponse> {
+  const base = await resolveApiBase();
+  const res = await fetch(
+    `${base}/api/v1/sources/${sourceId}/wizard/events?mode=${mode}`
+  );
+  if (!res.ok) throw new Error(`wizard poll failed: ${res.status}`);
+  return (await res.json()) as WizardPollResponse;
+}
+
+export async function wizardComplete(
+  sourceId: string,
+  mode: string,
+  queryHint?: string
+): Promise<WizardCompleteResponse> {
+  const base = await resolveApiBase();
+  return postJson<WizardCompleteResponse>(
+    `${base}/api/v1/sources/${sourceId}/wizard/${mode}/complete`,
+    { query_hint: queryHint ?? null }
+  );
+}
+
+export async function wizardCancel(sourceId: string, mode: string): Promise<void> {
+  const base = await resolveApiBase();
+  await fetch(`${base}/api/v1/sources/${sourceId}/wizard/${mode}/cancel`, {
+    method: "POST",
+  });
 }
 
 /** A single piece of evidence backing a match score. */
@@ -125,8 +223,8 @@ async function getJson<T>(url: string): Promise<T> {
 export async function startSearch(request: SearchRequest): Promise<TaskStatus> {
   const body =
     request.mode === "jobs"
-      ? { query: request.query, location: request.location }
-      : { query: request.query, location: request.location };
+      ? { query: request.query, location: request.location, sources: request.sources }
+      : { query: request.query, location: request.location, sources: request.sources };
   const base = await resolveApiBase();
   return postJson<TaskStatus>(`${base}/api/v1/search/${request.mode}`, body);
 }

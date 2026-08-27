@@ -52,7 +52,7 @@ async def start_job_search(
     db: AsyncSession = Depends(get_db),
 ) -> TaskStatusResponse:
     """Create and start a job search task."""
-    return await _start_task(db, SearchType.jobs, query=req.query, location=req.location)
+    return await _start_task(db, SearchType.jobs, query=req.query, location=req.location, source_ids=req.sources)
 
 
 @router.post("/search/candidates", status_code=201)
@@ -61,7 +61,7 @@ async def start_candidate_search(
     db: AsyncSession = Depends(get_db),
 ) -> TaskStatusResponse:
     """Create and start a candidate search task."""
-    return await _start_task(db, SearchType.candidates, query=req.query, location=req.location)
+    return await _start_task(db, SearchType.candidates, query=req.query, location=req.location, source_ids=req.sources)
 
 
 async def _default_user_id(db: AsyncSession) -> str | None:
@@ -79,6 +79,7 @@ async def _start_task(
     task_type: SearchType,
     query: str,
     location: str | None = None,
+    source_ids: list[str] | None = None,
 ) -> TaskStatusResponse:
     task = SearchTask(
         id=str(uuid.uuid4()),
@@ -92,7 +93,7 @@ async def _start_task(
 
     # Return immediately; run the agent in the background so the caller does
     # not block. Poll GET /tasks/{id} for completion.
-    asyncio.create_task(_run_task(task.id, task_type, query, location))
+    asyncio.create_task(_run_task(task.id, task_type, query, location, source_ids))
     return TaskStatusResponse(
         task_id=task.id,
         type=task_type,
@@ -110,6 +111,7 @@ async def _run_task(
     task_type: SearchType,
     query: str,
     location: str | None,
+    source_ids: list[str] | None = None,
 ) -> None:
     """Execute the LangGraph pipeline for a task in the background."""
     from app.db import async_session as _session_factory
@@ -137,6 +139,7 @@ async def _run_task(
             "location": location,
             "status": TaskStatus.running,
             "profile": profile,
+            "source_ids": source_ids,
         }
 
         try:

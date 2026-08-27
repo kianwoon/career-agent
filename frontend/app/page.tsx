@@ -9,11 +9,19 @@ import {
   captureBrowserSession,
   replayBrowserSession,
   refreshBrowserSession,
+  listSources,
+  createSource,
+  deleteSource,
+  wizardStart,
+  wizardPoll,
+  wizardComplete,
+  wizardCancel,
   type SearchMode,
   type SearchResult,
   type Evidence,
   type BrowserSessionView,
   type SearchHistoryItem,
+  type SourceView,
 } from "@/lib/api";
 
 type Phase = "idle" | "running" | "completed" | "error";
@@ -98,6 +106,12 @@ export default function Home() {
   const [verdicts, setVerdicts] = useState<Record<string, Verdict>>({});
   // Which sources are shown. Empty set = show all. Populated after a search.
   const [activeSources, setActiveSources] = useState<Set<string>>(new Set());
+  // Pluggable sources (user-registered sites) + selected subset for searches.
+  const [customSources, setCustomSources] = useState<SourceView[]>([]);
+  const [selectedSourceIds, setSelectedSourceIds] = useState<Set<string>>(new Set());
+  const [newSourceName, setNewSourceName] = useState("");
+  const [newSourceUrl, setNewSourceUrl] = useState("");
+  const [wizardBusy, setWizardBusy] = useState<string | null>(null);
   const [takeoverActive, setTakeoverActive] = useState(false);
   const [browserSession, setBrowserSession] = useState<BrowserSessionView | null>(null);
   const [sessionBusy, setSessionBusy] = useState(false);
@@ -140,8 +154,100 @@ export default function Home() {
   // Load past searches on mount.
   useEffect(() => {
     loadHistory();
+    listSources()
+      .then((s) => setCustomSources(s))
+      .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  async function reloadSources() {
+    try {
+      setCustomSources(await listSources());
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function toggleSelectedSource(id: string) {
+    setSelectedSourceIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  async function handleAddSource() {
+    if (!newSourceName.trim() || !newSourceUrl.trim()) return;
+    setWizardBusy("create");
+    try {
+      const src = await createSource(newSourceName.trim(), newSourceUrl.trim());
+      setTimeline((prev) => addEvent(prev, "success", `Source added: ${src.name} (${src.domain}). Now sign in via the wizard.`));
+      setNewSourceName("");
+      setNewSourceUrl("");
+      await reloadSources();
+    } catch (e) {
+      setTimeline((prev) => addEvent(prev, "warn", `Add source failed: ${e instanceof Error ? e.message : e}`));
+    } finally {
+      setWizardBusy(null);
+    }
+  }
+
+  async function handleWizard(source: SourceView, mode: "login" | "record", flowType?: "find_jobs" | "find_candidates") {
+    const key = `${source.id}:${mode}:${flowType ?? ""}`;
+    setWizardBusy(key);
+    try {
+      await wizardStart(source.id, mode, flowType);
+      setTimeline((prev) => addEvent(prev, "action", `Wizard started for ${source.name} (${mode}${flowType ? ` ${flowType}` : ""}). A browser window opened — drive it, then press Done.`));
+
+      // Poll events while the user drives the wizard browser.
+      const poll = setInterval(() => {
+        wizardPoll(source.id, mode).catch(() => clearInterval(poll));
+      }, 1500);
+      (window as unknown as { __wizPoll?: ReturnType<typeof setInterval> }).__wizPoll = poll;
+    } catch (e) {
+      setTimeline((prev) => addEvent(prev, "warn", `Wizard start failed: ${e instanceof Error ? e.message : e}`));
+      setWizardBusy(null);
+    }
+  }
+
+  async function handleWizardDone(source: SourceView, mode: "login" | "record", flowType?: "find_jobs" | "find_candidates", queryHint?: string) {
+    const poll = (window as unknown as { __wizPoll?: ReturnType<typeof setInterval> }).__wizPoll;
+    if (poll) clearInterval(poll);
+    setWizardBusy(`${source.id}:${mode}:${flowType ?? ""}`);
+    try {
+      const res = await wizardComplete(source.id, mode, queryHint);
+      if (mode === "record" && res.flow_id) {
+        setTimeline((prev) => addEvent(prev, "success", `Flow saved for ${source.name}: ${res.steps.length} steps.`));
+      } else if (mode === "login") {
+        setTimeline((prev) => addEvent(prev, "success", `Session saved for ${source.name}.`));
+      }
+      await reloadSources();
+    } catch (e) {
+      setTimeline((prev) => addEvent(prev, "warn", `Wizard complete failed: ${e instanceof Error ? e.message : e}`));
+    } finally {
+      setWizardBusy(null);
+    }
+  }
+
+  async function handleWizardCancel(source: SourceView, mode: string) {
+    const poll = (window as unknown as { __wizPoll?: ReturnType<typeof setInterval> }).__wizPoll;
+    if (poll) clearInterval(poll);
+    await wizardCancel(source.id, mode).catch(() => {});
+    setWizardBusy(null);
+    setTimeline((prev) => addEvent(prev, "info", "Wizard cancelled."));
+  }
+
+  async function handleDeleteSource(source: SourceView) {
+    await deleteSource(source.id).catch(() => {});
+    setSelectedSourceIds((prev) => {
+      const next = new Set(prev);
+      next.delete(source.id);
+      return next;
+    });
+    await reloadSources();
+    setTimeline((prev) => addEvent(prev, "info", `Source removed: ${source.name}.`));
+  }
 
   function handleModeChange(next: SearchMode) {
     if (isRunning) return;
@@ -175,6 +281,7 @@ export default function Home() {
         query: query.trim(),
         mode,
         location: mode === "jobs" ? "Singapore" : undefined,
+        sources: selectedSourceIds.size ? Array.from(selectedSourceIds) : undefined,
       });
       setTaskId(task.task_id);
       setTimeline((prev) =>
@@ -472,6 +579,103 @@ export default function Home() {
             >
               {takeoverActive ? "Return to Agent" : "Take Over"}
             </button>
+          </div>
+
+          {/* ---------------- Sources panel ---------------- */}
+          <div className="sources-panel">
+            <div className="sources-row">
+              <span className="sources-label">Sources:</span>
+              {customSources.length === 0 && (
+                <span className="sources-empty">built-in only (LinkedIn, MyCareersFuture, FastJobs)</span>
+              )}
+              {customSources.map((s) => {
+                const ready = s.has_session && (mode === "jobs" ? s.flows.find_jobs === "active" : s.flows.find_candidates === "active");
+                return (
+                  <label key={s.id} className={`source-chip ${ready ? "ready" : ""}`} title={`${s.domain} — ${ready ? "ready" : "setup incomplete"}`}>
+                    <input
+                      type="checkbox"
+                      checked={selectedSourceIds.has(s.id)}
+                      onChange={() => toggleSelectedSource(s.id)}
+                      disabled={isRunning || !ready}
+                    />
+                    {s.name}
+                    {!ready && <span className="source-warn"> (setup needed)</span>}
+                    <button
+                      className="source-remove"
+                      onClick={(e) => { e.preventDefault(); handleDeleteSource(s); }}
+                      aria-label={`Remove ${s.name}`}
+                    >
+                      ×
+                    </button>
+                  </label>
+                );
+              })}
+              {selectedSourceIds.size === 0 && customSources.some((s) => s.has_session) && (
+                <span className="sources-empty">(all enabled sources included)</span>
+              )}
+            </div>
+
+            <details className="add-source">
+              <summary>Add a new source</summary>
+              <div className="add-source-body">
+                <input
+                  type="text"
+                  value={newSourceName}
+                  onChange={(e) => setNewSourceName(e.target.value)}
+                  placeholder="Name, e.g. FastJob"
+                  aria-label="Source name"
+                />
+                <input
+                  type="text"
+                  value={newSourceUrl}
+                  onChange={(e) => setNewSourceUrl(e.target.value)}
+                  placeholder="URL, e.g. fastjob.com"
+                  aria-label="Source URL"
+                />
+                <button className="btn" onClick={handleAddSource} disabled={wizardBusy === "create" || !newSourceName.trim() || !newSourceUrl.trim()}>
+                  Add
+                </button>
+              </div>
+              {customSources
+                .filter((s) => !s.has_session || !s.flows.find_jobs || !s.flows.find_candidates)
+                .map((s) => (
+                  <div key={s.id} className="wizard-steps">
+                    <strong>{s.name}</strong> setup:
+                    <div className="wizard-actions">
+                      <button className="btn small" disabled={!!wizardBusy} onClick={() => handleWizard(s, "login")}>
+                        {s.has_session ? "Re-login" : "1. Login"}
+                      </button>
+                      {s.has_session && (
+                        <>
+                          <button className="btn small" disabled={!!wizardBusy} onClick={() => handleWizard(s, "record", "find_jobs")}>
+                            {s.flows.find_jobs === "active" ? "Re-record" : "2. Record"} jobs flow
+                          </button>
+                          <button className="btn small" disabled={!!wizardBusy} onClick={() => handleWizard(s, "record", "find_candidates")}>
+                            {s.flows.find_candidates === "active" ? "Re-record" : "3. Record"} candidates flow
+                          </button>
+                        </>
+                      )}
+                      <button
+                        className="btn small"
+                        disabled={!!wizardBusy || wizardBusy !== `${s.id}:record:${mode === "jobs" ? "find_jobs" : "find_candidates"}`}
+                        onClick={() => handleWizardDone(s, "record", mode === "jobs" ? "find_jobs" : "find_candidates", query)}
+                      >
+                        Done
+                      </button>
+                      <button
+                        className="btn small"
+                        disabled={!wizardBusy?.startsWith(`${s.id}:`)}
+                        onClick={() => handleWizardCancel(s, "record")}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                    <span className="wizard-hint">
+                      In the wizard browser: sign in / perform one search. Alt-click a result card to mark it as the result template.
+                    </span>
+                  </div>
+                ))}
+            </details>
           </div>
 
           <div className="task-status" role="status">

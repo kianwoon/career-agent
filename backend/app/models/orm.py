@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, String, Text, func
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -172,3 +172,63 @@ class Approval(Base):
     decision_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Source(Base):
+    """A user-registered job board / candidate site (e.g. fastjob.com).
+
+    One source per site (domain). Flows and session credentials are shared
+    across all users (flows are community assets; the login storage_state is
+    the operator's captured session).
+    """
+
+    __tablename__ = "sources"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    base_url: Mapped[str] = mapped_column(String(1000))
+    domain: Mapped[str] = mapped_column(String(255), index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Encrypted Playwright storage_state captured during the wizard login step.
+    session_state: Mapped[str | None] = mapped_column(Text, nullable=True)
+    captured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SourceFlow(Base):
+    """A templatized Playwright flow for a source: find_jobs or find_candidates.
+
+    `steps` is a JSON list of parameterized steps, e.g.:
+      [{"action": "goto", "url": "..."},
+       {"action": "fill", "selector": "#q", "param": "query"},
+       {"action": "click", "selector": "button[type=submit]"},
+       {"action": "extract_cards", "card": "...", "fields": {...}},
+       {"action": "click", "selector": ".next", "repeat": "paginate", "max_pages": 5}]
+    """
+
+    __tablename__ = "source_flows"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    source_id: Mapped[str] = mapped_column(ForeignKey("sources.id", ondelete="CASCADE"), index=True)
+    flow_type: Mapped[str] = mapped_column(String(20))  # find_jobs | find_candidates
+    steps: Mapped[list] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(20), default="active")  # active | broken | draft
+    last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SourceRecording(Base):
+    """Raw recorded steps from the guided wizard, before templatization.
+
+    Kept so a broken flow can be repaired by re-editing the recording
+    instead of walking the whole wizard again.
+    """
+
+    __tablename__ = "source_recordings"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    source_id: Mapped[str] = mapped_column(ForeignKey("sources.id", ondelete="CASCADE"), index=True)
+    flow_type: Mapped[str] = mapped_column(String(20))
+    events: Mapped[list] = mapped_column(JSON, default=list)  # raw wizard events
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

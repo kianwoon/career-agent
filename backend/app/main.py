@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.errors import install_error_handlers
 from app.api.routes.routes import router
+from app.api.routes.sources import router as sources_router
 from app.config import get_settings
 from app.services.browser import browser_service
 
@@ -76,6 +77,7 @@ app.add_middleware(
 )
 
 app.include_router(router)
+app.include_router(sources_router, prefix="/api/v1", dependencies=router.dependencies)
 
 
 @app.get("/")

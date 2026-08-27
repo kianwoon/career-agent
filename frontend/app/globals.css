@@ -1087,3 +1087,112 @@ body {
   color: var(--red, #ff5c5c);
   margin: 0;
 }
+
+/* --------------------------- Sources panel --------------------------- */
+
+.sources-panel {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sources-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.sources-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary, #8899aa);
+}
+
+.sources-empty {
+  font-size: 12px;
+  color: var(--text-secondary, #8899aa);
+}
+
+.source-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--border, #dde3ea);
+  border-radius: 999px;
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.source-chip.ready {
+  border-color: var(--green, #35b46f);
+}
+
+.source-warn {
+  color: var(--orange, #e08b1f);
+  font-size: 11px;
+}
+
+.source-remove {
+  border: none;
+  background: none;
+  color: var(--red, #ff5c5c);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.add-source {
+  font-size: 13px;
+}
+
+.add-source summary {
+  cursor: pointer;
+  color: var(--blue, #4f8cff);
+  font-weight: 600;
+}
+
+.add-source-body {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0;
+  flex-wrap: wrap;
+}
+
+.add-source-body input {
+  padding: 6px 10px;
+  border: 1px solid var(--border, #dde3ea);
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.wizard-steps {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px dashed var(--border, #dde3ea);
+  border-radius: 8px;
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wizard-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.btn.small {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.wizard-hint {
+  font-size: 11px;
+  color: var(--text-secondary, #8899aa);
+}

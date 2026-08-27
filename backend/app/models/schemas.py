@@ -48,11 +48,19 @@ class MatchRole(str, Enum):
 class JobSearchRequest(BaseModel):
     query: str = Field(..., min_length=1, description="Natural-language job search request")
     location: str | None = Field(default=None, description="Location filter, e.g. Singapore")
+    sources: list[str] | None = Field(
+        default=None,
+        description="Source IDs to include; None/empty = all enabled sources (built-in + custom)",
+    )
 
 
 class CandidateSearchRequest(BaseModel):
     query: str = Field(..., min_length=1, description="Candidate criteria, e.g. 'Java, Kafka, payments, microservices, banking'")
     location: str | None = Field(default=None, description="Location filter, e.g. Singapore")
+    sources: list[str] | None = Field(
+        default=None,
+        description="Source IDs to include; None/empty = all enabled sources (built-in + custom)",
+    )
 
 
 class TaskStatusResponse(BaseModel):
@@ -173,3 +181,73 @@ class BrowserSessionView(BaseModel):
     title: str | None = None
     needs_human: bool = False
     reason: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Pluggable sources
+# ---------------------------------------------------------------------------
+
+
+class SourceCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    base_url: str = Field(..., min_length=1, max_length=1000)
+
+
+class SourceView(BaseModel):
+    id: str
+    name: str
+    base_url: str
+    domain: str
+    enabled: bool
+    has_session: bool = False
+    flows: dict[str, str] = Field(default_factory=dict, description="flow_type -> status")
+    created_at: datetime
+
+
+class WizardStartRequest(BaseModel):
+    """Start a guided wizard step. `mode`: login | record."""
+    mode: str = Field(..., pattern="^(login|record)$")
+    flow_type: str | None = Field(default=None, pattern="^(find_jobs|find_candidates)$")
+
+
+class WizardStartResponse(BaseModel):
+    wizard_id: str
+    mode: str
+    start_url: str
+
+
+class WizardEvent(BaseModel):
+    action: str
+    selector: str
+    text: str | None = None
+    value: str | None = None
+    url: str | None = None
+
+
+class WizardPollResponse(BaseModel):
+    events: list[WizardEvent] = Field(default_factory=list)
+    total_events: int = 0
+
+
+class WizardCompleteRequest(BaseModel):
+    query_hint: str | None = Field(default=None, description="The search text demonstrated, to bind as the query parameter")
+
+
+class WizardCompleteResponse(BaseModel):
+    flow_id: str | None = None
+    steps: list[dict[str, Any]] = Field(default_factory=list)
+    card_selectors: dict[str, Any] | None = None
+
+
+class SourceFlowView(BaseModel):
+    id: str
+    source_id: str
+    flow_type: str
+    steps: list[dict[str, Any]]
+    status: str
+    created_at: datetime
+
+
+class SourceFlowUpdate(BaseModel):
+    steps: list[dict[str, Any]] | None = None
+    status: str | None = Field(default=None, pattern="^(active|broken|draft)$")
