@@ -131,12 +131,15 @@ export default function Home() {
   const [sessionBusy, setSessionBusy] = useState(false);
   const [history, setHistory] = useState<SearchHistoryItem[]>([]);
   const [historyLoaded, setHistoryLoaded] = useState(false);
+  // Hydration-safe initial state: identical on server and client (no
+  // Date.now()/locale formatting during render). The real timestamp is
+  // stamped after mount in the effect below.
   const [timeline, setTimeline] = useState<TimelineEvent[]>([
     {
-      id: nextEventId(),
+      id: "evt-init",
       kind: "info",
       text: "Agent ready — waiting for a search request.",
-      time: nowTime(),
+      time: "",
     },
   ]);
 
@@ -167,6 +170,10 @@ export default function Home() {
 
   // Load past searches on mount.
   useEffect(() => {
+    // Stamp the initial event's time post-hydration (avoids SSR mismatch).
+    setTimeline((prev) =>
+      prev.map((e) => (e.id === "evt-init" ? { ...e, time: nowTime() } : e))
+    );
     loadHistory();
     listSources()
       .then((s) => setCustomSources(s))
