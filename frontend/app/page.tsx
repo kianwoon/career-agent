@@ -10,6 +10,7 @@ import {
   replayBrowserSession,
   refreshBrowserSession,
   listSources,
+  agentStatus,
   createSource,
   deleteSource,
   updateSourceEnabled,
@@ -116,6 +117,8 @@ export default function Home() {
   const [activeSources, setActiveSources] = useState<Set<string>>(new Set());
   // Pluggable sources (user-registered sites) + selected subset for searches.
   const [customSources, setCustomSources] = useState<SourceView[]>([]);
+  // Browser-extension agent connection (runs searches in the user's browser).
+  const [agentConnected, setAgentConnected] = useState(false);
   const [newSourceName, setNewSourceName] = useState("");
   const [newSourceUrl, setNewSourceUrl] = useState("");
   const [wizardBusy, setWizardBusy] = useState<string | null>(null);
@@ -189,6 +192,12 @@ export default function Home() {
     listSources()
       .then((s) => setCustomSources(s))
       .catch(() => {});
+    // Poll the agent status — updates when the extension connects/disconnects.
+    const pollAgent = setInterval(() => {
+      agentStatus().then(setAgentConnected).catch(() => setAgentConnected(false));
+    }, 5000);
+    agentStatus().then(setAgentConnected).catch(() => setAgentConnected(false));
+    return () => clearInterval(pollAgent);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -875,6 +884,17 @@ export default function Home() {
           <div className="sources-panel">
             <div className="sources-row">
               <span className="sources-label">Sources:</span>
+              <span
+                className={`agent-chip ${agentConnected ? "on" : "off"}`}
+                title={
+                  agentConnected
+                    ? "Browser extension connected — searches run in your browser (no blocks)"
+                    : "Extension not connected — searches fall back to server-side browsing"
+                }
+              >
+                <span className="agent-dot" aria-hidden="true" />
+                {agentConnected ? "Browser agent: ON" : "Browser agent: off"}
+              </span>
               {customSources.some((s) => s.enabled) && (
                 <span className="sources-empty">checked sources are included in searches</span>
               )}

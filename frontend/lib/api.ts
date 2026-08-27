@@ -59,6 +59,13 @@ export async function listSources(): Promise<SourceView[]> {
   return getJson<SourceView[]>(`${base}/api/v1/sources`);
 }
 
+/** Is the browser-extension agent connected to the API? */
+export async function agentStatus(): Promise<boolean> {
+  const base = await resolveApiBase();
+  const data = await getJson<{ connected: boolean }>(`${base}/api/v1/agent/status`);
+  return !!data.connected;
+}
+
 export async function createSource(name: string, baseUrl: string): Promise<SourceView> {
   const base = await resolveApiBase();
   return postJson<SourceView>(`${base}/api/v1/sources`, { name, base_url: baseUrl });

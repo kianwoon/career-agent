@@ -12,6 +12,7 @@ from app.api.errors import install_error_handlers
 from app.api.routes.routes import router
 from app.api.routes.sources import router as sources_router
 from app.config import get_settings
+from app.services.agent_relay import agent_ws_endpoint
 from app.services.browser import browser_service
 
 settings = get_settings()
@@ -86,6 +87,12 @@ app.add_middleware(
 
 app.include_router(router)
 app.include_router(sources_router, prefix="/api/v1", dependencies=router.dependencies)
+
+# Browser-extension agent relay (outbound WS from the user's browser).
+from app.api.routes.agent import router as agent_router
+
+app.include_router(agent_router, prefix="/api/v1", dependencies=router.dependencies)
+app.add_api_websocket_route("/api/v1/agent/ws", agent_ws_endpoint)
 
 
 @app.get("/")

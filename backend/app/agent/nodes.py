@@ -155,6 +155,37 @@ async def _search_custom_sources(
             failed.append(f"{source.name}: no {flow_type} flow")
             issues.append({"source": source.name, "reason": f"no {flow_type} flow recorded"})
             return
+
+        # Prefer the browser-extension agent (runs in the user's real browser
+        # — sites never block it). Fall back to server-side Playwright.
+        from app.services.agent_relay import agent_registry
+
+        results: list[dict[str, Any]] | None = None
+        reason: str | None = None
+        if agent_registry.connected:
+            try:
+                data = await agent_registry.dispatch(
+                    "run_flow",
+                    {
+                        "baseUrl": source.base_url,
+                        "query": query,
+                        "steps": flow.steps,
+                    },
+                    timeout_s=180,
+                )
+                results = data.get("results") if isinstance(data, dict) else data
+                if results is None:
+                    results = []
+                for r in results:
+                    r.setdefault("source", source.name)
+                    r.setdefault("title", "")
+                ok.append(f"{source.name}: {len(results)} (agent)")
+                return
+            except Exception as exc:
+                logger.warning("Agent run_flow failed for %s: %s — falling back to Playwright", source.name, exc)
+                reason = str(exc)
+                results = None
+
         result = await execute_flow(
             base_url=source.base_url,
             steps=flow.steps,
@@ -164,11 +195,13 @@ async def _search_custom_sources(
         )
         results = result.get("results", [])
         if result.get("needs_human") or not results:
-            reason = result.get("human_reason", "no results")
-            failed.append(f"{source.name}: {reason}")
-            issues.append({"source": source.name, "reason": reason})
+            _reason = result.get("human_reason", "no results")
+            if reason:
+                _reason = f"{_reason} (agent: {reason})"
+            failed.append(f"{source.name}: {_reason}")
+            issues.append({"source": source.name, "reason": _reason})
             # If the session expired, flag the flow so setup shows "Re-login".
-            if "expired" in reason.lower() or "login" in reason.lower():
+            if "expired" in _reason.lower() or "login" in _reason.lower():
                 async with async_session() as db2:
                     db_flow = await db2.get(SourceFlow, flow.id)
                     if db_flow:

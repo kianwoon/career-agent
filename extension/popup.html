@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { font: 13px -apple-system, system-ui, sans-serif; width: 260px; padding: 12px; margin: 0; }
+    h1 { font-size: 14px; margin: 0 0 10px; }
+    .row { display: flex; gap: 6px; margin-bottom: 8px; }
+    input { flex: 1; padding: 6px; border: 1px solid #ccc; border-radius: 6px; font: inherit; }
+    button { padding: 6px 10px; border: none; border-radius: 6px; background: #2f6fed; color: #fff; cursor: pointer; }
+    #status { margin-top: 8px; font-weight: 600; }
+    .ok { color: #1e9e5f; } .down { color: #c33; }
+  </style>
+</head>
+<body>
+  <h1>Career Agent</h1>
+  <div class="row">
+    <input id="api" type="text" placeholder="API base URL" />
+  </div>
+  <div class="row">
+    <button id="save">Save & connect</button>
+  </div>
+  <div id="status">checking…</div>
+  <script src="popup.js"></script>
+</body>
+</html>

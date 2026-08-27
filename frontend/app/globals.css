@@ -1190,6 +1190,41 @@ body {
   color: var(--text-secondary, #8899aa);
 }
 
+.agent-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  border: 1px solid var(--border, #242c3a);
+}
+
+.agent-chip .agent-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.agent-chip.on {
+  color: var(--green, #34d399);
+  border-color: color-mix(in srgb, var(--green, #34d399) 40%, transparent);
+  background: var(--green-soft, rgba(52, 211, 153, 0.12));
+}
+
+.agent-chip.on .agent-dot {
+  background: var(--green, #34d399);
+  box-shadow: 0 0 6px var(--green, #34d399);
+}
+
+.agent-chip.off {
+  color: var(--text-muted, #8b94a7);
+}
+
+.agent-chip.off .agent-dot {
+  background: var(--text-muted, #8b94a7);
+}
+
 .source-chip {
   display: inline-flex;
   align-items: center;
