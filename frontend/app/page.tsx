@@ -229,6 +229,7 @@ export default function Home() {
   }
 
   async function handleWizard(source: SourceView, mode: "login" | "record", flowType?: "find_jobs" | "find_candidates") {
+    if (wizardBusy) return; // already running — ignore double-clicks
     const key = `${source.id}:${mode}:${flowType ?? ""}`;
     setWizardBusy(key);
     try {
@@ -392,12 +393,15 @@ export default function Home() {
     }, 5000);
     return () => clearInterval(id);
   }, [qrMode, wizardBusy]);
-  // Manual refresh shouldn't flash the loading panel for an already-loaded view.
+  // Manual refresh shouldn't flash the loading panel for an already-loaded view,
+  // and onLoad can be missed (cached imgs) — so auto-clear loading as a failsafe.
   useEffect(() => {
-    if (shotUrl) {
-      const t = setTimeout(() => setShotLoading(false), 4000);
-      return () => clearTimeout(t);
-    }
+    if (!shotLoading) return;
+    const t = setTimeout(() => setShotLoading(false), 6000);
+    return () => clearTimeout(t);
+  }, [shotLoading]);
+  useEffect(() => {
+    if (shotUrl) setShotLoading(false);
   }, [shotUrl]);
 
   async function handleDeleteSource(source: SourceView) {
@@ -848,7 +852,7 @@ export default function Home() {
                         {loginDone && (
                           <div className="wizard-login-done">✅ Sign-in detected — press Done to save this session.</div>
                         )}
-                        {shotLoading && !shotError && (
+                        {shotLoading && !shotError && !shotUrl && (
                           <div className="wizard-shot-loading">
                             <span className="spinner" aria-hidden /> Starting browser on {s.domain}… (up to 30s)
                           </div>
@@ -864,7 +868,7 @@ export default function Home() {
                         {shotUrl && (
                           /* eslint-disable-next-line @next/next/no-img-element */
                           <img
-                            className={`wizard-shot ${qrMode ? "wizard-shot-qr" : ""} ${shotLoading ? "wizard-shot-hidden" : ""}`}
+                            className={`wizard-shot ${qrMode ? "wizard-shot-qr" : ""}`}
                             src={shotUrl}
                             alt="Live browser preview"
                             onLoad={() => { setShotLoading(false); setShotError(false); }}
