@@ -655,6 +655,39 @@ def domain_of(url: str) -> str:
 # LLM auto-record: discover a site's search flow without a human recording
 # ---------------------------------------------------------------------------
 
+# Runs in the page: score candidate "result card" elements. Card-like =
+# reasonably sized, contains links, and is a REPEATED sibling of the same tag
+# (>=2 — strict >=3 missed LinkedIn's job cards whose parent mixes tags).
+_CARD_DISCOVERY_JS = """() => {
+  const scored = [];
+  for (const el of document.querySelectorAll('article, li, div, section')) {
+    const links = el.querySelectorAll('a');
+    if (links.length === 0) continue;
+    const textLen = (el.innerText || '').length;
+    if (textLen < 40) continue;  // too empty to be a listing card
+    const rect = el.getBoundingClientRect();
+    if (rect.width < 150 || rect.height < 40) continue;
+    const siblings = el.parentElement
+      ? Array.from(el.parentElement.children).filter(
+          c => c.tagName === el.tagName
+        ).length
+      : 1;
+    if (siblings >= 2) {
+      scored.push({
+        tag: el.tagName.toLowerCase(),
+        cls: (el.className && typeof el.className === 'string') ? el.className.slice(0, 120) : '',
+        id: el.id || '',
+        siblings,
+        textLen,
+        links: links.length,
+      });
+    }
+  }
+  // Prefer the most content-rich repeated container
+  scored.sort((a, b) => b.textLen - a.textLen);
+  return scored.slice(0, 15);
+}"""
+
 
 async def discover_flow(
     base_url: str,
@@ -748,45 +781,33 @@ async def discover_flow(
             await page.wait_for_load_state("domcontentloaded", timeout=15_000)
         except Exception:
             pass
-        await asyncio.sleep(3)
+        cards = []
+        for _ in range(10):  # up to ~30s
+            cards = await page.evaluate(_CARD_DISCOVERY_JS)
+            if cards:
+                break
+            await asyncio.sleep(3)
 
         # --- Step 3: identify result cards ---------------------------------
-        candidates = await page.evaluate(
-            """() => {
-              const scored = [];
-              for (const el of document.querySelectorAll('article, li, div, section')) {
-                if (el.parentElement && el.parentElement.querySelectorAll(':scope > a').length === 0 && !el.querySelector('a')) continue;
-                const links = el.querySelectorAll('a');
-                if (links.length === 0) continue;
-                const textLen = (el.innerText || '').length;
-                const rect = el.getBoundingClientRect();
-                if (rect.width < 200 || rect.height < 40) continue;
-                // Card-like: repeated siblings with similar structure
-                const siblings = el.parentElement
-                  ? Array.from(el.parentElement.children).filter(
-                      c => c.tagName === el.tagName
-                    ).length
-                  : 1;
-                if (siblings >= 3) {
-                  scored.push({
-                    tag: el.tagName.toLowerCase(),
-                    cls: (el.className && typeof el.className === 'string') ? el.className.slice(0, 120) : '',
-                    id: el.id || '',
-                    siblings,
-                    textLen,
-                    links: links.length,
-                  });
-                }
-              }
-              // Prefer the most specific (deepest) repeated container
-              scored.sort((a, b) => b.textLen - a.textLen);
-              return scored.slice(0, 15);
-            }"""
-        )
+        candidates = cards
         if not candidates:
+            # Include page state to make remote failures diagnosable.
+            page_state = await page.evaluate(
+                """() => ({
+                  url: location.href.slice(0, 150),
+                  title: document.title.slice(0, 80),
+                  bodyChars: (document.body?.innerText || '').length,
+                  loginHint: /sign in|log in|authwall/i.test(
+                    document.body?.innerText?.slice(0, 3000) || ''
+                  ),
+                })"""
+            )
             raise RuntimeError(
                 "Could not find repeated result cards on the results page — "
-                "the site may not have loaded results, or requires login."
+                f"the site may not have loaded results, or requires login. "
+                f"Page: {page_state.get('url')} | title='{page_state.get('title')}' | "
+                f"textChars={page_state.get('bodyChars')} | "
+                f"loginWall={page_state.get('loginHint')}"
             )
 
         raw_json = await llm.chat(
