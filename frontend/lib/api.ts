@@ -66,7 +66,16 @@ export async function createSource(name: string, baseUrl: string): Promise<Sourc
 
 export async function deleteSource(id: string): Promise<void> {
   const base = await resolveApiBase();
-  await fetch(`${base}/api/v1/sources/${id}`, { method: "DELETE" });
+  const headers: Record<string, string> = {};
+  const key = await resolveApiKey();
+  if (key) headers["X-API-Key"] = key;
+  const res = await fetch(`${base}/api/v1/sources/${id}`, {
+    method: "DELETE",
+    headers,
+  });
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`Delete failed with status ${res.status}`);
+  }
 }
 
 export async function wizardStart(
@@ -86,11 +95,9 @@ export async function wizardPoll(
   mode: string
 ): Promise<WizardPollResponse> {
   const base = await resolveApiBase();
-  const res = await fetch(
+  return getJson<WizardPollResponse>(
     `${base}/api/v1/sources/${sourceId}/wizard/events?mode=${mode}`
   );
-  if (!res.ok) throw new Error(`wizard poll failed: ${res.status}`);
-  return (await res.json()) as WizardPollResponse;
 }
 
 export async function wizardComplete(
@@ -107,9 +114,7 @@ export async function wizardComplete(
 
 export async function wizardCancel(sourceId: string, mode: string): Promise<void> {
   const base = await resolveApiBase();
-  await fetch(`${base}/api/v1/sources/${sourceId}/wizard/${mode}/cancel`, {
-    method: "POST",
-  });
+  await postJson<void>(`${base}/api/v1/sources/${sourceId}/wizard/${mode}/cancel`, {});
 }
 
 /** A single piece of evidence backing a match score. */

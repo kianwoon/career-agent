@@ -194,6 +194,14 @@ export default function Home() {
     }
   }
 
+  /** Derive the active wizard step from the busy key "<id>:<mode>:<flow>". */
+  function wizardActiveMode(source: SourceView): "login" | "record" {
+    return wizardBusy?.startsWith(`${source.id}:login`) ? "login" : "record";
+  }
+  function wizardActiveFlow(source: SourceView): "find_jobs" | "find_candidates" {
+    return wizardBusy?.includes(":find_candidates") ? "find_candidates" : "find_jobs";
+  }
+
   async function handleWizard(source: SourceView, mode: "login" | "record", flowType?: "find_jobs" | "find_candidates") {
     const key = `${source.id}:${mode}:${flowType ?? ""}`;
     setWizardBusy(key);
@@ -683,15 +691,15 @@ export default function Home() {
                       )}
                       <button
                         className="btn small"
-                        disabled={!!wizardBusy || wizardBusy !== `${s.id}:record:${mode === "jobs" ? "find_jobs" : "find_candidates"}`}
-                        onClick={() => handleWizardDone(s, "record", mode === "jobs" ? "find_jobs" : "find_candidates", query)}
+                        disabled={!!wizardBusy || wizardBusy !== `${s.id}:${wizardActiveMode(s)}`}
+                        onClick={() => handleWizardDone(s, wizardActiveMode(s), wizardActiveFlow(s), query)}
                       >
                         Done
                       </button>
                       <button
                         className="btn small"
-                        disabled={!wizardBusy?.startsWith(`${s.id}:`)}
-                        onClick={() => handleWizardCancel(s, "record")}
+                        disabled={!wizardBusy?.startsWith(`${s.id}:`) || wizardBusy === `${s.id}:login:`}
+                        onClick={() => handleWizardCancel(s, wizardActiveMode(s))}
                       >
                         Cancel
                       </button>
