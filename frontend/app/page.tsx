@@ -837,34 +837,65 @@ export default function Home() {
             <div className="sources-row">
               <span className="sources-label">Sources:</span>
               {customSources.length === 0 && (
-                <span className="sources-empty">built-in only (LinkedIn, MyCareersFuture, FastJobs)</span>
+                <span className="sources-empty">built-in only (LinkedIn, MyCareersFuture, FastJobs) — add a site below</span>
               )}
-              {customSources.map((s) => {
-                const ready = s.has_session && (mode === "jobs" ? s.flows.find_jobs === "active" : s.flows.find_candidates === "active");
-                return (
-                  <label key={s.id} className={`source-chip ${ready ? "ready" : ""}`} title={`${s.domain} — ${ready ? "ready" : "setup incomplete"}`}>
-                    <input
-                      type="checkbox"
-                      checked={selectedSourceIds.has(s.id)}
-                      onChange={() => toggleSelectedSource(s.id)}
-                      disabled={isRunning || !ready}
-                    />
-                    {s.name}
-                    {!ready && <span className="source-warn"> (setup needed)</span>}
-                    <button
-                      className="source-remove"
-                      onClick={(e) => { e.preventDefault(); handleDeleteSource(s); }}
-                      aria-label={`Remove ${s.name}`}
-                    >
-                      ×
-                    </button>
-                  </label>
-                );
-              })}
               {selectedSourceIds.size === 0 && customSources.some((s) => s.has_session) && (
-                <span className="sources-empty">(all enabled sources included)</span>
+                <span className="sources-empty">(all ready sources included)</span>
               )}
             </div>
+
+            {customSources.length > 0 && (
+              <div className="sources-grid">
+                {customSources.map((s) => {
+                  const ready = s.has_session && (mode === "jobs" ? s.flows.find_jobs === "active" : s.flows.find_candidates === "active");
+                  const selected = selectedSourceIds.has(s.id);
+                  return (
+                    <label
+                      key={s.id}
+                      className={`source-card ${ready ? "ready" : ""} ${selected ? "selected" : ""} ${isRunning || !ready ? "locked" : ""}`}
+                      title={`${s.domain} — ${ready ? "ready" : "setup incomplete"}`}
+                    >
+                      <div className="source-card-top">
+                        <input
+                          type="checkbox"
+                          className="source-card-check"
+                          checked={selected}
+                          onChange={() => toggleSelectedSource(s.id)}
+                          disabled={isRunning || !ready}
+                        />
+                        <span className="source-card-avatar" aria-hidden="true">
+                          {(s.name || "?").slice(0, 2).toUpperCase()}
+                        </span>
+                        <div className="source-card-id">
+                          <span className="source-card-name">{s.name}</span>
+                          <span className="source-card-domain">{s.domain}</span>
+                        </div>
+                        <button
+                          className="source-remove"
+                          onClick={(e) => { e.preventDefault(); handleDeleteSource(s); }}
+                          aria-label={`Remove ${s.name}`}
+                          title={`Remove ${s.name}`}
+                        >
+                          ×
+                        </button>
+                      </div>
+                      <div className="source-card-status">
+                        <span className={`status-pill ${s.has_session ? "ok" : "warn"}`}>
+                          {s.has_session ? "✓ signed in" : "⚠ not signed in"}
+                        </span>
+                        <span className={`status-pill ${s.flows.find_jobs === "active" ? "ok" : "off"}`}>
+                          jobs flow {s.flows.find_jobs === "active" ? "✓" : "—"}
+                        </span>
+                        <span className={`status-pill ${s.flows.find_candidates === "active" ? "ok" : "off"}`}>
+                          candidates flow {s.flows.find_candidates === "active" ? "✓" : "—"}
+                        </span>
+                      </div>
+                      {!ready && <span className="source-warn">Setup needed for {mode === "jobs" ? "job" : "candidate"} search</span>}
+                    </label>
+                  );
+                })}
+              </div>
+            )}
 
             <details className="add-source">
               <summary>Add a new source</summary>
