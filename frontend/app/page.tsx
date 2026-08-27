@@ -260,6 +260,34 @@ export default function Home() {
       setShotError(false);
       const url = await wizardScreenshotUrl(source.id, mode);
       setShotUrl(`${url}&t=${Date.now()}`);
+      // Record mode: kick off LLM auto-discovery automatically — the user
+      // shouldn't need to press Done. Wait a beat so the start call settles.
+      if (mode === "record") {
+        setTimeline((prev) =>
+          addEvent(prev, "action", "Auto-recording: discovering the search box and result cards…")
+        );
+        await new Promise((r) => setTimeout(r, 4000));
+        try {
+          const res = await wizardComplete(source.id, "record", query);
+          if (res.flow_id) {
+            setTimeline((prev) =>
+              addEvent(prev, "success", `Flow saved for ${source.name}: ${res.steps.length} steps (card: ${res.card_selectors?.card ?? "n/a"}).`)
+            );
+          }
+        } catch (e2) {
+          setTimeline((prev) =>
+            addEvent(prev, "warn", `Auto-record failed: ${e2 instanceof Error ? e2.message : e2}`)
+          );
+        } finally {
+          clearWizPolls();
+          setWizardBusy(null);
+          setShotUrl(null);
+          await reloadSources();
+        }
+        wizardStartingRef.current = false;
+        return;
+      }
+
       // Watch for login completion (QR/SSO flows: nothing typed by hand).
       // Only for the login step — record wizards don't need it. Stops itself
       // when the wizard disappears server-side (expired, completed elsewhere,
@@ -957,8 +985,8 @@ export default function Home() {
                     )}
                     {wizardBusy?.startsWith(`${s.id}:record`) && (
                       <span className="wizard-hint">
-                        Auto-recording: the agent will visit {s.domain}, find the search box
-                        and result cards automatically (takes ~30s). Use query "{query || "software engineer"}" as the test search.
+                        Auto-recording in progress: the agent is visiting {s.domain}, searching for
+                        "{query || "software engineer"}" and finding the result cards. Watch the activity feed — this takes ~30s.
                       </span>
                     )}
                     {wizardBusy === null && (
