@@ -237,10 +237,10 @@ async def run_search(state: AgentState) -> AgentState:
         from app.models.orm import Source
 
         async with async_session() as db:
-            enabled_domains = set(
+            disabled_domains = set(
                 (
                     await db.execute(
-                        select(Source.domain).where(Source.enabled.is_(True))
+                        select(Source.domain).where(Source.enabled.is_(False))
                     )
                 ).scalars().all()
             )
@@ -249,11 +249,12 @@ async def run_search(state: AgentState) -> AgentState:
         from app.services.linkedin import search_linkedin_jobs
         from app.services.mycareersfuture import search_mycareersfuture_jobs
 
-        # Default to enabled when a row is missing (defensive; seeding should
-        # have created all built-ins).
-        li_on = "linkedin.com" in enabled_domains
-        mcf_on = "mycareersfuture.gov.sg" in enabled_domains
-        fj_on = "fastjobs.io" in enabled_domains
+        # A built-in runs unless its Source row explicitly disables it.
+        # Missing row = enabled (seeding may not have run yet, e.g. fresh
+        # test DB), so an empty sources table never silently kills search.
+        li_on = "linkedin.com" not in disabled_domains
+        mcf_on = "mycareersfuture.gov.sg" not in disabled_domains
+        fj_on = "fastjobs.io" not in disabled_domains
 
         li_result, mcf_result, fj_result = await asyncio.gather(
             _safe_search(search_linkedin_jobs, query, location) if li_on else _noop_search("disabled"),
