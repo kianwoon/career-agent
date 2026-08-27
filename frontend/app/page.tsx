@@ -691,7 +691,7 @@ export default function Home() {
                       )}
                       <button
                         className="btn small"
-                        disabled={!!wizardBusy || wizardBusy !== `${s.id}:${wizardActiveMode(s)}`}
+                        disabled={!wizardBusy?.startsWith(`${s.id}:`)}
                         onClick={() => handleWizardDone(s, wizardActiveMode(s), wizardActiveFlow(s), query)}
                       >
                         Done
