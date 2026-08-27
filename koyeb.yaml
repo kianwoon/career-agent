@@ -48,7 +48,7 @@ service:
       - name: LLM_BASE_URL
         value: "https://api.z.ai/api/anthropic/v1/messages"
       - name: LLM_MODEL_NAME
-        value: "GLM-5.3"
+        value: "GLM-5.3-flash"
       - name: CORS_ORIGINS
         value: '["https://career-agent-<your-org>.koyeb.app"]'
       - name: BRAVE_CDP_URL

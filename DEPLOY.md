@@ -49,7 +49,7 @@ Existing Koyeb Postgres is reused — the API **auto-creates tables on boot**
    | `LLM_ENABLED` | `true` |
    | `LLM_API_KEY` | your GLM key |
    | `LLM_BASE_URL` | `https://api.z.ai/api/anthropic/v1/messages` |
-   | `LLM_MODEL_NAME` | `GLM-5.3` |
+   | `LLM_MODEL_NAME` | `GLM-5.3-flash` |
    | `CORS_ORIGINS` | `["https://career-web-<org>.koyeb.app"]` |
    | `BRAVE_CDP_URL` | *(leave empty — production uses captured-session replay)* |
 

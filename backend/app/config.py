@@ -66,7 +66,7 @@ class Settings(BaseSettings):
     llm_enabled: bool = False
     llm_base_url: str = "https://api.z.ai/api/anthropic/v1/messages"
     llm_api_key: str = ""  # set via env: LLM_API_KEY
-    llm_model_name: str = "GLM-5.3"
+    llm_model_name: str = "GLM-5.3-flash"
     llm_max_tokens: int = 2048
     llm_timeout_s: int = 60
     llm_session_name: str = "career-agent"
