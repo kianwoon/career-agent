@@ -127,6 +127,7 @@ export default function Home() {
   const [shotError, setShotError] = useState(false);
   const loginDoneRef = useRef(false);
   const __wizLoginPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const wizardStartingRef = useRef(false);
   const [takeoverActive, setTakeoverActive] = useState(false);
   const [browserSession, setBrowserSession] = useState<BrowserSessionView | null>(null);
   const [sessionBusy, setSessionBusy] = useState(false);
@@ -229,7 +230,9 @@ export default function Home() {
   }
 
   async function handleWizard(source: SourceView, mode: "login" | "record", flowType?: "find_jobs" | "find_candidates") {
-    if (wizardBusy) return; // already running — ignore double-clicks
+    // Ref guard: state updates async, so two rapid clicks both see stale state.
+    if (wizardBusy || wizardStartingRef.current) return;
+    wizardStartingRef.current = true;
     const key = `${source.id}:${mode}:${flowType ?? ""}`;
     setWizardBusy(key);
     try {
@@ -258,9 +261,10 @@ export default function Home() {
       const url = await wizardScreenshotUrl(source.id, mode);
       setShotUrl(`${url}&t=${Date.now()}`);
       // Watch for login completion (QR/SSO flows: nothing typed by hand).
-      // Stops itself when the wizard disappears server-side (expired,
-      // completed elsewhere, or the API redeployed) so it never spams 404s.
-      const lp: ReturnType<typeof setInterval> = setInterval(async () => {
+      // Only for the login step — record wizards don't need it. Stops itself
+      // when the wizard disappears server-side (expired, completed elsewhere,
+      // or the API redeployed) so it never spams 404s.
+      const lp: ReturnType<typeof setInterval> | null = mode === "login" ? setInterval(async () => {
         try {
           const st = await wizardStatus(source.id, "login");
           if (st.logged_in && !loginDoneRef.current) {
@@ -272,9 +276,10 @@ export default function Home() {
           }
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
-          if (msg.includes("404")) {
+          if (msg.includes("404") && lp) {
             // Wizard session no longer exists server-side — stop polling.
             clearInterval(lp);
+            __wizLoginPollRef.current = null;
             setTimeline((prev) =>
               addEvent(
                 prev,
@@ -286,7 +291,7 @@ export default function Home() {
             setShotUrl(null);
           }
         }
-      }, 3000);
+      }, 3000) : null;
       __wizLoginPollRef.current = lp;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -301,6 +306,8 @@ export default function Home() {
       );
       setWizardHint(null);
       setWizardBusy(null);
+    } finally {
+      wizardStartingRef.current = false;
     }
   }
 

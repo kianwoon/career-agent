@@ -120,7 +120,12 @@ async def wizard_start(
         raise HTTPException(400, f"flow_type must be one of {FLOW_TYPES}")
 
     wizard_id = f"wiz-{source.id}-{req.mode}"
-    # Close any stale wizard for this source/mode.
+    start_url = source.base_url
+    # Idempotent: if an active wizard already exists for this source/mode,
+    # return it instead of killing and restarting (double-clicks, retries).
+    existing_wiz = _wizards.get(wizard_id)
+    if existing_wiz and await existing_wiz.age_s() < 300:
+        return WizardStartResponse(wizard_id=wizard_id, mode=req.mode, start_url=start_url)
     old = _wizards.pop(wizard_id, None)
     if old:
         await old.close()
@@ -136,7 +141,6 @@ async def wizard_start(
         except Exception as exc:
             logger.warning("Could not decrypt source session: %s", exc)
 
-    start_url = source.base_url
     wiz = WizardSession(source.id, req.flow_type or "login", domain=source.domain)
     try:
         await wiz.start(start_url, storage_state)
