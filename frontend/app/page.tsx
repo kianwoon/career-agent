@@ -869,9 +869,7 @@ export default function Home() {
                           onChange={() => toggleSelectedSource(s.id)}
                           disabled={isRunning || !ready}
                         />
-                        <span className="source-card-avatar" aria-hidden="true">
-                          {(s.name || "?").slice(0, 2).toUpperCase()}
-                        </span>
+                        <SourceAvatar name={s.name} domain={s.domain} />
                         <div className="source-card-id">
                           <span className="source-card-name">{s.name}</span>
                           <span className="source-card-domain">{s.domain}</span>
@@ -1627,5 +1625,32 @@ function HistoryList({
         </>
       )}
     </>
+  );
+}
+
+/* ------------------------- Source avatar --------------------------- */
+
+/**
+ * Site favicon via Google's public favicon service, falling back to the
+ * initials badge when the site has no favicon or the request fails.
+ */
+function SourceAvatar({ name, domain }: { name: string; domain: string }) {
+  const [imgFailed, setImgFailed] = useState(false);
+  const showImg = domain && !imgFailed;
+  return (
+    <span className="source-card-avatar" aria-hidden="true">
+      {showImg ? (
+        /* eslint-disable-next-line @next/next/no-img-element */
+        <img
+          className="source-card-favicon"
+          src={`https://www.google.com/s2/favicons?domain=${encodeURIComponent(domain)}&sz=64`}
+          alt=""
+          loading="lazy"
+          onError={() => setImgFailed(true)}
+        />
+      ) : (
+        (name || "?").slice(0, 2).toUpperCase()
+      )}
+    </span>
   );
 }
