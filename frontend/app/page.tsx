@@ -273,13 +273,25 @@ export default function Home() {
           }
         } catch (e2) {
           const msg = e2 instanceof Error ? e2.message : String(e2);
-          // 404 = the wizard session was already completed (user pressed Done
-          // while auto-record was running) or cancelled — the Done/Cancel path
-          // reports its own outcome, so don't double-report as a failure.
           if (msg.includes("404")) {
-            setTimeline((prev) =>
-              addEvent(prev, "info", "Auto-record session already ended (Done pressed or wizard cancelled).")
-            );
+            // Session vanished server-side: either completed by another path
+            // or lost (backend restart/redeploy wipes in-memory wizards).
+            // Check whether the flow actually saved before reporting.
+            await reloadSources();
+            let saved = false;
+            setCustomSources((cur) => {
+              saved = cur.some((c) => c.id === source.id && c.flows[flowType === "find_candidates" ? "find_candidates" : "find_jobs"] === "active");
+              return cur;
+            });
+            if (saved) {
+              setTimeline((prev) =>
+                addEvent(prev, "success", `Flow saved for ${source.name} (completed by another action).`)
+              );
+            } else {
+              setTimeline((prev) =>
+                addEvent(prev, "warn", `Record session lost (backend restarted?) — press "Record ${flowType === "find_candidates" ? "candidates" : "jobs"}" to try again.`)
+              );
+            }
           } else {
             setTimeline((prev) =>
               addEvent(prev, "warn", `Auto-record failed: ${msg}`)
