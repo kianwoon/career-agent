@@ -269,8 +269,13 @@ class WizardSession:
                 "reason": "No username/password fields visible on the page — "
                           "navigate to the login form first (or use click to get there).",
             }
-        await self.page.fill(user_sel, username, timeout=5_000)
-        await self.page.fill(pass_sel, password, timeout=5_000)
+        # Human-paced: pause between fields, type with jittered keystrokes.
+        from app.services.pacing import pacing
+
+        await pacing.human_delay("commit")
+        await pacing.human_type(self.page, user_sel, username)
+        await pacing.human_delay("mechanical")
+        await pacing.human_type(self.page, pass_sel, password)
         self.touch()
         if not submit:
             return {"ok": True, "submitted": False}
@@ -282,11 +287,12 @@ class WizardSession:
             "button:has-text('Log in')",
             "button:has-text('Login')",
         ])
+        await pacing.human_delay("commit")
         if submit_sel:
             await self.page.click(submit_sel, timeout=5_000)
         else:
             await self.page.press(pass_sel, "Enter", timeout=5_000)
-        await asyncio.sleep(3)
+        await pacing.human_pause_reading((2.5, 4.5))
         self.touch()
         st = await self.status()
         return {"ok": True, "submitted": True, **st}
@@ -313,7 +319,9 @@ class WizardSession:
                 continue
         if not sel:
             return {"ok": False, "reason": "No MFA/OTP input found on the page"}
-        await self.page.fill(sel, code, timeout=5_000)
+        from app.services.pacing import pacing
+
+        await pacing.human_type(self.page, sel, code)
         submit_sel = None
         for candidate in ("button[type='submit']", "button:has-text('Verify')", "button:has-text('Submit')"):
             try:
@@ -324,11 +332,12 @@ class WizardSession:
             except Exception as exc:
                 logger.debug("mfa submit probe failed: %s", exc)
                 continue
+        await pacing.human_delay("commit")
         if submit_sel:
             await self.page.click(submit_sel, timeout=5_000)
         else:
             await self.page.press(sel, "Enter", timeout=5_000)
-        await asyncio.sleep(3)
+        await pacing.human_pause_reading((2.5, 4.5))
         self.touch()
         st = await self.status()
         return {"ok": True, **st}
@@ -472,7 +481,6 @@ def templatize(
 # ---------------------------------------------------------------------------
 
 MAX_PAGES = 5
-PAGE_WAIT_S = 2.5
 
 # Common login-page signals. If the flow lands on one of these, the saved
 # session has expired and a human must re-login via the wizard.
@@ -562,18 +570,22 @@ async def execute_flow(
             return {"results": [], "needs_human": True, "human_reason": logged_out}
 
         error: str | None = None
+        from app.services.pacing import pacing
+
         for step in steps:
             action = step.get("action")
             try:
                 if action == "fill":
                     value = query if step.get("param") == "query" else step.get("value", "")
-                    await page.fill(step["selector"], value, timeout=10_000)
+                    await pacing.human_type(page, step["selector"], value)
                 elif action == "click":
+                    await pacing.human_delay("commit")
                     await page.click(step["selector"], timeout=10_000)
-                    await asyncio.sleep(PAGE_WAIT_S)
+                    await pacing.human_delay("navigate")
                 elif action == "press":
+                    await pacing.human_delay("commit")
                     await page.press(step["selector"], step.get("key", "Enter"), timeout=10_000)
-                    await asyncio.sleep(PAGE_WAIT_S)
+                    await pacing.human_delay("navigate")
             except Exception as exc:
                 error = f"Step failed ({action} {step.get('selector')}): {exc}"
                 break
@@ -595,8 +607,9 @@ async def execute_flow(
             if pag is None:
                 break
             try:
+                await pacing.human_delay("commit")
                 await page.click(pag["selector"], timeout=8_000)
-                await asyncio.sleep(PAGE_WAIT_S)
+                await pacing.human_delay("navigate")
             except Exception:
                 break  # no more pages
         if not results:
@@ -774,19 +787,25 @@ async def discover_flow(
             else chosen["tag"]
         )
 
-        # --- Step 2: fill + submit ----------------------------------------
-        await page.fill(sel, query, timeout=10_000)
+        # --- Step 2: fill + submit (human-paced) ---------------------------
+        from app.services.pacing import pacing
+
+        await pacing.human_delay("read")           # scan the page first
+        await pacing.human_type(page, sel, query)  # click + jittered typing
+        await pacing.human_delay("commit")         # beat before pressing Enter
         await page.keyboard.press("Enter")
         try:
             await page.wait_for_load_state("domcontentloaded", timeout=15_000)
         except Exception:
             pass
+        # SPA/infinite-scroll sites (LinkedIn, MCF) render results in waves;
+        # poll until repeated cards appear, with human "reading" pauses.
         cards = []
-        for _ in range(10):  # up to ~30s
+        for _ in range(10):  # up to ~45s
             cards = await page.evaluate(_CARD_DISCOVERY_JS)
             if cards:
                 break
-            await asyncio.sleep(3)
+            await pacing.human_delay("read")
 
         # --- Step 3: identify result cards ---------------------------------
         candidates = cards
