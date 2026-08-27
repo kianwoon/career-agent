@@ -701,6 +701,81 @@ body {
   margin-bottom: 16px;
 }
 
+.history-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.history-search {
+  flex: 1;
+  min-width: 180px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-input, transparent);
+  color: inherit;
+  font: inherit;
+}
+
+.history-page-size {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.history-page-size select {
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-input, transparent);
+  color: inherit;
+}
+
+.history-pagination {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.history-pagination .page-btn {
+  min-width: 28px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.history-pagination .page-btn.current {
+  background: var(--accent, #2563eb);
+  border-color: var(--accent, #2563eb);
+  color: #fff;
+}
+
+.history-pagination .page-btn:disabled,
+.history-pagination .link-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.history-pagination .page-ellipsis {
+  opacity: 0.6;
+}
+
+.history-pagination .page-info {
+  margin-left: auto;
+  font-size: 0.8rem;
+  opacity: 0.7;
+}
+
 .history-list {
   list-style: none;
   margin: 0;

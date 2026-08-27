@@ -134,6 +134,11 @@ export default function Home() {
   const [sessionBusy, setSessionBusy] = useState(false);
   const [history, setHistory] = useState<SearchHistoryItem[]>([]);
   const [historyLoaded, setHistoryLoaded] = useState(false);
+  // Past Searches pagination + search.
+  const [historySearch, setHistorySearch] = useState("");
+  const [historyPage, setHistoryPage] = useState(1);
+  // Page size persisted in localStorage so the user's last choice is remembered.
+  const [historyPageSize, setHistoryPageSize] = useState(10);
   // Hydration-safe initial state: identical on server and client (no
   // Date.now()/locale formatting during render). The real timestamp is
   // stamped after mount in the effect below.
@@ -557,12 +562,28 @@ export default function Home() {
 
   async function loadHistory() {
     try {
+      // Restore the user's last page-size selection (default 10).
+      const saved = Number(localStorage.getItem("historyPageSize"));
+      if (saved === 10 || saved === 20 || saved === 30) {
+        setHistoryPageSize(saved);
+      }
       const resp = await fetchSearchHistory();
       setHistory(resp.items ?? []);
     } catch {
       // Non-fatal — history is a convenience, not core.
     } finally {
       setHistoryLoaded(true);
+    }
+  }
+
+  // Persist page-size choice and reset to first page whenever it changes.
+  function handleHistoryPageSizeChange(size: number) {
+    setHistoryPageSize(size);
+    setHistoryPage(1);
+    try {
+      localStorage.setItem("historyPageSize", String(size));
+    } catch {
+      // localStorage unavailable — selection still applies for this session.
     }
   }
 
@@ -1061,27 +1082,20 @@ export default function Home() {
           ) : history.length === 0 ? (
             <div className="empty small">No past searches yet.</div>
           ) : (
-            <ul className="history-list">
-              {history.map((item) => (
-                <li key={item.task_id}>
-                  <button
-                    className="history-item"
-                    onClick={() => handleViewHistory(item)}
-                    disabled={sessionBusy}
-                    title="Click to view past results"
-                  >
-                    <span className={`history-type ${item.type}`}>
-                      {item.type === "jobs" ? "Job" : "Cand"}
-                    </span>
-                    <span className="history-query">{item.query}</span>
-                    <span className="history-meta">
-                      <span className={`history-status ${item.status}`}>{item.status}</span>
-                      <span className="history-count">{item.result_count}</span>
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
+            <HistoryList
+              items={history}
+              search={historySearch}
+              onSearchChange={(v) => {
+                setHistorySearch(v);
+                setHistoryPage(1);
+              }}
+              page={historyPage}
+              onPageChange={setHistoryPage}
+              pageSize={historyPageSize}
+              onPageSizeChange={handleHistoryPageSizeChange}
+              onSelect={handleViewHistory}
+              disabled={sessionBusy}
+            />
           )}
         </section>
         )}
@@ -1402,5 +1416,137 @@ function ResultCard({
         )}
       </div>
     </article>
+  );
+}
+
+/* ------------------------- Past Searches list --------------------- */
+
+function HistoryList({
+  items,
+  search,
+  onSearchChange,
+  page,
+  onPageChange,
+  pageSize,
+  onPageSizeChange,
+  onSelect,
+  disabled,
+}: {
+  items: SearchHistoryItem[];
+  search: string;
+  onSearchChange: (value: string) => void;
+  page: number;
+  onPageChange: (page: number) => void;
+  pageSize: number;
+  onPageSizeChange: (size: number) => void;
+  onSelect: (item: SearchHistoryItem) => void;
+  disabled: boolean;
+}) {
+  const q = search.trim().toLowerCase();
+  const filtered = q
+    ? items.filter(
+        (item) =>
+          item.query.toLowerCase().includes(q) ||
+          item.status.toLowerCase().includes(q) ||
+          item.type.toLowerCase().includes(q)
+      )
+    : items;
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const start = (safePage - 1) * pageSize;
+  const pageItems = filtered.slice(start, start + pageSize);
+
+  // Compact page numbers: show up to 5 pages around the current one.
+  const pageNumbers: number[] = [];
+  const first = Math.max(1, Math.min(safePage - 2, totalPages - 4));
+  for (let p = first; p <= Math.min(first + 4, totalPages); p++) pageNumbers.push(p);
+
+  return (
+    <>
+      <div className="history-controls">
+        <input
+          type="search"
+          className="history-search"
+          placeholder="Search past queries…"
+          value={search}
+          onChange={(e) => onSearchChange(e.target.value)}
+          aria-label="Search past searches"
+        />
+        <label className="history-page-size">
+          Per page
+          <select
+            value={pageSize}
+            onChange={(e) => onPageSizeChange(Number(e.target.value))}
+          >
+            <option value={10}>10</option>
+            <option value={20}>20</option>
+            <option value={30}>30</option>
+          </select>
+        </label>
+      </div>
+
+      {filtered.length === 0 ? (
+        <div className="empty small">No matching past searches.</div>
+      ) : (
+        <>
+          <ul className="history-list">
+            {pageItems.map((item) => (
+              <li key={item.task_id}>
+                <button
+                  className="history-item"
+                  onClick={() => onSelect(item)}
+                  disabled={disabled}
+                  title="Click to view past results"
+                >
+                  <span className={`history-type ${item.type}`}>
+                    {item.type === "jobs" ? "Job" : "Cand"}
+                  </span>
+                  <span className="history-query">{item.query}</span>
+                  <span className="history-meta">
+                    <span className={`history-status ${item.status}`}>{item.status}</span>
+                    <span className="history-count">{item.result_count}</span>
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+
+          {totalPages > 1 && (
+            <nav className="history-pagination" aria-label="Past searches pages">
+              <button
+                className="link-btn"
+                disabled={safePage <= 1}
+                onClick={() => onPageChange(safePage - 1)}
+              >
+                ‹ Prev
+              </button>
+              {first > 1 && <span className="page-ellipsis">…</span>}
+              {pageNumbers.map((p) => (
+                <button
+                  key={p}
+                  className={`page-btn${p === safePage ? " current" : ""}`}
+                  onClick={() => onPageChange(p)}
+                  aria-current={p === safePage ? "page" : undefined}
+                >
+                  {p}
+                </button>
+              ))}
+              {first + 4 < totalPages && <span className="page-ellipsis">…</span>}
+              <button
+                className="link-btn"
+                disabled={safePage >= totalPages}
+                onClick={() => onPageChange(safePage + 1)}
+              >
+                Next ›
+              </button>
+              <span className="page-info">
+                {start + 1}–{Math.min(start + pageSize, filtered.length)} of {filtered.length}
+              </span>
+            </nav>
+          )}
+        </>
+      )}
+    </>
   );
 }
