@@ -187,7 +187,11 @@ async function cmdRunFlow(baseUrl, query, steps) {
   const results = [];
   for (const step of steps || []) {
     const action = step.action;
-    if (action === "navigate") await cmdNavigate(step.url || baseUrl);
+    if (action === "navigate") {
+      // URL templates may contain {query} — substitute the search text.
+      const url = (step.url || baseUrl).replaceAll("{query}", encodeURIComponent(query || ""));
+      await cmdNavigate(url);
+    }
     else if (action === "fill") await cmdFill(step.selector, step.param === "query" ? query : step.value || "");
     else if (action === "click") await cmdClick(step.selector);
     else if (action === "press") await cmdPress(step.key || "Enter");

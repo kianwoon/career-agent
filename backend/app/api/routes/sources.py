@@ -322,35 +322,29 @@ async def agent_record(
     req: AgentRecordRequest,
     db: AsyncSession = Depends(get_db),
 ) -> SourceFlowView:
-    """Auto-discover the flow in the USER's browser via the extension.
-
-    Reuses discover_flow's step-JSON format; the extension executes
-    navigate/fill/click/press in the logged-in tab and extracts cards.
+    """Create a flow for a source. For LinkedIn, flows are SYNTHESIZED from
+    URL templates (jobs and people searches have dedicated URLs and distinct
+    card structures — no browser recording needed or possible: the generic
+    search page mixes jobs and people in one list). For other sites, the
+    extension auto-discovers the flow in the user's browser.
     """
     source = await _get_source(source_id, db)
     if req.flow_type not in FLOW_TYPES:
         raise HTTPException(400, f"flow_type must be one of {FLOW_TYPES}")
 
-    from app.services.agent_relay import agent_registry
+    steps: list[dict[str, Any]]
+    if source.domain == "linkedin.com":
+        steps = _linkedin_builtin_flow(req.flow_type)
+    else:
+        steps = await _agent_discover(source, req)
 
-    try:
-        data = await agent_registry.dispatch(
-            "discover_flow",
-            {"baseUrl": source.base_url, "query": req.query_hint or "software engineer", "flowType": req.flow_type},
-            timeout_s=180,
-        )
-    except RuntimeError as exc:
-        raise HTTPException(502, f"Agent discovery failed: {exc}")
-
-    card = (data or {}).get("card")
-    fields = (data or {}).get("fields", {})
-    steps = (data or {}).get("steps", [])
+    card: str | None = None
+    if source.domain == "linkedin.com":
+        card, _fields = _linkedin_card_spec(req.flow_type)
+    else:
+        card = (steps[-1] or {}).get("card") if steps else None
     if not card:
         raise HTTPException(502, "Agent could not identify result cards on the page")
-
-    embed: list[dict[str, Any]] = [{"card": card}]
-    if fields:
-        embed[0]["fields"] = fields
 
     existing = (
         await db.execute(
@@ -361,12 +355,12 @@ async def agent_record(
         )
     ).scalar_one_or_none()
     if existing:
-        existing.steps = steps + embed
+        existing.steps = steps
         existing.status = "active"
         existing.last_verified_at = datetime.utcnow()
         flow = existing
     else:
-        flow = SourceFlow(source_id=source.id, flow_type=req.flow_type, steps=steps + embed)
+        flow = SourceFlow(source_id=source.id, flow_type=req.flow_type, steps=steps)
         db.add(flow)
     await db.commit()
     await db.refresh(flow)
@@ -378,6 +372,62 @@ async def agent_record(
         status=flow.status,
         created_at=flow.created_at,
     )
+
+
+def _linkedin_builtin_flow(flow_type: str) -> list[dict[str, Any]]:
+    """LinkedIn flows from URL templates — no recording.
+
+    Jobs:  /jobs/search?keywords={query}  → dedicated jobs list
+    People: /search/results/people/?keywords={query} → dedicated people list
+    The card/fields step is appended by the caller via _linkedin_card_spec.
+    """
+    if flow_type == "find_jobs":
+        url = "https://www.linkedin.com/jobs/search/?keywords={query}"
+    else:
+        url = "https://www.linkedin.com/search/results/people/?keywords={query}"
+    return [
+        {"action": "navigate", "url": url},
+        {"action": "wait", "seconds": 3},
+    ]
+
+
+def _linkedin_card_spec(flow_type: str) -> tuple[str, dict[str, str]]:
+    """CSS selectors for one result card on LinkedIn's dedicated lists."""
+    if flow_type == "find_jobs":
+        card = "div.base-card, li.scaffold-layout__list-item, .jobs-search-results__list-item"
+        fields = {
+            "title": ".base-search-card__title, .job-card-list__title",
+            "company": ".base-search-card__subtitle, .job-card-container__company-name",
+            "location": ".job-search-card__location, .job-card-container__metadata-item",
+        }
+    else:
+        card = "div.entity-result, li.reusable-search__result-container, .reusable-search__entity-result"
+        fields = {
+            "title": ".entity-result__title-text a, .entity-result__title-line a",
+            "company": ".entity-result__primary-subtitle",
+            "location": ".entity-result__secondary-subtitle",
+        }
+    return card, fields
+
+
+async def _agent_discover(source: Source, req: AgentRecordRequest) -> list[dict[str, Any]]:
+    """Extension-driven discovery for non-LinkedIn sites."""
+    from app.services.agent_relay import agent_registry
+
+    try:
+        data = await agent_registry.dispatch(
+            "discover_flow",
+            {
+                "baseUrl": source.base_url,
+                "query": req.query_hint or "software engineer",
+                "flowType": req.flow_type,
+            },
+            timeout_s=180,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(502, f"Agent discovery failed: {exc}")
+    return (data or {}).get("steps", [])
+
 async def wizard_credentials(source_id: str, req: WizardCredentials, mode: str = "login") -> dict:
     """Type credentials into the visible login form (UI-driven sign-in)."""
     wiz = await _wiz(source_id, mode)
