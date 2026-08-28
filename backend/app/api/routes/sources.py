@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from typing import Any
@@ -231,7 +232,152 @@ class WizardCredentials(BaseModel):
     submit: bool = True
 
 
-@router.post("/{source_id}/wizard/credentials")
+@router.post("/{source_id}/agent_login")
+async def agent_login(source_id: str, db: AsyncSession = Depends(get_db)) -> dict:
+    """Open the site's login page in the USER's browser via the extension.
+
+    The user signs in there (they're already trusted — same browser they use
+    daily). When done, the extension captures cookies and they're POSTed to
+    /{source_id}/agent_session.
+    """
+    source = await _get_source(source_id, db)
+    from app.services.agent_relay import agent_registry
+
+    login_url = source.base_url
+    if "linkedin.com" in source.domain:
+        login_url = "https://www.linkedin.com/login"
+    try:
+        await agent_registry.dispatch("navigate", {"url": login_url}, timeout_s=30)
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc))
+    return {"ok": True, "login_url": login_url}
+
+
+class AgentSessionPayload(BaseModel):
+    cookies: list[dict[str, Any]]
+
+
+class AgentRecordRequest(BaseModel):
+    flow_type: str = Field(..., description="find_jobs or find_candidates")
+    query_hint: str | None = Field(default=None)
+
+
+@router.post("/{source_id}/agent_session", response_model=SourceView)
+async def agent_session(
+    source_id: str, req: AgentSessionPayload, db: AsyncSession = Depends(get_db)
+) -> SourceView:
+    """Store cookies captured by the extension after a manual login.
+
+    Stored as a Playwright-compatible storage_state blob (same format the
+    wizard captures), so every existing consumer keeps working.
+    """
+    source = await _get_source(source_id, db)
+    storage_state = {
+        "cookies": req.cookies,
+        "origins": [],
+    }
+    source.session_state = encrypt_session_state(json.dumps(storage_state))
+    source.captured_at = datetime.utcnow()
+    await db.commit()
+    flows = (
+        await db.execute(select(SourceFlow).where(SourceFlow.source_id == source.id))
+    ).scalars().all()
+    return _source_view(source, list(flows))
+
+
+@router.post("/{source_id}/agent_session/capture")
+async def agent_session_capture(source_id: str, db: AsyncSession = Depends(get_db)) -> dict:
+    """Ask the extension for the current site's cookies (POST to /agent_session next)."""
+    source = await _get_source(source_id, db)
+    from app.services.agent_relay import agent_registry
+
+    try:
+        cookies = await agent_registry.dispatch(
+            "get_cookies", {"url": source.base_url}, timeout_s=20
+        )
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc))
+    return {"ok": True, "cookies": cookies}
+
+
+@router.put("/{source_id}/agent_session", response_model=SourceView)
+async def agent_session_store(
+    source_id: str, req: AgentSessionPayload, db: AsyncSession = Depends(get_db)
+) -> SourceView:
+    """Store cookies captured by the extension after a manual login."""
+    source = await _get_source(source_id, db)
+    storage_state = {"cookies": req.cookies, "origins": []}
+    source.session_state = encrypt_session_state(json.dumps(storage_state))
+    source.captured_at = datetime.utcnow()
+    await db.commit()
+    flows = (
+        await db.execute(select(SourceFlow).where(SourceFlow.source_id == source.id))
+    ).scalars().all()
+    return _source_view(source, list(flows))
+
+
+@router.post("/{source_id}/agent_record", response_model=SourceFlowView)
+async def agent_record(
+    source_id: str,
+    req: AgentRecordRequest,
+    db: AsyncSession = Depends(get_db),
+) -> SourceFlowView:
+    """Auto-discover the flow in the USER's browser via the extension.
+
+    Reuses discover_flow's step-JSON format; the extension executes
+    navigate/fill/click/press in the logged-in tab and extracts cards.
+    """
+    source = await _get_source(source_id, db)
+    if req.flow_type not in FLOW_TYPES:
+        raise HTTPException(400, f"flow_type must be one of {FLOW_TYPES}")
+
+    from app.services.agent_relay import agent_registry
+
+    try:
+        data = await agent_registry.dispatch(
+            "discover_flow",
+            {"baseUrl": source.base_url, "query": req.query_hint or "software engineer", "flowType": req.flow_type},
+            timeout_s=180,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(502, f"Agent discovery failed: {exc}")
+
+    card = (data or {}).get("card")
+    fields = (data or {}).get("fields", {})
+    steps = (data or {}).get("steps", [])
+    if not card:
+        raise HTTPException(502, "Agent could not identify result cards on the page")
+
+    embed: list[dict[str, Any]] = [{"card": card}]
+    if fields:
+        embed[0]["fields"] = fields
+
+    existing = (
+        await db.execute(
+            select(SourceFlow).where(
+                SourceFlow.source_id == source.id,
+                SourceFlow.flow_type == req.flow_type,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing:
+        existing.steps = steps + embed
+        existing.status = "active"
+        existing.last_verified_at = datetime.utcnow()
+        flow = existing
+    else:
+        flow = SourceFlow(source_id=source.id, flow_type=req.flow_type, steps=steps + embed)
+        db.add(flow)
+    await db.commit()
+    await db.refresh(flow)
+    return SourceFlowView(
+        id=flow.id,
+        source_id=flow.source_id,
+        flow_type=flow.flow_type,
+        steps=flow.steps,
+        status=flow.status,
+        created_at=flow.created_at,
+    )
 async def wizard_credentials(source_id: str, req: WizardCredentials, mode: str = "login") -> dict:
     """Type credentials into the visible login form (UI-driven sign-in)."""
     wiz = await _wiz(source_id, mode)
