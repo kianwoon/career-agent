@@ -206,6 +206,23 @@ async function cmdDiscoverFlow(baseUrl, query) {
   await cmdNavigate(baseUrl);
   await sleep(1500);
 
+  // Guest-wall guard: LinkedIn (and similar) may show a login page to the
+  // agent tab if the browser isn't signed in — say so precisely instead of
+  // the generic "no search box".
+  const pageKind = await execOnTab(() => {
+    const hasPw = !!document.querySelector("input[type='password']");
+    const t = (document.body?.innerText || "").slice(0, 400).toLowerCase();
+    return {
+      loginWall: hasPw || /sign in|log in|sign up|join linkedin/.test(t),
+      url: location.href.slice(0, 120),
+    };
+  });
+  if (pageKind && pageKind.loginWall) {
+    throw new Error(
+      "The agent tab is showing a sign-in page — click Re-login first, sign in to LinkedIn in the tab that opens, then press Record again"
+    );
+  }
+
   const searchSel = await execOnTab(() => {
     const inputs = Array.from(
       document.querySelectorAll("input[type='search'], input[name*='query' i], input[name*='search' i], input[placeholder*='search' i], input[aria-label*='search' i], input[type='text']")
