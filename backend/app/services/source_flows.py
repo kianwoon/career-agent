@@ -885,6 +885,13 @@ async def discover_flow(
             "You are a web-automation expert. Given a list of form inputs from a "
             "job/candidate listing website, pick the one that is the MAIN SEARCH BOX "
             f"for searching {'jobs' if flow_type == 'find_jobs' else 'candidates'}. "
+            "Context on site conventions: MOST job boards (MyCareersFuture, "
+            "FastJobs, JobStreet, Glassdoor, Indeed…) have SEPARATE sections or "
+            "URLs for job search vs candidate/profile search — pick the search "
+            "box in the section matching the requested type. EXCEPTIONS where one "
+            "universal search box serves both (e.g. LinkedIn): pick that single "
+            "box — the result TYPE is controlled by the URL, not the input. "
+            "SKIP login/email/password/newsletter inputs entirely. "
             "Reply with ONLY a JSON object: {\"index\": <number>}. No other text.",
             json.dumps(visible_inputs, indent=1),
         )
@@ -970,7 +977,12 @@ async def discover_flow(
             "You are a web-automation expert. Below are DOM element summaries from a "
             f"{'job' if flow_type == 'find_jobs' else 'candidate'} search results page. "
             "Pick the element that represents ONE search-result card (the repeated "
-            "item containing title/company/link). Reply with ONLY: "
+            "item containing title/company/link). Site conventions: on sites with "
+            "DEDICATED result pages (MyCareersFuture, FastJobs, JobStreet, Indeed…), "
+            "every card is the requested type. On MIXED-result pages (LinkedIn's "
+            "universal search), prefer cards whose structure matches the requested "
+            f"type ({'job cards with company/location' if flow_type == 'find_jobs' else 'people cards with headline/current company'}) "
+            "over unrelated items. Reply with ONLY: "
             "{\"index\": <number>, \"css_selector\": \"<css selector matching one card>\"}. "
             "Build the css_selector from the tag + class (use a class, or an id if "
             "unique). No other text.",
