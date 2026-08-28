@@ -66,6 +66,47 @@ export async function agentStatus(): Promise<boolean> {
   return !!data.connected;
 }
 
+/** Open the site's login page in the user's browser via the extension. */
+export async function agentLogin(sourceId: string): Promise<{ ok: boolean; login_url: string }> {
+  const base = await resolveApiBase();
+  return postJson(`${base}/api/v1/sources/${sourceId}/agent_login`, {});
+}
+
+/** Ask the extension to capture cookies after a manual login (capture + store). */
+export async function agentSaveSession(sourceId: string): Promise<SourceView> {
+  const base = await resolveApiBase();
+  const data = await postJson<{ cookies: unknown[] }>(
+    `${base}/api/v1/sources/${sourceId}/agent_session/capture`,
+    {}
+  );
+  return putJson<SourceView>(`${base}/api/v1/sources/${sourceId}/agent_session`, {
+    cookies: data.cookies,
+  });
+}
+
+/** Auto-discover a flow in the user's browser via the extension. */
+export async function agentRecord(
+  sourceId: string,
+  flowType: "find_jobs" | "find_candidates",
+  queryHint: string
+): Promise<void> {
+  const base = await resolveApiBase();
+  await postJson(`${base}/api/v1/sources/${sourceId}/agent_record`, {
+    flow_type: flowType,
+    query_hint: queryHint,
+  });
+}
+
+async function putJson<T>(url: string, body: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`Request failed with status ${res.status}`);
+  return res.json();
+}
+
 export async function createSource(name: string, baseUrl: string): Promise<SourceView> {
   const base = await resolveApiBase();
   return postJson<SourceView>(`${base}/api/v1/sources`, { name, base_url: baseUrl });
