@@ -92,7 +92,12 @@ app.include_router(sources_router, prefix="/api/v1", dependencies=router.depende
 # the user's own extension, and result only resolves those command ids.
 from app.api.routes.agent import router as agent_router
 
+# Koyeb's route rule "/api -> career-api:8000" STRIPS the /api prefix before
+# forwarding, so requests arrive here as /v1/... — mount both spellings.
 app.include_router(agent_router, prefix="/api/v1")
+app.include_router(agent_router, prefix="/v1")
+app.include_router(sources_router, prefix="/v1", dependencies=router.dependencies)
+app.include_router(router, prefix="/v1")
 
 
 @app.get("/")
