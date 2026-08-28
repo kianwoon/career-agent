@@ -186,6 +186,7 @@ async def _search_custom_sources(
                 for r in results:
                     r.setdefault("source", source.name)
                     r.setdefault("title", "")
+                    raw.append(r)
                 ok.append(f"{source.name}: {len(results)} (agent)")
                 return
             except Exception as exc:

@@ -100,7 +100,10 @@ async def create_source(
     return _source_view(source, [])
 
 
-@router.delete("/{source_id}", status_code=204)
+# NOTE: `from __future__ import annotations` makes `-> None` a string that
+# FastAPI evaluates to NoneType — a truthy response_model, which trips the
+# "204 must not have a response body" assert. Pass response_model=None.
+@router.delete("/{source_id}", status_code=204, response_model=None)
 async def delete_source(source_id: str, db: AsyncSession = Depends(get_db)) -> None:
     source = await _get_source(source_id, db)
     await db.delete(source)
@@ -593,7 +596,7 @@ async def wizard_complete(
         await wiz.close()
 
 
-@router.post("/{source_id}/wizard/{mode}/cancel", status_code=204)
+@router.post("/{source_id}/wizard/{mode}/cancel", status_code=204, response_model=None)
 async def wizard_cancel(source_id: str, mode: str) -> None:
     wiz = _wizards.pop(f"wiz-{source_id}-{mode}", None)
     if wiz:
