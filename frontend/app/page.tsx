@@ -11,6 +11,9 @@ import {
   refreshBrowserSession,
   listSources,
   agentStatus,
+  agentLogin,
+  agentSaveSession,
+  agentRecord,
   createSource,
   deleteSource,
   updateSourceEnabled,
@@ -119,6 +122,8 @@ export default function Home() {
   const [customSources, setCustomSources] = useState<SourceView[]>([]);
   // Browser-extension agent connection (runs searches in the user's browser).
   const [agentConnected, setAgentConnected] = useState(false);
+  // Source awaiting "I'm signed in" confirmation during agent login.
+  const [pendingLoginSource, setPendingLoginSource] = useState<SourceView | null>(null);
   const [newSourceName, setNewSourceName] = useState("");
   const [newSourceUrl, setNewSourceUrl] = useState("");
   const [wizardBusy, setWizardBusy] = useState<string | null>(null);
@@ -492,6 +497,68 @@ export default function Home() {
       setTimeline((prev) =>
         addEvent(prev, "warn", `Could not update ${source.name}.`)
       );
+    }
+  }
+
+  /** Re-login via the browser agent: open the site's login page in a tab,
+   * the user signs in there, then capture cookies. */
+  async function handleAgentLogin(source: SourceView) {
+    if (!agentConnected) return;
+    setWizardBusy(`${source.id}:agent-login`);
+    try {
+      await agentLogin(source.id);
+      setTimeline((prev) =>
+        addEvent(prev, "action", `Opened ${source.domain} sign-in in your browser. Sign in there, then press "I'm signed in" here.`)
+      );
+      // Give the user time to sign in; capture on their confirmation.
+      setPendingLoginSource(source);
+    } catch (e) {
+      setTimeline((prev) =>
+        addEvent(prev, "warn", `Agent login failed: ${e instanceof Error ? e.message : e}`)
+      );
+    } finally {
+      setWizardBusy(null);
+    }
+  }
+
+  /** Capture cookies after the user says they've signed in. */
+  async function handleAgentCaptureSession(source: SourceView) {
+    setWizardBusy(`${source.id}:agent-capture`);
+    try {
+      const updated = await agentSaveSession(source.id);
+      if (updated.has_session) {
+        setTimeline((prev) => addEvent(prev, "success", `Session saved for ${source.name} (from your browser).`));
+      } else {
+        setTimeline((prev) => addEvent(prev, "warn", `No cookies captured for ${source.name} — sign in first, then retry.`));
+      }
+      await reloadSources();
+    } catch (e) {
+      setTimeline((prev) =>
+        addEvent(prev, "warn", `Session capture failed: ${e instanceof Error ? e.message : e}`)
+      );
+    } finally {
+      setWizardBusy(null);
+      setPendingLoginSource(null);
+    }
+  }
+
+  /** Auto-record a flow in the user's browser via the agent. */
+  async function handleAgentRecord(source: SourceView, flowType: "find_jobs" | "find_candidates") {
+    if (!agentConnected) return;
+    setWizardBusy(`${source.id}:record:${flowType}`);
+    setTimeline((prev) =>
+      addEvent(prev, "action", `Recording ${flowType === "find_jobs" ? "jobs" : "candidates"} flow in your browser (a tab will search "${query || "software engineer"}")…`)
+    );
+    try {
+      await agentRecord(source.id, flowType, query || "software engineer");
+      setTimeline((prev) => addEvent(prev, "success", `Flow saved for ${source.name} — recorded in your browser.`));
+      await reloadSources();
+    } catch (e) {
+      setTimeline((prev) =>
+        addEvent(prev, "warn", `Agent record failed: ${e instanceof Error ? e.message : e}`)
+      );
+    } finally {
+      setWizardBusy(null);
     }
   }
 
@@ -949,28 +1016,40 @@ export default function Home() {
                         </span>
                       </div>
                       {!ready && <span className="source-warn">Setup needed for {mode === "jobs" ? "job" : "candidate"} search</span>}
-                      <div className="source-card-actions">
+                      {pendingLoginSource?.id === s.id && (
                         <button
-                          className="btn small"
-                          disabled={!!wizardBusy || isRunning}
+                          className="btn small primary"
+                          disabled={!!wizardBusy}
                           onClick={(e) => {
                             e.preventDefault();
-                            handleWizard(s, "login");
+                            handleAgentCaptureSession(s);
                           }}
-                          title={s.has_session ? "Sign in again (session may have expired)" : "Sign in to this site"}
                         >
-                          {s.has_session ? "Re-login" : "Login"}
+                          ✓ I'm signed in — capture session
                         </button>
-                        {s.has_session && (
+                      )}
+                      <div className="source-card-actions">
+                        {agentConnected ? (
                           <>
                             <button
                               className="btn small"
                               disabled={!!wizardBusy || isRunning}
                               onClick={(e) => {
                                 e.preventDefault();
-                                handleWizard(s, "record", "find_jobs");
+                                handleAgentLogin(s);
                               }}
-                              title="Re-record the job-search flow"
+                              title="Open sign-in in your browser, then capture the session"
+                            >
+                              {s.has_session ? "Re-login" : "Login"}
+                            </button>
+                            <button
+                              className="btn small"
+                              disabled={!!wizardBusy || isRunning}
+                              onClick={(e) => {
+                                e.preventDefault();
+                                handleAgentRecord(s, "find_jobs");
+                              }}
+                              title="Discover the job-search flow in your browser"
                             >
                               {s.flows.find_jobs === "active" ? "Re-record jobs" : "Record jobs"}
                             </button>
@@ -979,35 +1058,79 @@ export default function Home() {
                               disabled={!!wizardBusy || isRunning}
                               onClick={(e) => {
                                 e.preventDefault();
-                                handleWizard(s, "record", "find_candidates");
+                                handleAgentRecord(s, "find_candidates");
                               }}
-                              title="Re-record the candidate-search flow"
+                              title="Discover the candidate-search flow in your browser"
                             >
                               {s.flows.find_candidates === "active" ? "Re-record candidates" : "Record candidates"}
                             </button>
                           </>
+                        ) : (
+                          <>
+                            <button
+                              className="btn small"
+                              disabled={!!wizardBusy || isRunning}
+                              onClick={(e) => {
+                                e.preventDefault();
+                                handleWizard(s, "login");
+                              }}
+                              title={s.has_session ? "Sign in again (session may have expired)" : "Sign in to this site"}
+                            >
+                              {s.has_session ? "Re-login" : "Login"}
+                            </button>
+                            {s.has_session && (
+                              <>
+                                <button
+                                  className="btn small"
+                                  disabled={!!wizardBusy || isRunning}
+                                  onClick={(e) => {
+                                    e.preventDefault();
+                                    handleWizard(s, "record", "find_jobs");
+                                  }}
+                                  title="Re-record the job-search flow"
+                                >
+                                  {s.flows.find_jobs === "active" ? "Re-record jobs" : "Record jobs"}
+                                </button>
+                                <button
+                                  className="btn small"
+                                  disabled={!!wizardBusy || isRunning}
+                                  onClick={(e) => {
+                                    e.preventDefault();
+                                    handleWizard(s, "record", "find_candidates");
+                                  }}
+                                  title="Re-record the candidate-search flow"
+                                >
+                                  {s.flows.find_candidates === "active" ? "Re-record candidates" : "Record candidates"}
+                                </button>
+                              </>
+                            )}
+                          </>
                         )}
-                        <button
-                          className="btn small"
-                          disabled={wizardBusy !== `${s.id}:login:` || !wizardBusy}
-                          onClick={(e) => {
-                            e.preventDefault();
-                            handleWizardDone(s, wizardActiveMode(s), wizardActiveFlow(s), query);
-                          }}
-                          title={wizardBusy === `${s.id}:login:` ? "Save this session" : "Auto-record completes on its own — no Done needed"}
-                        >
-                          Done
-                        </button>
-                        <button
-                          className="btn small"
-                          disabled={!wizardBusy?.startsWith(`${s.id}:`) || wizardBusy === `${s.id}:login:`}
-                          onClick={(e) => {
-                            e.preventDefault();
-                            handleWizardCancel(s, wizardActiveMode(s));
-                          }}
-                        >
-                          Cancel
-                        </button>
+                        {!agentConnected && (
+                          <>
+                            <button
+                              className="btn small"
+                              disabled={wizardBusy !== `${s.id}:login:` || !wizardBusy}
+                              onClick={(e) => {
+                                e.preventDefault();
+                                handleWizardDone(s, wizardActiveMode(s), wizardActiveFlow(s), query);
+                              }}
+                              title={wizardBusy === `${s.id}:login:` ? "Save this session" : "Auto-record completes on its own — no Done needed"}
+                            >
+                              Done
+                            </button>
+                            <button
+                              className="btn small"
+                              disabled={!wizardBusy?.startsWith(`${s.id}:`) || wizardBusy === `${s.id}:login:`}
+                              onClick={(e) => {
+                                e.preventDefault();
+                                handleWizardCancel(s, wizardActiveMode(s));
+                              }}
+                            >
+                              Cancel
+                            </button>
+                          </>
+                        )}
                       </div>
                       {wizardBusy?.startsWith(`${s.id}:login`) && (
                         <div className="wizard-browser">
