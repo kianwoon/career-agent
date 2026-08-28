@@ -386,7 +386,16 @@ async def get_task_results(
         try:
             payload = _json.loads(task.error)
             if isinstance(payload, dict):
-                source_issues = payload.get("source_issues", [])
+                raw_issues = payload.get("source_issues", [])
+                # Issues may be dicts {"source", "reason"} or plain strings —
+                # normalize to strings (the response schema is list[str]).
+                for issue in raw_issues or []:
+                    if isinstance(issue, dict):
+                        src = issue.get("source", "source")
+                        reason = issue.get("reason", "unknown")
+                        source_issues.append(f"{src}: {reason}")
+                    else:
+                        source_issues.append(str(issue))
             else:
                 source_issues = []
         except (ValueError, TypeError):
