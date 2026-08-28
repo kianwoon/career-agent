@@ -28,12 +28,10 @@ function setBadge(on) {
 // --- command execution (unchanged semantics) ------------------------------
 
 async function ensureTab(url) {
-  let [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab) tab = await chrome.tabs.create({ active: false });
-  if (url) {
-    await chrome.tabs.update(tab.id, { url });
-    await waitForComplete(tab.id);
-  }
+  // Always open agent navigation in a NEW background tab — never hijack the
+  // user's current tab (it may be the app itself, or anything else).
+  const tab = await chrome.tabs.create({ active: false, url });
+  await waitForComplete(tab.id);
   return tab.id;
 }
 
