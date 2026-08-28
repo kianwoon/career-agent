@@ -176,6 +176,13 @@ async def _search_custom_sources(
                 results = data.get("results") if isinstance(data, dict) else data
                 if results is None:
                     results = []
+                # Extension hit a login wall mid-flow — treat as session
+                # expired so the search pauses for human re-login.
+                if isinstance(data, dict) and data.get("needs_human"):
+                    wall_reason = data.get("error") or "site showing a login page"
+                    issues.append({"source": source.name, "reason": f"session expired: {wall_reason}"})
+                    failed.append(f"{source.name}: session expired ({wall_reason})")
+                    return
                 for r in results:
                     r.setdefault("source", source.name)
                     r.setdefault("title", "")

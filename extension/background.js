@@ -197,6 +197,17 @@ async function cmdRunFlow(baseUrl, query, steps) {
     else if (action === "press") await cmdPress(step.key || "Enter");
     else if (action === "wait") await sleep((step.seconds || 2) * 1000);
     else if (action === "card" || step.card) {
+      // Session-expiry guard: if the results page is actually a login wall,
+      // report needs_human so the search PAUSES for re-login instead of
+      // silently returning "no results".
+      const wall = await execOnTab(() => {
+        const hasPw = !!document.querySelector("input[type='password']");
+        const t = (document.body?.innerText || "").slice(0, 400).toLowerCase();
+        return hasPw || /sign in|log in|authwall|join linkedin|sign up/.test(t);
+      });
+      if (wall) {
+        return { results: [], needs_human: true, error: "Session expired — the site is showing a login page" };
+      }
       results.push(...(await cmdExtract(step.card, step.fields || {}, 30)));
     }
   }
