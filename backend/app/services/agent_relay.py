@@ -1,161 +1,113 @@
-"""Browser-extension agent relay.
+"""Browser-extension agent relay — HTTP polling edition.
 
-The cloud API is the brain; a browser extension running in the END USER's
-browser is the hands. The extension opens an outbound WebSocket to this
-relay (no NAT/tunnel needed) and executes navigation/form/extraction
-commands in the user's real, logged-in browser — so sites like LinkedIn see
-a genuine browser and never block.
+The MV3 service worker + WebSocket approach proved unreliable (Brave
+suspends idle workers, killing the socket every ~30s). Polling is the
+platform-reliable pattern: every HTTP request wakes the worker, so the
+extension simply polls for pending commands and posts results back.
 
 Design:
-- One connected agent (single-user deployment). New connections replace old.
-- `dispatch` queues a command and awaits the agent's response with a timeout.
-- API endpoints call `agent_registry.dispatch(...)` to run browser actions.
+- `dispatch(action, params)` enqueues a command and awaits its result.
+- Extension: GET /agent/poll?agent=<id> -> next command (long-ish poll)
+             POST /agent/result -> command result
+- No persistent connection, nothing to suspend, no reconnect logic.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from fastapi import WebSocket, WebSocketDisconnect
-
 logger = logging.getLogger(__name__)
 
-COMMAND_TIMEOUT_S = 120.0
+COMMAND_TIMEOUT_S = 180.0
 
 
 @dataclass
-class AgentConnection:
-    """One connected extension + its pending command futures."""
-
-    ws: WebSocket
-    connected_at: float = field(default_factory=time.time)
-    pending: dict[str, asyncio.Future] = field(default_factory=dict)
-
-    async def send(self, payload: dict[str, Any]) -> None:
-        await self.ws.send_text(json.dumps(payload))
+class Command:
+    id: str
+    action: str
+    params: dict[str, Any]
+    enqueued_at: float = field(default_factory=time.time)
+    result: Any | None = None
+    error: str | None = None
+    done: bool = False
+    future: asyncio.Future = field(default_factory=lambda: asyncio.get_event_loop().create_future())
 
 
 class AgentRegistry:
-    """Tracks the connected extension agent and routes commands to it."""
+    """Command queue + result store for the polling extension agent."""
 
     def __init__(self) -> None:
-        self.agent: AgentConnection | None = None
-        self._lock = asyncio.Lock()
-        self._cond: asyncio.Condition = asyncio.Condition()
+        self.pending: list[Command] = []
+        self._seen_ids: set[str] = set()
+        self.last_poll_ts: float | None = None  # liveness signal for /status
 
-    # -- connection lifecycle (called by the WS endpoint) ----------------
-
-    async def connect(self, ws: WebSocket) -> AgentConnection:
-        await ws.accept()
-        async with self._lock:
-            old = self.agent
-            if old is not None:
-                # Single-agent deployment: newest connection wins.
-                try:
-                    await old.ws.close(code=4000, reason="Replaced by a new agent connection")
-                except Exception:
-                    pass
-            self.agent = AgentConnection(ws=ws)
-            async with self._cond:
-                self._cond.notify_all()
-            logger.info("Agent connected (replacing=%s)", old is not None)
-            return self.agent
-
-    async def disconnect(self, conn: AgentConnection) -> None:
-        async with self._lock:
-            if self.agent is conn:
-                self.agent = None
-                logger.info("Agent disconnected")
-        # Fail anything still pending on this connection.
-        for fut in conn.pending.values():
-            if not fut.done():
-                fut.set_exception(RuntimeError("Agent disconnected"))
-        conn.pending.clear()
-        async with self._cond:
-            self._cond.notify_all()
-
-    # -- status -----------------------------------------------------------
+    # -- API-side dispatch --------------------------------------------------
 
     @property
     def connected(self) -> bool:
-        return self.agent is not None
+        """The agent is 'connected' if it polled recently (within 15s)."""
+        return self.last_poll_ts is not None and (time.time() - self.last_poll_ts) < 15
 
-    async def wait_for_agent(self, timeout_s: float = 20.0) -> AgentConnection:
-        """Wait until an agent is (re)connected, or raise."""
-        deadline = time.monotonic() + timeout_s
+    async def wait_for_agent(self, timeout_s: float = 20.0) -> None:
+        deadline = time.time() + timeout_s
         while not self.connected:
-            remaining = deadline - time.monotonic()
+            remaining = deadline - time.time()
             if remaining <= 0:
                 raise RuntimeError(
                     "No browser agent connected — open the Career Agent extension in your browser"
                 )
-            async with self._cond:
-                await asyncio.wait_for(self._cond.wait(), timeout=remaining)
-        assert self.agent is not None
-        return self.agent
-
-    # -- command dispatch --------------------------------------------------
+            await asyncio.sleep(0.5)
 
     async def dispatch(
         self, action: str, params: dict[str, Any], timeout_s: float = COMMAND_TIMEOUT_S
     ) -> Any:
-        """Send a command to the agent and await its result.
-
-        Actions: navigate | fill | click | press | extract | screenshot_hint
-        The extension replies with {"ok": ..., "data"/"error", cmd id}.
-        """
-        conn = await self.wait_for_agent()
-        cmd_id = f"cmd-{time.time_ns()}"
-        fut: asyncio.Future = asyncio.get_event_loop().create_future()
-        conn.pending[cmd_id] = fut
+        """Enqueue a command and await the extension's result."""
+        await self.wait_for_agent()
+        cmd = Command(id=f"cmd-{uuid.uuid4().hex[:12]}", action=action, params=params)
+        self.pending.append(cmd)
         try:
-            await conn.send({"id": cmd_id, "action": action, "params": params})
-            return await asyncio.wait_for(fut, timeout=timeout_s)
+            return await asyncio.wait_for(cmd.future, timeout=timeout_s)
         except TimeoutError:
-            raise RuntimeError(f"Agent command '{action}' timed out after {timeout_s:.0f}s")
-        finally:
-            conn.pending.pop(cmd_id, None)
+            self.pending = [c for c in self.pending if c.id != cmd.id]
+            raise RuntimeError(
+                f"Agent command '{action}' timed out after {timeout_s:.0f}s (is the browser open?)"
+            )
 
-    # -- inbound messages (called by the WS endpoint) -----------------------
+    # -- extension-side poll/result -----------------------------------------
 
-    async def handle_message(self, conn: AgentConnection, raw: str) -> None:
-        try:
-            msg = json.loads(raw)
-        except json.JSONDecodeError:
-            logger.warning("Agent sent non-JSON message: %.80s", raw)
-            return
-        cmd_id = msg.get("id")
-        if cmd_id and cmd_id in conn.pending:
-            fut = conn.pending[cmd_id]
-            if not fut.done():
-                if msg.get("ok"):
-                    fut.set_result(msg.get("data"))
+    def poll(self) -> Command | None:
+        """Extension asks for the next command (oldest first)."""
+        self.last_poll_ts = time.time()
+        if not self.pending:
+            return None
+        # Skip stale commands nobody will answer; return the oldest live one.
+        now = time.time()
+        self.pending = [
+            c for c in self.pending if now - c.enqueued_at < COMMAND_TIMEOUT_S or not c.done
+        ]
+        if not self.pending:
+            return None
+        return self.pending[0]
+
+    def resolve(self, cmd_id: str, ok: bool, data: Any = None, error: str | None = None) -> bool:
+        for i, cmd in enumerate(self.pending):
+            if cmd.id == cmd_id:
+                self.pending.pop(i)
+                cmd.done = True
+                if ok:
+                    if not cmd.future.done():
+                        cmd.future.set_result(data)
                 else:
-                    fut.set_exception(RuntimeError(msg.get("error") or "Agent command failed"))
-        else:
-            msg_note = msg.get("note", "")
-            if msg_note != "ping":
-                logger.info("Agent note: %.120s", msg)
+                    if not cmd.future.done():
+                        cmd.future.set_exception(RuntimeError(error or "Agent command failed"))
+                return True
+        # Result for an unknown/timed-out command — ignore.
+        return False
 
 
 agent_registry = AgentRegistry()
-
-
-async def agent_ws_endpoint(ws: WebSocket) -> None:
-    """FastAPI WebSocket route: /api/v1/agent/ws"""
-    conn = await agent_registry.connect(ws)
-    try:
-        while True:
-            raw = await ws.receive_text()
-            await agent_registry.handle_message(conn, raw)
-    except WebSocketDisconnect:
-        pass
-    except Exception as exc:  # unexpected — log and clean up
-        logger.warning("Agent WS error: %s", exc)
-    finally:
-        await agent_registry.disconnect(conn)
