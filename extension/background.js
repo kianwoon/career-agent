@@ -14,6 +14,9 @@ const ACTIVE_POLL_MS = 300; // fast polling while a flow runs
 let API_BASE = DEFAULT_API;
 let busy = false;
 let loopTimer = null;
+// The tab the agent opened for its own work — all fill/click/extract target
+// THIS tab, never whatever the user happens to have focused.
+let agentTabId = null;
 
 async function loadConfig() {
   const stored = await chrome.storage.local.get(["apiBase"]);
@@ -30,7 +33,21 @@ function setBadge(on) {
 async function ensureTab(url) {
   // Always open agent navigation in a NEW background tab — never hijack the
   // user's current tab (it may be the app itself, or anything else).
+  // Reuse the existing agent tab if it's still open (one workspace per agent).
+  if (agentTabId !== null) {
+    try {
+      const t = await chrome.tabs.get(agentTabId);
+      if (t && t.id !== undefined) {
+        await chrome.tabs.update(agentTabId, { url });
+        await waitForComplete(agentTabId);
+        return agentTabId;
+      }
+    } catch {
+      agentTabId = null; // tab was closed — fall through and create a new one
+    }
+  }
   const tab = await chrome.tabs.create({ active: false, url });
+  agentTabId = tab.id;
   await waitForComplete(tab.id);
   return tab.id;
 }
@@ -55,7 +72,17 @@ async function activeTab() {
 }
 
 async function execOnTab(fn, args = []) {
-  const tabId = await activeTab();
+  // Target the agent's own tab when it exists — never the user's focused tab.
+  let tabId;
+  if (agentTabId !== null) {
+    try {
+      const t = await chrome.tabs.get(agentTabId);
+      tabId = t && t.id;
+    } catch {
+      agentTabId = null;
+    }
+  }
+  if (!tabId) tabId = await activeTab();
   const res = await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
