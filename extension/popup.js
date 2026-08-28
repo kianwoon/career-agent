@@ -1,12 +1,9 @@
 const apiInput = document.getElementById("api");
 const statusEl = document.getElementById("status");
+const DEFAULT_API = "https://career-agent-kianwoon-88223cd5.koyeb.app";
 
 chrome.storage.local.get(["apiBase"]).then(({ apiBase }) => {
-  apiInput.value =
-    apiBase ||
-    (chrome.runtime.getURL("/").includes("chrome-extension://")
-      ? "http://localhost:8000"
-      : "");
+  apiInput.value = apiBase || DEFAULT_API;
 });
 
 async function checkStatus() {

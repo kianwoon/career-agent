@@ -7,7 +7,7 @@
  * Loop: poll /agent/poll → execute any command → POST /agent/result → repeat.
  */
 
-const DEFAULT_API = "http://localhost:8000";
+const DEFAULT_API = "https://career-agent-kianwoon-88223cd5.koyeb.app";
 const POLL_INTERVAL_MS = 2500; // idle polling
 const ACTIVE_POLL_MS = 300; // fast polling while a flow runs
 

@@ -35,6 +35,7 @@ import {
   type SearchHistoryItem,
   type SourceView,
 } from "@/lib/api";
+import { apiBaseUrl } from "@/lib/runtime-config";
 
 type Phase = "idle" | "running" | "completed" | "error";
 type Verdict = "approved" | "rejected";
@@ -122,6 +123,8 @@ export default function Home() {
   const [customSources, setCustomSources] = useState<SourceView[]>([]);
   // Browser-extension agent connection (runs searches in the user's browser).
   const [agentConnected, setAgentConnected] = useState(false);
+  // Onboarding panel shown when the agent is off and the user clicks the chip.
+  const [showConnectAgent, setShowConnectAgent] = useState(false);
   // Source awaiting "I'm signed in" confirmation during agent login.
   const [pendingLoginSource, setPendingLoginSource] = useState<SourceView | null>(null);
   const [newSourceName, setNewSourceName] = useState("");
@@ -951,21 +954,36 @@ export default function Home() {
           <div className="sources-panel">
             <div className="sources-row">
               <span className="sources-label">Sources:</span>
-              <span
+              <button
+                type="button"
                 className={`agent-chip ${agentConnected ? "on" : "off"}`}
                 title={
                   agentConnected
                     ? "Browser extension connected — searches run in your browser (no blocks)"
-                    : "Extension not connected — searches fall back to server-side browsing"
+                    : "Extension not connected — click for setup steps"
                 }
+                onClick={() => {
+                  if (!agentConnected) setShowConnectAgent((v) => !v);
+                  else setShowConnectAgent(false);
+                }}
+                aria-expanded={showConnectAgent}
               >
                 <span className="agent-dot" aria-hidden="true" />
                 {agentConnected ? "Browser agent: ON" : "Browser agent: off"}
-              </span>
+              </button>
+              {!agentConnected && !showConnectAgent && (
+                <button type="button" className="link-btn" onClick={() => setShowConnectAgent(true)}>
+                  Connect it →
+                </button>
+              )}
               {customSources.some((s) => s.enabled) && (
                 <span className="sources-empty">checked sources are included in searches</span>
               )}
             </div>
+
+            {showConnectAgent && !agentConnected && (
+              <ConnectBrowserAgent onClose={() => setShowConnectAgent(false)} />
+            )}
 
             {customSources.length === 0 && (
               <span className="sources-empty">No custom sources yet — add one below.</span>
@@ -1825,6 +1843,58 @@ function SourceAvatar({ name, domain }: { name: string; domain: string }) {
         (name || "?").slice(0, 2).toUpperCase()
       )}
     </span>
+  );
+}
+
+/* ------------------- Connect-browser-agent onboarding ---------------- */
+
+/**
+ * Setup steps shown when the extension agent isn't connected. A normal user
+ * otherwise has no way to discover that searches depend on a browser
+ * extension — this explains install + config and auto-detects the API URL
+ * they should paste into the extension popup.
+ */
+function ConnectBrowserAgent({ onClose }: { onClose: () => void }) {
+  const [apiUrl, setApiUrl] = useState("…");
+  useEffect(() => {
+    apiBaseUrl().then(setApiUrl).catch(() => setApiUrl("http://localhost:8000"));
+  }, []);
+  return (
+    <div className="connect-agent-panel" role="dialog" aria-label="Connect the browser agent">
+      <div className="connect-agent-head">
+        <strong>Connect the browser agent</strong>
+        <button type="button" className="link-btn" onClick={onClose} aria-label="Close">
+          ✕
+        </button>
+      </div>
+      <p className="connect-agent-why">
+        Without it, searches run server-side and sites like LinkedIn usually block them.
+      </p>
+      <ol className="connect-agent-steps">
+        <li>
+          <strong>Install the extension</strong> in Chrome — see{" "}
+          <code>extension/INSTALL.md</code> in the project (load unpacked via{" "}
+          <code>chrome://extensions</code>, Developer mode → Load unpacked).
+        </li>
+        <li>
+          <strong>Point it at this server:</strong> click the Career Agent icon in
+          your toolbar and set the API URL to
+          <span className="connect-agent-url"> {apiUrl}</span>
+          <button
+            type="button"
+            className="btn small"
+            onClick={() => navigator.clipboard?.writeText(apiUrl)}
+            title="Copy API URL"
+          >
+            Copy
+          </button>
+        </li>
+        <li>
+          <strong>Wait for the chip</strong> — it turns <span className="ok">Browser agent: ON</span>{" "}
+          within a few seconds (the extension checks in every ~2.5s).
+        </li>
+      </ol>
+    </div>
   );
 }
 

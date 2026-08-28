@@ -1213,6 +1213,8 @@ body {
   border-radius: 999px;
   font-size: 11px;
   border: 1px solid var(--border, #242c3a);
+  cursor: pointer;
+  background: none;
 }
 
 .agent-chip .agent-dot {
@@ -1238,6 +1240,51 @@ body {
 
 .agent-chip.off .agent-dot {
   background: var(--text-muted, #8b94a7);
+}
+
+/* --- Connect-browser-agent onboarding panel --- */
+
+.connect-agent-panel {
+  margin: 10px 0 4px;
+  padding: 12px 16px;
+  border: 1px solid var(--border, #242c3a);
+  border-radius: 8px;
+  background: var(--panel, rgba(255, 255, 255, 0.02));
+  font-size: 13px;
+}
+
+.connect-agent-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.connect-agent-why {
+  margin: 0 0 8px;
+  color: var(--text-muted, #8b94a7);
+  font-size: 12px;
+}
+
+.connect-agent-steps {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.connect-agent-steps code {
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.connect-agent-url {
+  font-family: var(--mono, monospace);
+  font-size: 12px;
+  word-break: break-all;
 }
 
 .source-chip {
