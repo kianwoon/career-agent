@@ -65,14 +65,12 @@ function waitForComplete(tabId, timeoutMs = 30000) {
   });
 }
 
-async function activeTab() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab || !tab.id) throw new Error("No active tab");
-  return tab.id;
-}
+// NOTE: there is deliberately no "active tab" concept anywhere in this agent.
+// All navigation and script execution happens in the agent-owned tab.
 
 async function execOnTab(fn, args = []) {
-  // Target the agent's own tab when it exists — never the user's focused tab.
+  // Always target the agent's own tab. If it doesn't exist yet, create it
+  // on the site first — the agent NEVER touches the user's focused tab.
   let tabId;
   if (agentTabId !== null) {
     try {
@@ -82,7 +80,7 @@ async function execOnTab(fn, args = []) {
       agentTabId = null;
     }
   }
-  if (!tabId) tabId = await activeTab();
+  if (!tabId) tabId = await ensureTab("about:blank");
   const res = await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
@@ -203,10 +201,9 @@ async function cmdRunFlow(baseUrl, query, steps) {
 
 async function cmdDiscoverFlow(baseUrl, query) {
   const u = new URL(baseUrl);
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab || !tab.id) throw new Error("No active tab — open a tab and retry");
-
-  if (!tab.url || !tab.url.includes(u.hostname)) await cmdNavigate(baseUrl);
+  // ALWAYS work in the agent's own tab — never inspect or reuse the user's
+  // current tab. Navigate to the site there.
+  await cmdNavigate(baseUrl);
   await sleep(1500);
 
   const searchSel = await execOnTab(() => {
