@@ -118,9 +118,11 @@ body {
 
 .columns {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 360px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 360px);
   gap: 20px;
   align-items: start;
+  min-width: 0;
+  max-width: 100%;
 }
 
 @media (max-width: 960px) {
@@ -1034,6 +1036,19 @@ body {
 .side {
   display: grid;
   gap: 20px;
+  min-width: 0;
+}
+
+.side .panel {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.side pre,
+.side code,
+.timeline-list .event-text {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .timeline-list {
