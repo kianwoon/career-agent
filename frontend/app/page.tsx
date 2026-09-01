@@ -141,12 +141,14 @@ export default function Home() {
   const [reloginNeeded, setReloginNeeded] = useState<string | null>(null);
   const [shotError, setShotError] = useState(false);
   // Structured sourcing plan (candidate mode) — mirrors the external
-  // analysis panel. Queries/excludes are newline-separated in the UI.
+  // analysis panel: platform, boolean queries, excludes, salary, location,
+  // employment type. Queries/excludes are newline-separated in the UI.
   const [planQueries, setPlanQueries] = useState("");
   const [planExcludes, setPlanExcludes] = useState("");
   const [planSalary, setPlanSalary] = useState("");
   const [planEmploymentType, setPlanEmploymentType] = useState("");
-  const [showPlanPanel, setShowPlanPanel] = useState(false);
+  const [planLocation, setPlanLocation] = useState("Singapore");
+  const [planPlatform, setPlanPlatform] = useState("LinkedIn");
   const loginDoneRef = useRef(false);
   const __wizLoginPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const wizardStartingRef = useRef(false);
@@ -629,7 +631,10 @@ export default function Home() {
       const task = await startSearch({
         query: query.trim() || (queries.length > 0 ? queries[0] : ""),
         mode,
-        location: mode === "jobs" ? "Singapore" : "Singapore",
+        location:
+          mode === "candidates" && planLocation.trim()
+            ? planLocation.trim()
+            : "Singapore",
         // Enabled/disabled is persisted per source (PATCH /sources/{id});
         // the backend runs all enabled sources.
         sources: undefined,
@@ -637,7 +642,7 @@ export default function Home() {
           ? {
               queries: queries.length > 0 ? queries : undefined,
               exclude: excludes.length > 0 ? excludes : undefined,
-              platform: "linkedin",
+              platform: planPlatform.trim().toLowerCase() || "linkedin",
               salary: planSalary.trim() || undefined,
               employment_type: planEmploymentType.trim() || undefined,
             }
@@ -954,36 +959,26 @@ export default function Home() {
       <main className="layout">
         <section className="panel search-panel">
           <div className="search-row">
-            <input
-              type="text"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleRunSearch();
-              }}
-              placeholder={
-                mode === "jobs" ? PLACEHOLDER_QUERY : PLACEHOLDER_CANDIDATE_QUERY
-              }
-              disabled={isRunning}
-              aria-label="Search query"
-            />
+            {mode === "jobs" && (
+              <input
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleRunSearch();
+                }}
+                placeholder={PLACEHOLDER_QUERY}
+                disabled={isRunning}
+                aria-label="Search query"
+              />
+            )}
             <button
               className="btn primary"
               onClick={handleRunSearch}
-              disabled={isRunning || (!query.trim() && !(mode === "candidates" && planQueries.trim()))}
+              disabled={isRunning || (mode === "jobs" && !query.trim()) || (mode === "candidates" && !planQueries.trim())}
             >
               {isRunning ? "Searching…" : "Run Search"}
             </button>
-            {mode === "candidates" && (
-              <button
-                className={`btn ${showPlanPanel ? "active" : ""}`}
-                onClick={() => setShowPlanPanel((v) => !v)}
-                aria-expanded={showPlanPanel}
-                title="Structured sourcing plan: boolean queries + excludes + salary/type"
-              >
-                {showPlanPanel ? "Hide Plan" : "Sourcing Plan"}
-              </button>
-            )}
             <button
               className={`btn takeover${takeoverActive ? " active" : ""}`}
               onClick={handleTakeover}
@@ -994,10 +989,40 @@ export default function Home() {
             </button>
           </div>
 
-          {/* ---------------- Sourcing plan panel (candidate mode) ---------------- */}
-          {mode === "candidates" && showPlanPanel && (
+          {/* ---------- Sourcing plan panel (candidate mode, always on) ---------- */}
+          {mode === "candidates" && (
             <div className="plan-panel" role="group" aria-label="Sourcing plan">
               <div className="plan-grid">
+                <label className="plan-field">
+                  <span>Platform</span>
+                  <input
+                    type="text"
+                    value={planPlatform}
+                    onChange={(e) => setPlanPlatform(e.target.value)}
+                    placeholder="LinkedIn"
+                    disabled={isRunning}
+                  />
+                </label>
+                <label className="plan-field">
+                  <span>Location</span>
+                  <input
+                    type="text"
+                    value={planLocation}
+                    onChange={(e) => setPlanLocation(e.target.value)}
+                    placeholder="Singapore"
+                    disabled={isRunning}
+                  />
+                </label>
+                <label className="plan-field plan-field-wide">
+                  <span>Role / context (optional fallback query)</span>
+                  <input
+                    type="text"
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    placeholder='e.g. "Senior Executive, Agency Accounting" — Ocean Network Express'
+                    disabled={isRunning}
+                  />
+                </label>
                 <label className="plan-field plan-field-wide">
                   <span>Boolean queries (one per line, max 5)</span>
                   <textarea
@@ -1008,7 +1033,7 @@ export default function Home() {
                     disabled={isRunning}
                   />
                 </label>
-                <label className="plan-field">
+                <label className="plan-field plan-field-wide">
                   <span>Exclude terms (comma or newline, max 10)</span>
                   <textarea
                     rows={2}
@@ -1040,9 +1065,10 @@ export default function Home() {
                 </label>
               </div>
               <p className="plan-hint">
-                Platform: LinkedIn. Queries run sequentially, merged and
-                deduplicated; excludes become NOT (...) clauses and a result
-                filter. Location (Singapore) is applied as a post-filter.
+                Queries run sequentially, merged and deduplicated; excludes
+                become NOT (...) clauses and a result filter; location is
+                applied as a post-filter. The simple search box above is
+                hidden in candidate mode — use Role / context instead.
               </p>
             </div>
           )}
