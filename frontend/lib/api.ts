@@ -14,6 +14,15 @@ export interface SearchRequest {
   location?: string;
   /** Source IDs to include; empty/undefined = all enabled sources. */
   sources?: string[];
+  /** Structured sourcing plan (candidate mode) — mirrors the external
+   * analysis panel: boolean queries, exclude terms, salary, employment type. */
+  plan?: {
+    queries?: string[];
+    exclude?: string[];
+    platform?: string;
+    salary?: string;
+    employment_type?: string;
+  };
 }
 
 /* --------------------------- Pluggable sources --------------------------- */
@@ -367,7 +376,12 @@ export async function startSearch(request: SearchRequest): Promise<TaskStatus> {
   const body =
     request.mode === "jobs"
       ? { query: request.query, location: request.location, sources: request.sources }
-      : { query: request.query, location: request.location, sources: request.sources };
+      : {
+          query: request.query,
+          location: request.location,
+          sources: request.sources,
+          ...(request.plan ?? {}),
+        };
   const base = await resolveApiBase();
   return postJson<TaskStatus>(`${base}/api/v1/search/${request.mode}`, body);
 }

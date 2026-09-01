@@ -140,6 +140,13 @@ export default function Home() {
   const [shotLoading, setShotLoading] = useState(false);
   const [reloginNeeded, setReloginNeeded] = useState<string | null>(null);
   const [shotError, setShotError] = useState(false);
+  // Structured sourcing plan (candidate mode) — mirrors the external
+  // analysis panel. Queries/excludes are newline-separated in the UI.
+  const [planQueries, setPlanQueries] = useState("");
+  const [planExcludes, setPlanExcludes] = useState("");
+  const [planSalary, setPlanSalary] = useState("");
+  const [planEmploymentType, setPlanEmploymentType] = useState("");
+  const [showPlanPanel, setShowPlanPanel] = useState(false);
   const loginDoneRef = useRef(false);
   const __wizLoginPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const wizardStartingRef = useRef(false);
@@ -585,29 +592,56 @@ export default function Home() {
   }
 
   async function handleRunSearch() {
-    if (!query.trim() || isRunning) return;
+    if (isRunning) return;
+    const queries = planQueries
+      .split("\n")
+      .map((q) => q.trim())
+      .filter(Boolean);
+    if (mode === "candidates" && queries.length > 0) {
+      // Plan mode: no single query needed.
+    } else if (!query.trim()) {
+      return;
+    }
     setReloginNeeded(null);
     setPhase("running");
     setResults([]);
     setVerdicts({});
     setTaskId(null);
+    const label =
+      mode === "candidates" && queries.length > 0
+        ? `${queries.length} plan queries`
+        : `"${query.trim()}"`;
     setTimeline((prev) =>
       addEvent(
         prev,
         "action",
-        `Search started (${mode === "jobs" ? "jobs" : "candidates"}): "${query.trim()}".`
+        `Search started (${mode === "jobs" ? "jobs" : "candidates"}): ${label}.`
       )
     );
 
     try {
       // Start the task on the backend.
+      const excludes = planExcludes
+        .split(/[,\n]/)
+        .map((e) => e.trim())
+        .filter(Boolean);
+      const hasPlan = mode === "candidates" && (queries.length > 0 || excludes.length > 0);
       const task = await startSearch({
-        query: query.trim(),
+        query: query.trim() || (queries.length > 0 ? queries[0] : ""),
         mode,
-        location: mode === "jobs" ? "Singapore" : undefined,
+        location: mode === "jobs" ? "Singapore" : "Singapore",
         // Enabled/disabled is persisted per source (PATCH /sources/{id});
         // the backend runs all enabled sources.
         sources: undefined,
+        plan: hasPlan
+          ? {
+              queries: queries.length > 0 ? queries : undefined,
+              exclude: excludes.length > 0 ? excludes : undefined,
+              platform: "linkedin",
+              salary: planSalary.trim() || undefined,
+              employment_type: planEmploymentType.trim() || undefined,
+            }
+          : undefined,
       });
       setTaskId(task.task_id);
       setTimeline((prev) =>
@@ -936,10 +970,20 @@ export default function Home() {
             <button
               className="btn primary"
               onClick={handleRunSearch}
-              disabled={isRunning || !query.trim()}
+              disabled={isRunning || (!query.trim() && !(mode === "candidates" && planQueries.trim()))}
             >
               {isRunning ? "Searching…" : "Run Search"}
             </button>
+            {mode === "candidates" && (
+              <button
+                className={`btn ${showPlanPanel ? "active" : ""}`}
+                onClick={() => setShowPlanPanel((v) => !v)}
+                aria-expanded={showPlanPanel}
+                title="Structured sourcing plan: boolean queries + excludes + salary/type"
+              >
+                {showPlanPanel ? "Hide Plan" : "Sourcing Plan"}
+              </button>
+            )}
             <button
               className={`btn takeover${takeoverActive ? " active" : ""}`}
               onClick={handleTakeover}
@@ -949,6 +993,59 @@ export default function Home() {
               {takeoverActive ? "Return to Agent" : "Take Over"}
             </button>
           </div>
+
+          {/* ---------------- Sourcing plan panel (candidate mode) ---------------- */}
+          {mode === "candidates" && showPlanPanel && (
+            <div className="plan-panel" role="group" aria-label="Sourcing plan">
+              <div className="plan-grid">
+                <label className="plan-field plan-field-wide">
+                  <span>Boolean queries (one per line, max 5)</span>
+                  <textarea
+                    rows={4}
+                    value={planQueries}
+                    onChange={(e) => setPlanQueries(e.target.value)}
+                    placeholder={'"agency accounting" AND ("AP" OR "accounts payable")\n"agency accounting" AND ("insurance" OR "real estate")'}
+                    disabled={isRunning}
+                  />
+                </label>
+                <label className="plan-field">
+                  <span>Exclude terms (comma or newline, max 10)</span>
+                  <textarea
+                    rows={2}
+                    value={planExcludes}
+                    onChange={(e) => setPlanExcludes(e.target.value)}
+                    placeholder="intern, student, fresh graduate, audit manager"
+                    disabled={isRunning}
+                  />
+                </label>
+                <label className="plan-field">
+                  <span>Salary (ranking criteria)</span>
+                  <input
+                    type="text"
+                    value={planSalary}
+                    onChange={(e) => setPlanSalary(e.target.value)}
+                    placeholder="SGD 5,200/month max + 1 month bonus"
+                    disabled={isRunning}
+                  />
+                </label>
+                <label className="plan-field">
+                  <span>Employment type</span>
+                  <input
+                    type="text"
+                    value={planEmploymentType}
+                    onChange={(e) => setPlanEmploymentType(e.target.value)}
+                    placeholder="Contract, 2 years fixed-term"
+                    disabled={isRunning}
+                  />
+                </label>
+              </div>
+              <p className="plan-hint">
+                Platform: LinkedIn. Queries run sequentially, merged and
+                deduplicated; excludes become NOT (...) clauses and a result
+                filter. Location (Singapore) is applied as a post-filter.
+              </p>
+            </div>
+          )}
 
           {/* ---------------- Sources panel ---------------- */}
           <div className="sources-panel">

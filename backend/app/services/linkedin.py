@@ -75,7 +75,11 @@ async def _connect() -> tuple[Any, Any]:
     try:
         pw = await async_playwright().start()
         headers = _cdp_headers()
-        browser = await pw.chromium.connect_over_cdp(BRAVE_CDP_URL, headers=headers)
+        # Short timeout: a wedged Brave DevTools endpoint (known to degrade
+        # minutes after launch) should fail fast, not block the plan 180s.
+        browser = await pw.chromium.connect_over_cdp(
+            BRAVE_CDP_URL, headers=headers, timeout=15_000
+        )
         ctx = browser.contexts[0]
         page = await ctx.new_page()
         return pw, page
@@ -143,8 +147,8 @@ async def _connect_with_best_session() -> tuple[Any, Any] | None:
             await pw.stop()
         except Exception:
             pass
-    except BrowserError:
-        logger.info("CDP browser unavailable, falling back to stored session")
+    except BrowserError as exc:
+        logger.info("CDP browser unavailable (%s), falling back to stored session", exc)
 
     # 2. Fallback: replay the stored (encrypted) session in a fresh Chromium.
     row = None

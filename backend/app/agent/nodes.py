@@ -28,6 +28,10 @@ class AgentState(TypedDict, total=False):
     location: str | None
     status: TaskStatus
     profile: dict[str, Any]
+    # Sourcing plan from the external system (queries, exclude, platform,
+    # salary, employment_type). Present when POST /search/candidates was
+    # called with the structured panel fields rather than a plain query.
+    plan: dict[str, Any]
     raw_results: list[dict[str, Any]]
     normalized: list[dict[str, Any]]
     results: list[MatchResult]
@@ -35,6 +39,8 @@ class AgentState(TypedDict, total=False):
     error: str | None
     needs_human: bool
     human_reason: str | None
+    # Sourcing-plan execution detail: queries run, relaxed variants, filters.
+    plan_detail: str | None
     source_ids: list[str] | None
     source_issues: list[dict[str, str]]
 
@@ -374,17 +380,30 @@ async def run_search(state: AgentState) -> AgentState:
 
     # -------------------------------------------------------
     # Candidates -> LinkedIn People adapter (authenticated Brave session).
+    # Accepts a structured sourcing plan (plan['queries'], plan['exclude'],
+    # location post-filter) or falls back to the legacy single query.
     # -------------------------------------------------------
     if task_type == SearchType.candidates:
         from app.services.linkedin_people import search_linkedin_people
 
+        plan = state.get("plan") or {}
+        queries = list(plan.get("queries") or []) or ([query] if query else [])
+        excludes = list(plan.get("exclude") or [])
         try:
-            result = await search_linkedin_people(query)
+            if queries:
+                result = await search_linkedin_people(
+                    queries=queries,
+                    excludes=excludes or None,
+                    location=location,
+                )
+            else:
+                result = {"raw_results": [], "needs_human": False, "human_reason": None, "plan_detail": "No queries"}
             raw = result.get("raw_results", [])
             needs_human = result.get("needs_human", False)
             human_reason = result.get("human_reason")
+            plan_detail = result.get("plan_detail") or f"1 query: {query[:40]}"
             detail = (
-                f"LinkedIn people search found {len(raw)} candidates"
+                f"LinkedIn plan search — {plan_detail}; {len(raw)} candidates"
                 if not needs_human
                 else f"LinkedIn blocked: {human_reason}"
             )
@@ -400,6 +419,7 @@ async def run_search(state: AgentState) -> AgentState:
                 "raw_results": raw,
                 "needs_human": needs_human,
                 "human_reason": human_reason,
+                "plan_detail": plan_detail,
                 "timeline": _log(state, "RUN SEARCH", detail),
             }
         except Exception as exc:
@@ -472,13 +492,21 @@ async def match_rank(state: AgentState) -> AgentState:
     from app.services.matching import score_candidate, score_job
 
     profile = state.get("profile", {})
+    # Sourcing-plan context (salary, employment type) becomes part of the
+    # ranking reference — they are not searchable on LinkedIn people search
+    # but still describe the role we are matching candidates against.
+    plan = state.get("plan") or {}
+    plan_context = " ".join(
+        str(plan.get(k)) for k in ("salary", "employment_type") if plan.get(k)
+    )
     scored: list[MatchResult] = []
     for item in state.get("normalized", []):
         if state.get("type") == SearchType.candidates:
             # For candidate search, the reference is the search query (the
             # candidate criteria), not the searcher's career profile.
+            criteria_text = state.get("query", "") + (f" {plan_context}" if plan_context else "")
             job_ref = {
-                "description": state.get("query", ""),
+                "description": criteria_text,
                 "location": state.get("location"),
                 "required_skills": _extract_skills(state.get("query", "")),
             }

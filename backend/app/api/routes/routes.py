@@ -60,8 +60,40 @@ async def start_candidate_search(
     req: CandidateSearchRequest,
     db: AsyncSession = Depends(get_db),
 ) -> TaskStatusResponse:
-    """Create and start a candidate search task."""
-    return await _start_task(db, SearchType.candidates, query=req.query, location=req.location, source_ids=req.sources)
+    """Create and start a candidate search task.
+
+    Accepts a full sourcing plan (platform, boolean queries, excludes,
+    salary/employment-type) or the legacy single `query` string.
+    """
+    queries = req.plan_queries()
+    if not queries:
+        raise HTTPException(status_code=422, detail="Provide `queries` (list) or `query` (string)")
+    platform = (req.platform or "LinkedIn").strip()
+    if platform.lower() not in _SUPPORTED_CANDIDATE_PLATFORMS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unsupported platform {platform!r}; supported: {sorted(_SUPPORTED_CANDIDATE_PLATFORMS)}",
+        )
+    return await _start_task(
+        db,
+        SearchType.candidates,
+        query=req.query or " | ".join(queries),
+        location=req.location,
+        source_ids=req.sources,
+        plan={
+            "queries": queries,
+            "exclude": [e.strip() for e in (req.exclude or []) if e and e.strip()],
+            "platform": platform,
+            "salary": req.salary,
+            "employment_type": req.employment_type,
+        },
+    )
+
+
+# Platforms the candidate adapter can actually search today. The sourcing
+# plan names the platform; anything outside this set is rejected loudly
+# instead of silently searching the wrong site.
+_SUPPORTED_CANDIDATE_PLATFORMS = {"linkedin"}
 
 
 async def _default_user_id(db: AsyncSession) -> str | None:
@@ -80,6 +112,7 @@ async def _start_task(
     query: str,
     location: str | None = None,
     source_ids: list[str] | None = None,
+    plan: dict | None = None,
 ) -> TaskStatusResponse:
     task = SearchTask(
         id=str(uuid.uuid4()),
@@ -93,7 +126,7 @@ async def _start_task(
 
     # Return immediately; run the agent in the background so the caller does
     # not block. Poll GET /tasks/{id} for completion.
-    asyncio.create_task(_run_task(task.id, task_type, query, location, source_ids))
+    asyncio.create_task(_run_task(task.id, task_type, query, location, source_ids, plan))
     return TaskStatusResponse(
         task_id=task.id,
         type=task_type,
@@ -112,6 +145,7 @@ async def _run_task(
     query: str,
     location: str | None,
     source_ids: list[str] | None = None,
+    plan: dict | None = None,
 ) -> None:
     """Execute the LangGraph pipeline for a task in the background."""
     from app.db import async_session as _session_factory
@@ -141,6 +175,8 @@ async def _run_task(
             "profile": profile,
             "source_ids": source_ids,
         }
+        if plan:
+            initial["plan"] = plan
 
         try:
             result_state = await supervisor_graph.ainvoke(initial)
@@ -148,13 +184,31 @@ async def _run_task(
             task.workflow_state = "complete"
             if result_state.get("error"):
                 task.error = result_state["error"]
-            # Persist per-source issues (expired logins etc.) as JSON in the
-            # error column so GET /tasks/{id}/results can surface them.
+            # Persist the actionable pause reason. Prefer the pipeline's
+            # human_reason (e.g. LinkedIn login/CDP issue) over per-source
+            # misc issues, so the user sees WHY the task paused — not noise.
+            human_reason = result_state.get("human_reason")
             source_issues = result_state.get("source_issues") or []
-            if source_issues:
+            if human_reason:
+                import json as _json
+
+                payload: dict = {"reason": human_reason}
+                if source_issues:
+                    payload["source_issues"] = source_issues
+                task.error = _json.dumps(payload)
+            elif source_issues:
                 import json as _json
 
                 task.error = _json.dumps({"source_issues": source_issues})
+            # Persist the sourcing-plan execution detail so GET results can
+            # show which queries/variants/filters actually ran.
+            plan_detail = result_state.get("plan_detail")
+            if plan_detail:
+                import json as _json
+
+                meta = _json.loads(task.error) if task.error else {}
+                meta["plan_detail"] = plan_detail
+                task.error = _json.dumps(meta)
             task.completed_at = datetime.utcnow()
 
             # Persist ranked results (jobs or candidates) + match evaluations.
@@ -401,11 +455,26 @@ async def get_task_results(
         except (ValueError, TypeError):
             source_issues = []
 
+    summary_text = f"{len(results)} ranked results"
+    # Surface the sourcing-plan execution detail (queries run, relaxed
+    # variants, filters applied) when the agent recorded one in the task's
+    # metadata JSON (stored in the error column alongside source_issues).
+    plan_detail: str | None = None
+    if task.error:
+        try:
+            import json as _json
+
+            plan_detail = _json.loads(task.error).get("plan_detail")
+        except (ValueError, TypeError):
+            plan_detail = None
+    if plan_detail:
+        summary_text = f"{summary_text} — {plan_detail}"
     return SearchTaskResult(
         task_id=task.id,
         status=TaskStatus(task.status),
         results=results,
-        summary=f"{len(results)} ranked results",
+        summary=summary_text,
+        plan_detail=plan_detail,
         source_issues=source_issues,
     )
 

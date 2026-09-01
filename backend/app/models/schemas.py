@@ -54,13 +54,58 @@ class JobSearchRequest(BaseModel):
     )
 
 
+# Hard caps on sourcing-plan size — each query is a separate paced page
+# load on LinkedIn, so more than a handful is a rate-limit/ban risk.
+MAX_PLAN_QUERIES = 5
+MAX_PLAN_EXCLUDES = 10
+
+
 class CandidateSearchRequest(BaseModel):
-    query: str = Field(..., min_length=1, description="Candidate criteria, e.g. 'Java, Kafka, payments, microservices, banking'")
+    """A candidate sourcing plan.
+
+    Mirrors the external system's analysis panel: platform, boolean queries,
+    exclude terms, salary/location/employment-type context. The simple
+    single-string `query` remains accepted for backward compatibility and is
+    treated as a one-query plan.
+    """
+
+    query: str | None = Field(
+        default=None,
+        description="Simple candidate criteria; treated as a one-query plan when `queries` is absent",
+    )
+    queries: list[str] | None = Field(
+        default=None,
+        max_length=MAX_PLAN_QUERIES,
+        description="Boolean search queries run in sequence and merged, max 5",
+    )
+    exclude: list[str] | None = Field(
+        default=None,
+        max_length=MAX_PLAN_EXCLUDES,
+        description="Terms to exclude via NOT (...) and post-filter, max 10",
+    )
+    platform: str | None = Field(
+        default=None,
+        description="Search platform from the sourcing plan, e.g. 'LinkedIn'. Unknown platforms are rejected",
+    )
+    salary: str | None = Field(
+        default=None,
+        description="Salary context from the plan (not searchable on people search; used as ranking criteria)",
+    )
+    employment_type: str | None = Field(
+        default=None,
+        description="Employment type context from the plan (ranking criteria only)",
+    )
     location: str | None = Field(default=None, description="Location filter, e.g. Singapore")
     sources: list[str] | None = Field(
         default=None,
         description="Source IDs to include; None/empty = all enabled sources (built-in + custom)",
     )
+
+    def plan_queries(self) -> list[str]:
+        """Normalized query list for the plan (queries[] or the single query)."""
+        if self.queries:
+            return [q.strip() for q in self.queries if q and q.strip()]
+        return [self.query.strip()] if self.query and self.query.strip() else []
 
 
 class TaskStatusResponse(BaseModel):
@@ -144,6 +189,8 @@ class SearchTaskResult(BaseModel):
     status: TaskStatus
     results: list[MatchResult] = Field(default_factory=list)
     summary: str | None = None
+    # Sourcing-plan execution detail (queries run, relaxed variants, filters).
+    plan_detail: str | None = None
     # Populated when sources failed (e.g. expired login) — "Source: reason".
     source_issues: list[str] = Field(default_factory=list)
 

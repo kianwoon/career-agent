@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import random
+import re
 from typing import Any
 from urllib.parse import quote
 
@@ -35,6 +36,120 @@ CDP_AUTH_HEADER = os.getenv("CDP_AUTH_HEADER", "")
 PROFILE_LINK = 'a[href*="/in/"]'
 
 MAX_CANDIDATES = 25
+# Total profile-detail opens across a WHOLE plan (all queries merged), not
+# per query — each open is a page view LinkedIn can see.
+ENRICH_BUDGET = 10
+# Run the relaxed (first OR-group only) variant when the full plan merges
+# to fewer than this many unique candidates — validated live: an
+# over-constrained AND clause hid the exact target profile.
+RELAXED_MERGE_THRESHOLD = 8
+
+# Certification/acronym tokens that appear on lines directly under a name.
+# The old location heuristic ("short line with a comma") grabbed these.
+_CERT_PATTERN = re.compile(
+    r"\b(CISA|CISM|CISSP|ITIL|PMP|PRINCE2|CEH|ACCA|CPA|CFA|CIA|CFP|MBA|B\.?Com|CPAA|CA\s?\(?.?SG\)?)\b",
+    re.IGNORECASE,
+)
+
+
+def _apply_excludes(query: str, excludes: list[str] | None) -> str:
+    """Append LinkedIn's NOT (...) clause for the plan's exclude terms.
+
+    Validated live: `term NOT (a OR b)` is applied server-side. Terms with
+    spaces are quoted so multi-word exclusions ("fresh graduate") work.
+    """
+    terms = [e.strip() for e in (excludes or []) if e and e.strip()]
+    if not terms:
+        return query
+    quoted = " OR ".join(f'"{t}"' if " " in t else t for t in terms)
+    return f"{query} NOT ({quoted})"
+
+
+def _first_or_group(query: str) -> str | None:
+    """Extract the first parenthesized OR-group from a boolean query.
+
+    '"agency accounting" AND (insurance OR "real estate")' -> 'insurance OR "real estate"'
+    '("a" OR "b") AND c' -> '"a" OR "b"'; no OR-group anywhere -> None.
+    Used for the relaxed variant of over-constrained plan queries — live
+    testing showed the strict AND form hid the exact target profile.
+    """
+    q = query.strip()
+    depth = 0
+    start = -1
+    for i, ch in enumerate(q):
+        if ch == "(":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0 and start >= 0:
+                inner = q[start + 1 : i].strip()
+                if " OR " in inner.upper():
+                    return inner
+                start = -1
+    return None
+
+
+def _normalize_profile_url(url: str) -> str:
+    """Canonical form of a profile URL for dedupe (path only, no query/fragment).
+
+    Live cards mix `linkedin.com` and `www.linkedin.com` hosts — both occur
+    on the same results page, so the host is canonicalized too.
+    """
+    if not url:
+        return ""
+    if url.startswith("/"):
+        url = f"https://www.linkedin.com{url}"
+    url = url.replace("://linkedin.com", "://www.linkedin.com", 1)
+    return url.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+
+
+def dedupe_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge results across queries by normalized profile URL.
+
+    Keeps the first (richest) occurrence; counts how many queries surfaced
+    each profile — a useful ranking signal stored as `_hit_count`.
+    """
+    seen: dict[str, dict[str, Any]] = {}
+    ordered: list[dict[str, Any]] = []
+    for c in candidates:
+        key = _normalize_profile_url(c.get("source_url", ""))
+        if not key:
+            continue
+        if key in seen:
+            seen[key]["_hit_count"] = seen[key].get("_hit_count", 1) + 1
+        else:
+            c = dict(c)
+            c["_hit_count"] = 1
+            seen[key] = c
+            ordered.append(c)
+    return ordered
+
+
+def filter_by_location(candidates: list[dict[str, Any]], location: str | None) -> tuple[list[dict[str, Any]], int]:
+    """Post-filter results by target location (e.g. 'Singapore').
+
+    LinkedIn's geoUrn URL facet returned empty result sets in live testing,
+    so location is applied AFTER extraction. Conservative: a card is dropped
+    only when its location text clearly names a DIFFERENT country that is
+    not the target. Cards with unknown/None location are kept (extraction
+    misses location too often to hard-drop them).
+    """
+    if not location:
+        return candidates, 0
+    target = location.strip().lower()
+    kept: list[dict[str, Any]] = []
+    dropped = 0
+    for c in candidates:
+        loc = (c.get("location") or "").strip().lower()
+        # A location line naming any country/region other than the target
+        # (e.g. target Singapore vs 'Holland, Michigan, United States').
+        if loc and target not in loc:
+            dropped += 1
+            continue
+        kept.append(c)
+    return kept, dropped
 
 
 def _build_search_url(query: str) -> str:
@@ -132,8 +247,19 @@ async def _extract_candidates(page: Any) -> list[dict[str, Any]]:
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
 
         # Location is usually a short standalone line (e.g. "Singapore, Singapore").
+        # Location heuristic: short comma'd line under the name, but NOT a
+        # certifications line (live bug: 'CISA, ITIL Expert, PMP, CEH' was
+        # picked as a location) and not a Current:/Past: role line.
         location = next(
-            (ln for ln in lines[1:6] if len(ln) < 50 and "," in ln and not ln.startswith("Current:") and not ln.startswith("Past:")),
+            (
+                ln
+                for ln in lines[1:6]
+                if len(ln) < 50
+                and "," in ln
+                and not _CERT_PATTERN.search(ln)
+                and not ln.startswith("Current:")
+                and not ln.startswith("Past:")
+            ),
             None,
         )
         # Headline = the descriptive line that isn't the name/location/degree.
@@ -264,22 +390,85 @@ async def _extract_candidates_with_details(
     return enriched
 
 
-async def search_linkedin_people(query: str) -> dict[str, Any]:
-    """Run a LinkedIn people search through an authenticated browser session.
+class _PlanSession:
+    """One CDP connection shared across a whole plan's searches + enrich.
 
-    Uses the captured/replayed stored session (fresh Chromium) when available;
-    otherwise falls back to the Brave CDP connection.
+    Brave's browser-level DevTools WebSocket degrades after repeated
+    connect/disconnect cycles (each attach re-enumerates every target;
+    the handshake then times out). Holding ONE connection for the whole
+    plan avoids that entirely and is faster (no re-handshake per query).
 
-    Returns:
-        {
-          "raw_results": [...],
-          "needs_human": bool,
-          "human_reason": str | None,
-        }
+    The connection is established lazily on first use — a plan served
+    entirely from cache never opens the browser.
     """
-    from app.services.linkedin import _connect_with_best_session
 
-    pw, page = await _connect_with_best_session()
+    def __init__(self, connect_fn: Any) -> None:
+        self._connect_fn = connect_fn
+        self._pair: tuple[Any, Any] | None = None
+        self._connected = False
+        self._page: Any = None
+
+    async def page(self) -> tuple[Any, Any]:
+        """Return (playwright, page) or (None, None) if unavailable.
+
+        Connects lazily on first call, then reuses the SAME page for the
+        whole plan (sequential navigations) — matching the single-connection
+        design. The pair is (playwright_manager, page) from
+        _connect_with_best_session; the manager does not expose contexts.
+        """
+        if not self._connected:
+            self._connected = True
+            try:
+                self._pair = await self._connect_fn()
+            except Exception as exc:
+                logger.warning("Plan session connect failed: %s", exc)
+                self._pair = None
+        if self._pair is None:
+            return None, None
+        pw, page = self._pair
+        try:
+            if page is not None and not page.is_closed():
+                return pw, page
+        except Exception:
+            pass
+        return None, None
+
+    async def close(self) -> None:
+        """Tear down the whole connection (called once, by the owner)."""
+        if self._pair is None:
+            return
+        try:
+            await self._pair[0].stop()
+        except Exception:
+            pass
+
+
+async def search_people_list(
+    query: str, session: "_PlanSession | None" = None
+) -> dict[str, Any]:
+    """Run ONE LinkedIn people search and return extracted cards (no enrich).
+
+    Search-only so a multi-query plan can merge across queries first and
+    spend its total enrich budget on the merged top candidates.
+
+    `session` lets a plan reuse ONE CDP connection across all its searches
+    (Brave's DevTools endpoint degrades after repeated connect cycles).
+    When omitted, a fresh connection is opened and closed for this search.
+
+    Returns {"raw_results": [...], "needs_human": bool, "human_reason": str|None}.
+    """
+    # Result cache first: no browser needed for a cache hit.
+    cached = query_cache.get(f"people:{query}", None)
+    if cached is not None:
+        logger.info("People cache hit for %r — %d candidates", query, len(cached))
+        return {"raw_results": cached, "needs_human": False, "human_reason": None, "cached": True}
+
+    owned = session is None
+    if owned:
+        from app.services.linkedin import _connect_with_best_session
+
+        session = _PlanSession(await _connect_with_best_session())
+    pw, page = await session.page()
     if pw is None or page is None:
         return {
             "raw_results": [],
@@ -287,12 +476,6 @@ async def search_linkedin_people(query: str) -> dict[str, Any]:
             "human_reason": "No authenticated browser session available (capture one or connect Brave CDP)",
         }
     try:
-        # Result cache: avoid re-hitting LinkedIn for the same query.
-        cached = query_cache.get(f"people:{query}", None)
-        if cached is not None:
-            logger.info("People cache hit for %r — %d candidates", query, len(cached))
-            return {"raw_results": cached, "needs_human": False, "human_reason": None, "cached": True}
-
         # Polite pacing: search gap + circuit breaker before any traffic.
         await pacing.wait_if_breaker_open()
         await pacing.search_gap()
@@ -311,16 +494,141 @@ async def search_linkedin_people(query: str) -> dict[str, Any]:
             return {"raw_results": [], "needs_human": True, "human_reason": blocker}
 
         candidates = await _extract_candidates(page)
-        # Enrich the top N candidates by opening their profiles (paced).
-        candidates = await _extract_candidates_with_details(page, candidates)
         query_cache.put(f"people:{query}", None, candidates)
         return {"raw_results": candidates, "needs_human": False, "human_reason": None}
     finally:
-        try:
-            await page.close()
-        except Exception:
-            pass
-        try:
-            await pw.stop()
-        except Exception:
-            pass
+        if owned:
+            await session.close()
+
+
+async def enrich_candidates(
+    candidates: list[dict[str, Any]],
+    limit: int = ENRICH_BUDGET,
+    session: "_PlanSession | None" = None,
+) -> list[dict[str, Any]]:
+    """Open the top `limit` candidate profiles for full detail (paced).
+
+    Called ONCE per plan after merge — the budget is shared across all
+    queries in the plan, not per query. `session` reuses the plan's single
+    CDP connection when provided.
+    """
+    if not candidates or limit <= 0:
+        return candidates
+    owned = session is None
+    if owned:
+        from app.services.linkedin import _connect_with_best_session
+
+        session = _PlanSession(await _connect_with_best_session())
+    pw, page = await session.page()
+    if pw is None or page is None:
+        logger.warning("Enrich skipped — no authenticated session")
+        return candidates
+    try:
+        return await _extract_candidates_with_details(page, candidates, limit=limit)
+    finally:
+        if owned:
+            await session.close()
+
+
+async def search_linkedin_people(
+    queries: list[str],
+    excludes: list[str] | None = None,
+    location: str | None = None,
+) -> dict[str, Any]:
+    """Run a sourcing plan against LinkedIn people search.
+
+    Plan semantics (all validated live against linkedin.com):
+    - `queries` are executed sequentially (each paced), merged and deduped
+      by profile URL.
+    - `excludes` become a NOT (...) suffix on every query AND a post-filter.
+    - Over-constrained plans: when the merged unique count is below
+      RELAXED_MERGE_THRESHOLD and queries have a leading OR-group, the
+      relaxed group-only variant is also run (a strict AND hid the exact
+      target profile in live testing).
+    - `location` is a conservative post-filter (the geoUrn URL facet
+      returned empty sets live, so it is not used).
+    - Profile enrichment opens at most ENRICH_BUDGET profiles TOTAL.
+
+    Returns {"raw_results": [...], "needs_human": bool, "human_reason": str|None}.
+    """
+    if not queries:
+        return {
+            "raw_results": [],
+            "needs_human": False,
+            "human_reason": "No queries in plan",
+        }
+
+    # --- One shared CDP connection for the whole plan ----------------------
+    # Repeated browser-level connect/disconnect cycles wedge Brave's DevTools
+    # endpoint (180s timeouts mid-plan); a single held connection avoids it.
+    # Lazy: only connects when a query actually needs the browser.
+    from app.services.linkedin import _connect_with_best_session
+
+    plan_session = _PlanSession(_connect_with_best_session)
+    try:
+        return await _run_plan(queries, excludes, location, plan_session)
+    finally:
+        await plan_session.close()
+
+
+async def _run_plan(
+    queries: list[str],
+    excludes: list[str] | None,
+    location: str | None,
+    plan_session: "_PlanSession",
+) -> dict[str, Any]:
+    """Plan body: sequential searches → relaxed variants → filters → enrich."""
+    # --- Execute each query (excludes folded in), sequentially + paced ----
+    merged: list[dict[str, Any]] = []
+    per_query_counts: list[str] = []
+    needs_human: str | None = None
+    for q in queries:
+        effective = _apply_excludes(q, excludes)
+        result = await search_people_list(effective, session=plan_session)
+        found = result.get("raw_results", [])
+        per_query_counts.append(f"{q[:40]}{'…' if len(q) > 40 else ''}: {len(found)}")
+        if result.get("needs_human") and not found:
+            # Record the first blocker; keep running remaining queries —
+            # a transient failure on one shouldn't kill the whole plan.
+            needs_human = needs_human or result.get("human_reason")
+            continue
+        merged.extend(found)
+
+    # --- Relaxed variant for over-constrained plans ------------------------
+    uniques = dedupe_candidates(merged)
+    if len(uniques) < RELAXED_MERGE_THRESHOLD:
+        relaxed: list[str] = []
+        for q in queries:
+            group = _first_or_group(q)
+            if group and group.strip().upper() != q.strip().upper():
+                relaxed.append(_apply_excludes(group, excludes))
+        for q in relaxed:
+            result = await search_people_list(q, session=plan_session)
+            found = result.get("raw_results", [])
+            per_query_counts.append(f"relaxed {q[:30]}…: {len(found)}")
+            if result.get("needs_human") and not found:
+                needs_human = needs_human or result.get("human_reason")
+                continue
+            merged.extend(found)
+        uniques = dedupe_candidates(merged)
+
+    # --- Post-filters -------------------------------------------------------
+    if excludes:
+        # Safety net alongside the NOT clause: LinkedIn's NOT is sometimes
+        # over-aggressive; here it is exact and auditable.
+        excl_lower = [e.strip().lower() for e in excludes if e.strip()]
+        uniques = [
+            c for c in uniques
+            if not any(e in f"{c.get('headline','')} {c.get('current_role','')}".lower() for e in excl_lower)
+        ]
+    uniques, dropped = filter_by_location(uniques, location)
+    if dropped:
+        logger.info("Location post-filter dropped %d candidates outside %r", dropped, location)
+
+    # --- Enrich the merged top candidates (shared budget) ------------------
+    uniques = await enrich_candidates(uniques, limit=ENRICH_BUDGET, session=plan_session)
+
+    detail = f"Plan: {len(queries)} queries [{'; '.join(per_query_counts)}] → {len(uniques)} unique"
+    if not uniques and needs_human:
+        return {"raw_results": [], "needs_human": True, "human_reason": needs_human, "plan_detail": detail}
+    return {"raw_results": uniques, "needs_human": False, "human_reason": None, "plan_detail": detail}
