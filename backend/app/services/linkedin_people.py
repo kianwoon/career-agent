@@ -444,7 +444,7 @@ class _PlanSession:
 
 
 async def search_people_list(
-    query: str, session: "_PlanSession | None" = None
+    query: str, session: _PlanSession | None = None
 ) -> dict[str, Any]:
     """Run ONE LinkedIn people search and return extracted cards (no enrich).
 
@@ -504,7 +504,7 @@ async def search_people_list(
 async def enrich_candidates(
     candidates: list[dict[str, Any]],
     limit: int = ENRICH_BUDGET,
-    session: "_PlanSession | None" = None,
+    session: _PlanSession | None = None,
 ) -> list[dict[str, Any]]:
     """Open the top `limit` candidate profiles for full detail (paced).
 
@@ -575,7 +575,7 @@ async def _run_plan(
     queries: list[str],
     excludes: list[str] | None,
     location: str | None,
-    plan_session: "_PlanSession",
+    plan_session: _PlanSession,
 ) -> dict[str, Any]:
     """Plan body: sequential searches → relaxed variants → filters → enrich."""
     # --- Execute each query (excludes folded in), sequentially + paced ----

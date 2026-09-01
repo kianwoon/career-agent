@@ -22,7 +22,6 @@ from app.services.linkedin_people import (
     filter_by_location,
 )
 
-
 # ---------------------------------------------------------------------------
 # Schema / plan helpers
 # ---------------------------------------------------------------------------
@@ -251,7 +250,6 @@ def test_screenshot_plan_passes_schema():
 
 
 def test_route_rejects_unsupported_platform():
-    from fastapi import HTTPException
 
     from app.api.routes.routes import _SUPPORTED_CANDIDATE_PLATFORMS
 
