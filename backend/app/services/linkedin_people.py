@@ -618,7 +618,12 @@ async def search_linkedin_people(
             "human_reason": data.get("human_reason"),
             "plan_detail": data.get("plan_detail"),
         }
-        # Sparse strict plan: append relaxed OR-group variants in a second pass.
+        # Sparse strict plan: append relaxed OR-group variants in a second
+        # pass. Pass 1 spends the enrich budget only on ITS rows; the relaxed
+        # pass gets the full budget whenever pass 1 produced nothing (the
+        # common case when LinkedIn zeroes the strict forms), otherwise no
+        # extra budget (rows from pass 1 are already enriched).
+        relaxed_budget = ENRICH_BUDGET if not raw_rows else 0
         if (
             not results["needs_human"]
             and len(results["raw_results"]) < RELAXED_MERGE_THRESHOLD
@@ -635,7 +640,7 @@ async def search_linkedin_people(
                         "queries": [_apply_excludes(g, excludes) for g in relaxed],
                         "excludes": [],
                         "location": location or "",
-                        "enrichBudget": 0,  # budget already spent on pass 1
+                        "enrichBudget": relaxed_budget,
                     },
                     timeout_s=max(180, 90 * len(relaxed)),
                 )
@@ -646,6 +651,38 @@ async def search_linkedin_people(
                 results["plan_detail"] = (
                     f"{results.get('plan_detail', '')} + relaxed → {len(combined)} unique"
                 )
+        # Final safety net: if the merged set is still entirely unenriched
+        # (no row has real profile sections), spend the enrich budget now so
+        # 2nd-round assessment has data to score. Detect unenriched rows by
+        # the absence of the enrichment marker key the extension sets.
+        if results["raw_results"] and not any(
+            r.get("education") is not None or r.get("certifications") is not None
+            for r in results["raw_results"]
+        ):
+            try:
+                topup = await agent_registry.dispatch(
+                    "linkedin_people_enrich",
+                    {
+                        "candidates": results["raw_results"][:ENRICH_BUDGET],
+                    },
+                    timeout_s=max(180, 60 * ENRICH_BUDGET),
+                )
+                enriched_rows = topup.get("candidates") if isinstance(topup, dict) else None
+                if enriched_rows:
+                    by_url = {
+                        _normalize_profile_url(r.get("source_url", "")): r
+                        for r in enriched_rows
+                    }
+                    merged_rows = []
+                    for r in results["raw_results"]:
+                        e = by_url.pop(_normalize_profile_url(r.get("source_url", "")), None)
+                        merged_rows.append(e or r)
+                    results["raw_results"] = merged_rows + list(by_url.values())
+                    results["plan_detail"] = (
+                        f"{results.get('plan_detail', '')} + enrichment top-up ({len(enriched_rows)} enriched)"
+                    )
+            except Exception:
+                pass  # enrichment is best-effort; rows keep card-level text
         return results
 
     # --- FALLBACK: local CDP plan (original path) --------------------------

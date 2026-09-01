@@ -173,14 +173,71 @@ async def test_people_plan_relaxed_second_pass(monkeypatch):
         excludes=[],
         location="Singapore",
     )
-    # Two dispatches: strict pass, then relaxed pass.
-    assert len(fake.actions) == 2
+    # Three dispatches: strict pass, relaxed pass, then the enrichment
+    # top-up (the fake relaxed rows carry no education/certifications).
+    assert len(fake.actions) == 3
     assert fake.actions[1][0] == "linkedin_people_plan"
     # Relaxed pass gets the OR-group text, NOT the strict AND query.
     assert " AND " not in fake.actions[1][1]["queries"][0].upper()
     assert "insurance" in fake.actions[1][1]["queries"][0]
+    # Pass 1 returned zero rows → relaxed pass MUST carry the full enrich
+    # budget (unriched card-text rows make 2nd-round assessment impossible).
+    assert fake.actions[1][1]["enrichBudget"] == lp.ENRICH_BUDGET
     assert len(result["raw_results"]) == 5
     assert "relaxed" in (result.get("plan_detail") or "")
+
+
+@pytest.mark.asyncio
+async def test_unenriched_rows_get_enrichment_topup(monkeypatch):
+    """Merged rows lacking profile sections trigger a linkedin_people_enrich
+    top-up so 2nd-round assessment has real About/skills/experience data."""
+
+    def handler(action, params):
+        if action == "linkedin_people_enrich":
+            out = []
+            for c in params["candidates"]:
+                c = {**c, "education": "NUS", "certifications": "CPA"}
+                out.append(c)
+            return {"candidates": out}
+        qs = params["queries"]
+        if any(" AND " in q.upper() for q in qs):
+            return {"raw_results": [], "needs_human": False, "human_reason": None, "plan_detail": "strict"}
+        return {
+            "raw_results": [
+                {
+                    "id": f"r{i}",
+                    "name": f"Person {i}",
+                    "location": "Singapore",
+                    "source": "linkedin_people",
+                    "source_url": f"https://www.linkedin.com/in/p{i}/",
+                    "summary": "card text only",
+                    "_hit_count": 1,
+                }
+                for i in range(3)
+            ],
+            "needs_human": False,
+            "human_reason": None,
+            "plan_detail": "relaxed",
+        }
+
+    async def fake_connect():
+        return None, None
+
+    monkeypatch.setattr(li, "_connect_with_best_session", fake_connect)
+    fake = FakeExtension(handler)
+    import app.services.agent_relay as relay
+
+    monkeypatch.setattr(relay, "agent_registry", fake)
+
+    result = await lp.search_linkedin_people(
+        queries=['"agency accounting" AND (insurance OR "real estate")'],
+        excludes=[],
+        location="Singapore",
+    )
+    actions = [a for a, _ in fake.actions]
+    assert "linkedin_people_enrich" in actions
+    assert all(r.get("education") == "NUS" for r in result["raw_results"])
+    assert "enrichment top-up" in (result.get("plan_detail") or "")
 
 
 @pytest.mark.asyncio

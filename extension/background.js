@@ -606,6 +606,28 @@ async function cmdLinkedinPeoplePlan(params) {
   };
 }
 
+// Standalone enrichment: open top-N profile URLs and merge detail sections.
+// Used by the backend to top-up unenriched rows after merge (relaxed pass).
+async function cmdLinkedinPeopleEnrich(params) {
+  const { candidates = [], enrichBudget = 10 } = params;
+  const targets = candidates.slice(0, enrichBudget);
+  let blocker = null;
+  for (const c of targets) {
+    await sleep(1500 + Math.floor(Math.random() * 1500));
+    const detail = await cmdLinkedinProfileDetail(c.source_url);
+    if (detail.error) {
+      blocker = blocker || detail.error;
+      break;
+    }
+    c.summary = detail.summary || c.summary;
+    c.skills = detail.skills?.length ? detail.skills : c.skills;
+    c.experience = detail.experience || c.experience;
+    c.education = detail.education;
+    c.certifications = detail.certifications;
+  }
+  return { candidates: targets, error: blocker };
+}
+
 // --- LinkedIn jobs search (ported from services/linkedin.py) ---------------
 
 async function cmdLinkedinJobsSearch(params) {
@@ -719,6 +741,7 @@ async function executeCommand(cmd) {
     case "discover_flow": return cmdDiscoverFlow(params.baseUrl, params.query, params.flowType);
     case "get_cookies": return cmdGetCookies(params.url);
     case "linkedin_people_plan": return cmdLinkedinPeoplePlan(params);
+    case "linkedin_people_enrich": return cmdLinkedinPeopleEnrich(params);
     case "linkedin_jobs_search": return cmdLinkedinJobsSearch(params);
     default: throw new Error(`Unknown action: ${action}`);
   }
