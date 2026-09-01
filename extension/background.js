@@ -355,23 +355,44 @@ async function cmdLinkedinPeopleExtract() {
   const cards =
     (await execOnTab(() => {
       const main = document.querySelector("main") || document.body;
-      let target = null;
+      // Score EVERY candidate container instead of taking the first match:
+      // earlier wrapper strips (suggested searches, network rails) can match
+      // first in document order with 3+ /in/-link children whose innerText
+      // is empty (image-only links) — that yielded 0 candidates silently.
+      // The REAL results list has the most in-link children, most of them
+      // with visible name text.
+      let best = null;
       for (const el of Array.from(main.querySelectorAll("*"))) {
         const kids = Array.from(el.children);
-        const inLinks = kids.filter((k) => k.querySelector("a[href*='/in/']"));
-        if (inLinks.length >= 3) {
-          target = el;
-          break;
+        const inKids = kids.filter((k) => k.querySelector("a[href*='/in/']"));
+        if (inKids.length < 3) continue;
+        let named = 0;
+        let textLen = 0;
+        for (const k of inKids) {
+          const a = k.querySelector("a[href*='/in/']");
+          if ((a.innerText || "").trim().length > 0) named++;
+          textLen += (k.innerText || "").length;
         }
+        const score = inKids.length * 10000 + named * 100 + Math.min(textLen, 9999);
+        if (!best || score > best.score) best = { el, score };
       }
-      if (!target) return { error: "no results container found", results: [] };
+      if (!best) return { error: "no results container found", results: [] };
+      const seen = new Set();
       const results = [];
-      for (const kid of Array.from(target.children)) {
+      for (const kid of Array.from(best.el.children)) {
         const nameLink = kid.querySelector("a[href*='/in/']");
         if (!nameLink) continue;
+        let href = nameLink.getAttribute("href") || "";
+        if (href && seen.has(href)) continue;
+        if (href) seen.add(href);
+        // Name fallbacks: image-only links have empty innerText.
+        let name =
+          (nameLink.innerText || "").trim() ||
+          (nameLink.getAttribute("aria-label") || "").trim() ||
+          (nameLink.querySelector("img")?.getAttribute("alt") || "").trim();
         results.push({
-          name: (nameLink.innerText || "").trim(),
-          href: nameLink.getAttribute("href") || "",
+          name,
+          href,
           text: (kid.innerText || "").trim(),
         });
       }
@@ -382,9 +403,11 @@ async function cmdLinkedinPeopleExtract() {
   const candidates = [];
   for (const item of (cards.results || []).slice(0, 25)) {
     let name = (item.name || "").trim();
-    if (!name) continue;
     name = name.split("•")[0].trim(); // "Name • 2nd" connection degree
-    if (!name) continue;
+    // Still unnamed after fallbacks (e.g. hidden rail entries) — skip only
+    // if there is no profile URL to anchor the row either.
+    if (!name && !item.href) continue;
+    if (!name) name = "LinkedIn Member";
     const lines = (item.text || "")
       .split("\n")
       .map((l) => l.trim())
