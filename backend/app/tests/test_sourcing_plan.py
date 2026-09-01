@@ -16,6 +16,7 @@ from app.services.linkedin_people import (
     ENRICH_BUDGET,
     RELAXED_MERGE_THRESHOLD,
     _apply_excludes,
+    MAX_NOT_TERMS,
     _first_or_group,
     _normalize_profile_url,
     dedupe_candidates,
@@ -78,6 +79,36 @@ def test_apply_excludes_single_and_multiword():
     q = _apply_excludes("query", ["intern", "fresh graduate"])
     # Multi-word terms are quoted so LinkedIn parses them as a phrase.
     assert q == 'query NOT (intern OR "fresh graduate")'
+
+
+def test_apply_excludes_capped_at_max_not_terms():
+    """LinkedIn quirk (live A/B-verified): NOT clauses with 5+ terms return
+    ZERO results silently. The query-level clause must cap at 4 terms."""
+    terms = ["intern", "student", "fresh graduate", "audit manager", "financial analyst"]
+    q = _apply_excludes("query", terms)
+    assert q == (
+        'query NOT (intern OR student OR "fresh graduate" OR "audit manager")'
+    )
+    assert "financial analyst" not in q  # tail term enforced by post-filter
+    # Exactly 4 terms still all present.
+    q4 = _apply_excludes("query", terms[:4])
+    for t in terms[:4]:
+        assert t in q4
+
+
+def test_filter_excluded_enforces_full_list():
+    from app.services.linkedin_people import _filter_excluded
+
+    rows = [
+        {"headline": "Intern Accountant", "current_role": ""},
+        {"headline": "Tax Manager at ACME", "current_role": ""},  # tail-only term
+        {"headline": "Senior Executive", "current_role": "Agency Accounting"},
+    ]
+    kept = _filter_excluded(
+        rows, ["intern", "student", "fresh graduate", "audit manager", "tax"]
+    )
+    urls = [r["headline"] for r in kept]
+    assert urls == ["Senior Executive"]
 
 
 def test_first_or_group_extraction():
@@ -261,8 +292,14 @@ def test_route_rejects_unsupported_platform():
 def test_excludes_cover_screenshot_terms():
     terms = _route_plan_payload()["exclude"]
     built = _apply_excludes("q", terms)
-    # Every term appears inside the NOT (...) clause, multi-word quoted.
+    # NOT clause capped at MAX_NOT_TERMS (LinkedIn 5+-term quirk returns 0);
+    # all terms still present clause-side or handled by the post-filter.
     assert built.startswith("q NOT (") and built.endswith(")")
-    for term in terms:
+    kept_terms = terms[:MAX_NOT_TERMS]
+    for term in kept_terms:
         expected = f'"{term}"' if " " in term else term
         assert expected in built
+    # Tail terms (beyond the cap) must NOT appear in the clause.
+    for term in terms[MAX_NOT_TERMS:]:
+        expected = f'"{term}"' if " " in term else term
+        assert expected not in built

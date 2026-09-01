@@ -52,17 +52,49 @@ _CERT_PATTERN = re.compile(
 )
 
 
+# LinkedIn server-side quirk (A/B-verified live): a keywords query whose
+# NOT (...) clause contains 5+ terms returns ZERO results silently ('No
+# results found' page). 4 terms always works. So we cap the query-level
+# NOT at MAX_NOT_TERMS and enforce the tail via the backend post-filter.
+MAX_NOT_TERMS = 4
+
+
 def _apply_excludes(query: str, excludes: list[str] | None) -> str:
     """Append LinkedIn's NOT (...) clause for the plan's exclude terms.
 
-    Validated live: `term NOT (a OR b)` is applied server-side. Terms with
-    spaces are quoted so multi-word exclusions ("fresh graduate") work.
+    Validated live: `term NOT (a OR b)` is applied server-side — but ONLY
+    up to 4 terms (5+ silently yields zero results, so the clause is
+    capped at MAX_NOT_TERMS; remaining terms are enforced by the caller's
+    post-filter). Terms with spaces are quoted so multi-word exclusions
+    ("fresh graduate") work.
     """
     terms = [e.strip() for e in (excludes or []) if e and e.strip()]
     if not terms:
         return query
-    quoted = " OR ".join(f'"{t}"' if " " in t else t for t in terms)
+    quoted = " OR ".join(
+        f'"{t}"' if " " in t else t for t in terms[:MAX_NOT_TERMS]
+    )
     return f"{query} NOT ({quoted})"
+
+
+def _filter_excluded(
+    candidates: list[dict[str, Any]], excludes: list[str] | None
+) -> list[dict[str, Any]]:
+    """Drop candidates whose headline/current_role mention an excluded term.
+
+    The NOT(...) query clause is capped at MAX_NOT_TERMS (LinkedIn quirk),
+    so this is the safety net enforcing the FULL exclude list. Same
+    conservative matching as the CDP plan's post-filter.
+    """
+    terms = [e.strip().lower() for e in (excludes or []) if e and e.strip()]
+    if not terms:
+        return candidates
+    kept: list[dict[str, Any]] = []
+    for c in candidates:
+        hay = f"{c.get('headline', '')} {c.get('current_role', '')}".lower()
+        if not any(t in hay for t in terms):
+            kept.append(c)
+    return kept
 
 
 def _first_or_group(query: str) -> str | None:
@@ -566,7 +598,9 @@ async def search_linkedin_people(
 
     if agent_registry.connected:
         effective_queries = [_apply_excludes(q, excludes) for q in queries]
-        # Relaxed variants: same trigger as the CDP path (sparse strict plans).
+        # LinkedIn quirk: NOT clauses are capped at MAX_NOT_TERMS (5+ terms
+        # return zero results), so the tail excludes are NOT in the query.
+        # Enforce the FULL list here via post-filter on the returned rows.
         data = await agent_registry.dispatch(
             "linkedin_people_plan",
             {
@@ -577,8 +611,9 @@ async def search_linkedin_people(
             },
             timeout_s=max(180, 90 * len(effective_queries)),
         )
+        raw_rows = _filter_excluded(data.get("raw_results", []), excludes)
         results = {
-            "raw_results": data.get("raw_results", []),
+            "raw_results": raw_rows,
             "needs_human": bool(data.get("needs_human", False)),
             "human_reason": data.get("human_reason"),
             "plan_detail": data.get("plan_detail"),
@@ -605,7 +640,7 @@ async def search_linkedin_people(
                     timeout_s=max(180, 90 * len(relaxed)),
                 )
                 combined = dedupe_candidates(
-                    results["raw_results"] + extra.get("raw_results", [])
+                    results["raw_results"] + _filter_excluded(extra.get("raw_results", []), excludes)
                 )
                 results["raw_results"] = combined
                 results["plan_detail"] = (
