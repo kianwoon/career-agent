@@ -1710,6 +1710,17 @@ function ResultCard({
               <span className="source-dot" style={{ backgroundColor: source.color }} />
               {source.label}
             </span>
+            {result.source_url && (
+              <a
+                className="profile-link"
+                href={result.source_url}
+                target="_blank"
+                rel="noreferrer"
+                title="Open profile in a new tab"
+              >
+                View profile ↗
+              </a>
+            )}
           </span>
         </div>
         <span className={`score-badge ${scoreClass}`} title="Match score (0-100)">
