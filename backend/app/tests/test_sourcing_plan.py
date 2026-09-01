@@ -14,9 +14,9 @@ from app.models.schemas import (
 )
 from app.services.linkedin_people import (
     ENRICH_BUDGET,
+    MAX_NOT_TERMS,
     RELAXED_MERGE_THRESHOLD,
     _apply_excludes,
-    MAX_NOT_TERMS,
     _first_or_group,
     _normalize_profile_url,
     dedupe_candidates,
