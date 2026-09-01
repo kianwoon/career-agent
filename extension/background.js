@@ -514,6 +514,47 @@ async function cmdLinkedinPeoplePlan(params) {
     perQuery.push(`${q.slice(0, 30)}${q.length > 30 ? "…" : ""}: ${error ? 0 : candidates.length}`);
     merged.push(...candidates);
   }
+  // Safety net: if every query parsed empty, harvest ALL /in/ links on the
+  // LAST results page directly (name from link text / aria-label / img alt).
+  // The container heuristic should not be able to zero out a real results
+  // page — this guarantees rows whenever profile links exist.
+  if (!merged.length && !blocker) {
+    const fallback = await execOnTab(() => {
+      const out = [];
+      const seen = new Set();
+      for (const a of document.querySelectorAll("a[href*='/in/']")) {
+        const href = a.getAttribute("href") || "";
+        if (!href || seen.has(href)) continue;
+        const name =
+          (a.innerText || "").trim() ||
+          (a.getAttribute("aria-label") || "").trim() ||
+          (a.querySelector("img")?.getAttribute("alt") || "").trim();
+        const card = a.closest("li, div");
+        const text = (card?.innerText || "").trim();
+        if (!name && !text) continue;
+        seen.add(href);
+        out.push({ name, href, text: text.slice(0, 800) });
+      }
+      return out.slice(0, 25);
+    });
+    for (const f of fallback || []) {
+      let name = (f.name || "").trim().split("•")[0].trim();
+      if (!name) name = "LinkedIn Member";
+      merged.push({
+        id: "li-people-ext-" + Math.abs([...(name + f.href)].reduce((a, c) => (a * 31 + c.charCodeAt(0)) | 0, 7)),
+        name,
+        headline: null,
+        location: null,
+        summary: (f.text || "").slice(0, 500),
+        current_role: null,
+        skills: [],
+        source: "linkedin_people",
+        source_url: f.href,
+        experience: (f.text || "").slice(0, 800),
+      });
+    }
+    perQuery.push(`fallback-harvest: ${merged.length}`);
+  }
   // Dedupe by normalized profile URL (host → www, strip query/#/trailing /).
   const seen = new Map();
   for (const c of merged) {
@@ -561,7 +602,7 @@ async function cmdLinkedinPeoplePlan(params) {
     raw_results: uniques,
     needs_human: uniques.length === 0 && !!blocker,
     human_reason: blocker,
-    plan_detail: `Extension plan: ${queries.length} queries [${perQuery.join("; ")}] → ${uniques.length} unique (${dropped} location-dropped, ${enriched} enriched)`,
+    plan_detail: `Extension plan v2: ${queries.length} queries [${perQuery.join("; ")}] → ${uniques.length} unique (${dropped} location-dropped, ${enriched} enriched)`,
   };
 }
 
