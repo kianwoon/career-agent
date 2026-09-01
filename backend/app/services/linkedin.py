@@ -340,6 +340,32 @@ async def search_linkedin_jobs(query: str, location: str | None = None) -> dict[
           "human_reason": str | None,
         }
     """
+    # PRIMARY: run the search inside the browser extension (the user's own
+    # logged-in browser — no local debug setup involved). One command = the
+    # full search + detail opens, atomic in the agent tab.
+    from app.services.agent_relay import agent_registry
+
+    if agent_registry.connected:
+        cached = query_cache.get(query, location)
+        if cached is not None:
+            logger.info("Cache hit for %r (location=%r) — %d jobs", query, location, len(cached))
+            return {"raw_results": cached, "needs_human": False, "human_reason": None, "cached": True}
+        data = await agent_registry.dispatch(
+            "linkedin_jobs_search",
+            {
+                "query": query,
+                "location": location or "",
+                "maxJobs": MAX_JOBS,
+                "detailBudget": MAX_DETAIL_EXTRACTS,
+            },
+            timeout_s=300,
+        )
+        return {
+            "raw_results": data.get("raw_results", []),
+            "needs_human": bool(data.get("needs_human", False)),
+            "human_reason": data.get("human_reason"),
+        }
+
     # Prefer a stored (encrypted, replayed) session — no Brave needed.
     pw, page = await _connect_with_best_session()
     if pw is None or page is None:

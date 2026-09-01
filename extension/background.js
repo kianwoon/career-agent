@@ -313,6 +313,334 @@ async function cmdDiscoverFlow(baseUrl, query) {
   return { steps, card, fields, raw: [] };
 }
 
+// --- LinkedIn people search (ported from services/linkedin_people.py) ------
+
+// Certification/acronym lines the old location heuristic mistook for
+// locations (e.g. "CISA, ITIL Expert, PMP, CEH" under a name).
+const CERT_LINE_RE =
+  /\b(CISA|CISM|CISSP|ITIL|PMP|PRINCE2|CEH|ACCA|CPA|CFA|CIA|CFP|MBA|B\.?Com|CPAA|CA\s?\(?.?SG\)?)\b/i;
+
+function linkedinSearchUrl(kind, query) {
+  // kind: "people" | "jobs" — same URLs the backend builds today.
+  const q = encodeURIComponent(query || "");
+  return kind === "jobs"
+    ? `https://www.linkedin.com/jobs/search/?keywords=${q}`
+    : `https://www.linkedin.com/search/results/people/?keywords=${q}`;
+}
+
+async function linkedinWallGuard() {
+  // Returns an error string when the agent tab is on a login/captcha wall.
+  const state = await execOnTab(() => ({
+    url: location.href,
+    title: document.title || "",
+    hasPw: !!document.querySelector("input[type='password']"),
+    text: (document.body?.innerText || "").slice(0, 400).toLowerCase(),
+  }));
+  const url = (state.url || "").toLowerCase();
+  if (/authwall|login|checkpoint/.test(url)) {
+    return "LinkedIn login wall / session expired";
+  }
+  if (state.hasPw && /linkedin/.test(url)) {
+    return "LinkedIn login wall / session expired";
+  }
+  if (/captcha|challenge|unusual activity/.test((state.title || "").toLowerCase())) {
+    return "LinkedIn presented a CAPTCHA/challenge";
+  }
+  return null;
+}
+
+async function cmdLinkedinPeopleExtract() {
+  // Port of _extract_candidates: find the results container (element whose
+  // children each hold a /in/ profile link), then parse the same fields.
+  const cards =
+    (await execOnTab(() => {
+      const main = document.querySelector("main") || document.body;
+      let target = null;
+      for (const el of Array.from(main.querySelectorAll("*"))) {
+        const kids = Array.from(el.children);
+        const inLinks = kids.filter((k) => k.querySelector("a[href*='/in/']"));
+        if (inLinks.length >= 3) {
+          target = el;
+          break;
+        }
+      }
+      if (!target) return { error: "no results container found", results: [] };
+      const results = [];
+      for (const kid of Array.from(target.children)) {
+        const nameLink = kid.querySelector("a[href*='/in/']");
+        if (!nameLink) continue;
+        results.push({
+          name: (nameLink.innerText || "").trim(),
+          href: nameLink.getAttribute("href") || "",
+          text: (kid.innerText || "").trim(),
+        });
+      }
+      return { results };
+    })) || {};
+  if (cards.error) return { error: cards.error, candidates: [] };
+
+  const candidates = [];
+  for (const item of (cards.results || []).slice(0, 25)) {
+    let name = (item.name || "").trim();
+    if (!name) continue;
+    name = name.split("•")[0].trim(); // "Name • 2nd" connection degree
+    if (!name) continue;
+    const lines = (item.text || "")
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+    const location =
+      lines.slice(1, 6).find(
+        (ln) =>
+          ln.length < 50 &&
+          ln.includes(",") &&
+          !CERT_LINE_RE.test(ln) &&
+          !ln.startsWith("Current:") &&
+          !ln.startsWith("Past:")
+      ) || null;
+    const headline =
+      lines
+        .slice(1, 8)
+        .find(
+          (ln) =>
+            ln.length > 15 &&
+            !ln.startsWith("Current:") &&
+            !ln.startsWith("Past:") &&
+            ln !== location &&
+            !ln.includes(" is a mutual connection") &&
+            !["Connect", "Message", "Follow"].includes(ln)
+        ) || null;
+    const currentLine = lines.find((ln) => ln.startsWith("Current:"));
+    candidates.push({
+      id: "li-people-ext-" + Math.abs([...(name + item.href)].reduce((a, c) => (a * 31 + c.charCodeAt(0)) | 0, 7)),
+      name,
+      headline,
+      location,
+      summary: (item.text || "").slice(0, 500),
+      current_role: currentLine ? currentLine.slice(9) : null,
+      skills: [],
+      source: "linkedin_people",
+      source_url: item.href || "",
+      experience: (item.text || "").slice(0, 800),
+    });
+  }
+  return { candidates };
+}
+
+async function cmdLinkedinProfileDetail(profileUrl) {
+  // Port of _extract_profile_detail: sections keyed by h2 heading.
+  let full = "";
+  if (profileUrl.startsWith("/")) profileUrl = "https://www.linkedin.com" + profileUrl;
+  await cmdNavigate(profileUrl);
+  await sleep(1200);
+  const wall = await linkedinWallGuard();
+  if (wall) return { error: wall };
+  await execOnTab(() => window.scrollBy(0, 1400));
+  await sleep(900);
+  const sections =
+    (await execOnTab(() => {
+      const result = {};
+      document.querySelectorAll("section").forEach((sec) => {
+        const h2 = sec.querySelector("h2");
+        const heading = h2 ? h2.innerText.trim() : "";
+        if (heading) result[heading] = (sec.innerText || "").trim().slice(0, 8000);
+      });
+      return result;
+    })) || {};
+  const bodyText =
+    (await execOnTab(() => (document.body?.innerText || "").slice(0, 20000))) || "";
+  let skillsText = sections["Top skills"] || sections["Skills"] || "";
+  if (!skillsText) {
+    const m = bodyText.match(/Top skills\s*\n(.+)/);
+    if (m) skillsText = "Top skills\n" + m[1].split("\n")[0];
+  }
+  const lines = (skillsText || "").split("\n").map((l) => l.trim()).filter(Boolean);
+  const skillLine = lines.slice(1).find((ln) => ln.includes("•"));
+  const skills = skillLine
+    ? skillLine.split("•").map((s) => s.trim()).filter(Boolean)
+    : lines.length > 1
+      ? [lines[1]]
+      : [];
+  return {
+    summary: sections["About"] || "",
+    skills,
+    experience: sections["Experience"] || "",
+    education: sections["Education"] || "",
+    certifications: sections["Licenses & certifications"] || "",
+  };
+}
+
+async function cmdLinkedinPeoplePlan(params) {
+  // Full sourcing plan in ONE command so the backend's single dispatch maps
+  // to one atomic extension execution (no interleaved queue state).
+  const { queries = [], excludes = [], location = "", enrichBudget = 10 } = params;
+  const merged = [];
+  const perQuery = [];
+  let blocker = null;
+  for (const q of queries) {
+    await sleep(1200 + Math.floor(Math.random() * 1500)); // polite pacing
+    await cmdNavigate(linkedinSearchUrl("people", q));
+    await sleep(1500);
+    const wall = await linkedinWallGuard();
+    if (wall) {
+      blocker = blocker || wall;
+      perQuery.push(`${q.slice(0, 30)}…: blocked`);
+      continue;
+    }
+    const { candidates, error } = await cmdLinkedinPeopleExtract();
+    perQuery.push(`${q.slice(0, 30)}${q.length > 30 ? "…" : ""}: ${error ? 0 : candidates.length}`);
+    merged.push(...candidates);
+  }
+  // Dedupe by normalized profile URL (host → www, strip query/#/trailing /).
+  const seen = new Map();
+  for (const c of merged) {
+    let u = c.source_url || "";
+    if (u.startsWith("/")) u = "https://www.linkedin.com" + u;
+    u = u.replace("://linkedin.com", "://www.linkedin.com").split("?")[0].split("#")[0].replace(/\/+$/, "");
+    if (!u) continue;
+    if (seen.has(u)) seen.get(u)._hit_count += 1;
+    else {
+      c._hit_count = 1;
+      seen.set(u, c);
+    }
+  }
+  let uniques = Array.from(seen.values());
+  // Location post-filter: drop only cards clearly naming another country.
+  const target = (location || "").trim().toLowerCase();
+  let dropped = 0;
+  if (target) {
+    uniques = uniques.filter((c) => {
+      const loc = (c.location || "").trim().toLowerCase();
+      if (loc && !loc.includes(target)) {
+        dropped += 1;
+        return false;
+      }
+      return true;
+    });
+  }
+  // Shared enrich budget over the merged top candidates.
+  let enriched = 0;
+  for (const c of uniques.slice(0, enrichBudget)) {
+    await sleep(1500 + Math.floor(Math.random() * 1500));
+    const detail = await cmdLinkedinProfileDetail(c.source_url);
+    if (detail.error) {
+      blocker = blocker || detail.error;
+      break;
+    }
+    c.summary = detail.summary || c.summary;
+    c.skills = detail.skills?.length ? detail.skills : c.skills;
+    c.experience = detail.experience || c.experience;
+    c.education = detail.education;
+    c.certifications = detail.certifications;
+    enriched += 1;
+  }
+  return {
+    raw_results: uniques,
+    needs_human: uniques.length === 0 && !!blocker,
+    human_reason: blocker,
+    plan_detail: `Extension plan: ${queries.length} queries [${perQuery.join("; ")}] → ${uniques.length} unique (${dropped} location-dropped, ${enriched} enriched)`,
+  };
+}
+
+// --- LinkedIn jobs search (ported from services/linkedin.py) ---------------
+
+async function cmdLinkedinJobsSearch(params) {
+  // One search + detail opens, mirroring search_linkedin_jobs' row shape.
+  const { query = "", location = "", maxJobs = 25, detailBudget = 5 } = params;
+  await sleep(1200 + Math.floor(Math.random() * 1500));
+  await cmdNavigate(linkedinSearchUrl("jobs", query));
+  await sleep(2500); // jobs list renders slower
+  const wall = await linkedinWallGuard();
+  if (wall) {
+    return { raw_results: [], needs_human: true, human_reason: wall };
+  }
+  const rows =
+    (await execOnTab(() => {
+      const cards = document.querySelectorAll("li.scaffold-layout__list-item");
+      const out = [];
+      for (const c of Array.from(cards)) {
+        const titleEl = c.querySelector(".job-card-container__link");
+        const title = titleEl ? (titleEl.innerText || "").trim() : "";
+        if (!title) continue;
+        const company = (c.querySelector(".artdeco-entity-lockup__subtitle")?.innerText || "").trim();
+        const metadata = (c.querySelector(".job-card-container__metadata-wrapper")?.innerText || "").trim();
+        const footer = (c.querySelector(".job-card-list__footer-wrapper")?.innerText || "").trim();
+        const mLines = metadata.split("\n").map((l) => l.trim()).filter(Boolean);
+        const fLines = footer.split("\n").map((l) => l.trim()).filter(Boolean);
+        out.push({
+          title,
+          href: (titleEl && titleEl.getAttribute("href")) || "",
+          company,
+          location: mLines[0] || null,
+          salary_text: mLines.find((ln) => ln.includes("SGD") || ln.includes("$") || ln.includes("K")) || null,
+          posted_at: fLines[0] || null,
+          metadata_footer: footer,
+        });
+      }
+      return out;
+    })) || [];
+  const seen = new Set();
+  const jobs = [];
+  for (const r of rows.slice(0, maxJobs)) {
+    let href = r.href || "";
+    if (href.startsWith("/")) href = "https://www.linkedin.com" + href;
+    const key = r.title + "|" + r.company + "|" + href;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    jobs.push({
+      id: "li-ext-" + Math.abs([...key].reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) | 0, 7)),
+      title: r.title,
+      company: r.company,
+      location: r.location,
+      salary_text: r.salary_text,
+      description: "",
+      source: "linkedin",
+      source_url: href,
+      posted_at: r.posted_at,
+      metadata_footer: r.metadata_footer,
+    });
+  }
+  // Detail opens for the top jobs (description text).
+  let opened = 0;
+  for (const j of jobs.slice(0, detailBudget)) {
+    await sleep(1500 + Math.floor(Math.random() * 1500));
+    await cmdNavigate(j.source_url);
+    await sleep(1500);
+    const w2 = await linkedinWallGuard();
+    if (w2) break;
+    await execOnTab(() => window.scrollBy(0, 1200));
+    await sleep(800);
+    const text =
+      (await execOnTab(() => {
+        const el =
+          document.querySelector(".jobs-description-content__text") ||
+          document.querySelector(".jobs-box__html-content");
+        if (el) return (el.innerText || "").trim().slice(0, 20000);
+        for (const e of document.querySelectorAll("*")) {
+          const t = (e.innerText || "").trim();
+          if (t.startsWith("About the job") && t.length > 200) return t.slice(0, 20000);
+        }
+        return "";
+      })) || "";
+    j.description = text;
+    if (!j.posted_at) {
+      const top =
+        (await execOnTab(() =>
+          (document.querySelector(".jobs-unified-top-card__content--two-pane, .jobs-unified-top-card")?.innerText || "")
+        )) || "";
+      const lines = top.split("\n").map((l) => l.trim()).filter(Boolean);
+      j.posted_at = lines.find((ln) => /ago|day|week|month/.test(ln)) || j.posted_at;
+    }
+    opened += 1;
+  }
+  return {
+    raw_results: jobs,
+    needs_human: false,
+    human_reason: null,
+    plan_detail: `Extension jobs: ${query.slice(0, 40)} → ${jobs.length} jobs (${opened} detail-opened)`,
+  };
+}
+
 // --- dispatch -------------------------------------------------------------
 
 async function executeCommand(cmd) {
@@ -326,6 +654,8 @@ async function executeCommand(cmd) {
     case "run_flow": return cmdRunFlow(params.baseUrl, params.query, params.steps);
     case "discover_flow": return cmdDiscoverFlow(params.baseUrl, params.query, params.flowType);
     case "get_cookies": return cmdGetCookies(params.url);
+    case "linkedin_people_plan": return cmdLinkedinPeoplePlan(params);
+    case "linkedin_jobs_search": return cmdLinkedinJobsSearch(params);
     default: throw new Error(`Unknown action: ${action}`);
   }
 }

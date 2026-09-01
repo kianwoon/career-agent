@@ -558,10 +558,65 @@ async def search_linkedin_people(
             "human_reason": "No queries in plan",
         }
 
-    # --- One shared CDP connection for the whole plan ----------------------
-    # Repeated browser-level connect/disconnect cycles wedge Brave's DevTools
-    # endpoint (180s timeouts mid-plan); a single held connection avoids it.
-    # Lazy: only connects when a query actually needs the browser.
+    # --- PRIMARY: run the whole plan inside the browser extension ----------
+    # The extension holds the real logged-in profile (the user's own browser),
+    # so reachability no longer depends on any local debug setup. One command
+    # = one atomic plan execution in the agent tab.
+    from app.services.agent_relay import agent_registry
+
+    if agent_registry.connected:
+        effective_queries = [_apply_excludes(q, excludes) for q in queries]
+        # Relaxed variants: same trigger as the CDP path (sparse strict plans).
+        data = await agent_registry.dispatch(
+            "linkedin_people_plan",
+            {
+                "queries": effective_queries,
+                "excludes": [],  # already folded into effective_queries
+                "location": location or "",
+                "enrichBudget": ENRICH_BUDGET,
+            },
+            timeout_s=max(180, 90 * len(effective_queries)),
+        )
+        results = {
+            "raw_results": data.get("raw_results", []),
+            "needs_human": bool(data.get("needs_human", False)),
+            "human_reason": data.get("human_reason"),
+            "plan_detail": data.get("plan_detail"),
+        }
+        # Sparse strict plan: append relaxed OR-group variants in a second pass.
+        if (
+            not results["needs_human"]
+            and len(results["raw_results"]) < RELAXED_MERGE_THRESHOLD
+        ):
+            relaxed: list[str] = []
+            for q in queries:
+                group = _first_or_group(q)
+                if group and group.strip().upper() != q.strip().upper():
+                    relaxed.append(group)
+            if relaxed:
+                extra = await agent_registry.dispatch(
+                    "linkedin_people_plan",
+                    {
+                        "queries": [_apply_excludes(g, excludes) for g in relaxed],
+                        "excludes": [],
+                        "location": location or "",
+                        "enrichBudget": 0,  # budget already spent on pass 1
+                    },
+                    timeout_s=max(180, 90 * len(relaxed)),
+                )
+                combined = dedupe_candidates(
+                    results["raw_results"] + extra.get("raw_results", [])
+                )
+                results["raw_results"] = combined
+                results["plan_detail"] = (
+                    f"{results.get('plan_detail', '')} + relaxed → {len(combined)} unique"
+                )
+        return results
+
+    # --- FALLBACK: local CDP plan (original path) --------------------------
+    # One shared CDP connection for the whole plan: repeated browser-level
+    # connect/disconnect cycles wedge Brave's DevTools endpoint; a single
+    # held connection avoids it. Lazy: connects only if a query needs it.
     from app.services.linkedin import _connect_with_best_session
 
     plan_session = _PlanSession(_connect_with_best_session)
