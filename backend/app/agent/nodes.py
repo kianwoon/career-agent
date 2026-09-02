@@ -20,6 +20,19 @@ from app.models.schemas import ActivityEvent, MatchResult, SearchType, TaskStatu
 
 logger = logging.getLogger(__name__)
 
+# Platform -> candidate search adapter. Add new platforms here as their
+# adapters become available; unsupported entries are rejected at RUN SEARCH.
+_CANDIDATE_PLATFORM_ADAPTERS: dict[str, Any] = {}
+
+
+def _candidate_adapters() -> dict[str, Any]:
+    """Lazy adapter registry (imports happen on first use, not at module load)."""
+    if not _CANDIDATE_PLATFORM_ADAPTERS:
+        from app.services.linkedin_people import search_linkedin_people
+
+        _CANDIDATE_PLATFORM_ADAPTERS["linkedin"] = search_linkedin_people
+    return _CANDIDATE_PLATFORM_ADAPTERS
+
 
 class AgentState(TypedDict, total=False):
     task_id: str
@@ -149,6 +162,20 @@ async def _search_custom_sources(
     flows_by_source: dict[str, SourceFlow] = {f.source_id: f for f in flows}
 
     query = state.get("query", "")
+    # Sourcing-plan aware keyword mapping: custom-source search boxes
+    # (seek's 'Keywords in CV / Profile' etc.) accept boolean syntax, so
+    # merge plan queries[] + exclude[] into ONE string — e.g.
+    # '"software engineer" OR developer NOT ("recruiter" OR "talent acquisition")'.
+    # Without a plan this degrades to the plain query (unchanged behavior).
+    from app.services.source_flows import build_boolean_keywords, filter_excluded_results
+
+    plan = state.get("plan") or {}
+    plan_queries = [q.strip() for q in (plan.get("queries") or []) if q and q.strip()] or (
+        [query.strip()] if query.strip() else []
+    )
+    plan_excludes = [e.strip() for e in (plan.get("exclude") or []) if e and e.strip()]
+    flow_query = build_boolean_keywords(plan_queries, plan_excludes) or query
+
     raw: list[dict[str, Any]] = []
     ok: list[str] = []
     failed: list[str] = []
@@ -174,7 +201,7 @@ async def _search_custom_sources(
                     "run_flow",
                     {
                         "baseUrl": source.base_url,
-                        "query": query,
+                        "query": flow_query,
                         "steps": flow.steps,
                     },
                     timeout_s=180,
@@ -189,6 +216,7 @@ async def _search_custom_sources(
                     issues.append({"source": source.name, "reason": f"session expired: {wall_reason}"})
                     failed.append(f"{source.name}: session expired ({wall_reason})")
                     return
+                results = filter_excluded_results(results, plan_excludes or None)
                 for r in results:
                     r.setdefault("source", source.name)
                     r.setdefault("title", "")
@@ -203,7 +231,7 @@ async def _search_custom_sources(
         result = await execute_flow(
             base_url=source.base_url,
             steps=flow.steps,
-            query=query,
+            query=flow_query,
             storage_state_encrypted=source.session_state,
             card_selectors=flow.steps[-1] if flow.steps and flow.steps[-1].get("card") else None,
         )
@@ -222,6 +250,7 @@ async def _search_custom_sources(
                         db_flow.status = "broken"
                         await db2.commit()
             return
+        results = filter_excluded_results(results, plan_excludes or None)
         for r in results:
             r.setdefault("source", source.name)
             r.setdefault("title", "")
@@ -361,33 +390,59 @@ async def run_search(state: AgentState) -> AgentState:
         }
 
     # -------------------------------------------------------
-    # Candidates -> LinkedIn People adapter (authenticated Brave session).
-    # Accepts a structured sourcing plan (plan['queries'], plan['exclude'],
-    # location post-filter) or falls back to the legacy single query.
+    # Candidates -> per-platform adapters (authenticated Brave session).
+    # Accepts a structured sourcing plan (plan['platforms'] or legacy
+    # plan['platform'], plan['queries'], plan['exclude'], location
+    # post-filter) or falls back to the legacy single query. Results from
+    # every platform are merged; dedup happens downstream.
     # -------------------------------------------------------
     if task_type == SearchType.candidates:
-        from app.services.linkedin_people import search_linkedin_people
-
         plan = state.get("plan") or {}
         queries = list(plan.get("queries") or []) or ([query] if query else [])
         excludes = list(plan.get("exclude") or [])
+        platforms = [str(p).lower() for p in (plan.get("platforms") or [])]
+        if not platforms:
+            legacy = plan.get("platform")
+            platforms = [str(legacy).lower()] if legacy else ["linkedin"]
+
+        raw: list[dict[str, Any]] = []
+        needs_human = False
+        human_reason: str | None = None
+        plan_details: list[str] = []
+        unsupported = [p for p in platforms if p not in _candidate_adapters()]
+        if unsupported:
+            human_reason = (
+                f"Unsupported platform(s): {', '.join(unsupported)}; "
+                f"supported: {sorted(_candidate_adapters())}"
+            )
+            needs_human = True
         try:
-            if queries:
-                result = await search_linkedin_people(
+            for platform in platforms:
+                adapter = _candidate_adapters().get(platform)
+                if adapter is None:
+                    continue
+                if not queries:
+                    plan_details.append(f"{platform}: no queries")
+                    continue
+                result = await adapter(
                     queries=queries,
                     excludes=excludes or None,
                     location=location,
                 )
-            else:
-                result = {"raw_results": [], "needs_human": False, "human_reason": None, "plan_detail": "No queries"}
-            raw = result.get("raw_results", [])
-            needs_human = result.get("needs_human", False)
-            human_reason = result.get("human_reason")
-            plan_detail = result.get("plan_detail") or f"1 query: {query[:40]}"
+                p_raw = result.get("raw_results", [])
+                raw.extend(p_raw)
+                if result.get("needs_human"):
+                    needs_human = True
+                    if result.get("human_reason"):
+                        human_reason = result["human_reason"]
+                plan_details.append(
+                    result.get("plan_detail") or f"{platform}: {len(p_raw)} results"
+                )
+            plan_detail = " | ".join(plan_details) if plan_details else "No queries"
             detail = (
-                f"LinkedIn plan search — {plan_detail}; {len(raw)} candidates"
+                f"Plan search ({', '.join(platforms)}) — {plan_detail}; {len(raw)} candidates"
                 if not needs_human
-                else f"LinkedIn blocked: {human_reason}"
+                else f"Blocked: {human_reason}"
             )
             if custom_raw:
                 raw = raw + custom_raw
@@ -409,8 +464,8 @@ async def run_search(state: AgentState) -> AgentState:
                 **state,
                 "raw_results": [],
                 "needs_human": True,
-                "human_reason": f"LinkedIn people search failed: {exc}",
-                "timeline": _log(state, "RUN SEARCH", f"LinkedIn people search error: {exc}"),
+                "human_reason": f"Candidate search failed: {exc}",
+                "timeline": _log(state, "RUN SEARCH", f"Candidate search error: {exc}"),
             }
 
     # Fallback: seed results for candidate search / unknown sources.
@@ -525,11 +580,20 @@ async def match_rank(state: AgentState) -> AgentState:
         except Exception as exc:
             logger.warning("LLM rerank failed, keeping deterministic order: %s", exc)
 
+    # Cap at the top 10 after ranking — multi-platform merges can exceed
+    # the actionable shortlist size.
+    MAX_TOP_RESULTS = 10
+    scored = scored[:MAX_TOP_RESULTS]
+
     return {
         **state,
         "results": scored,
         "status": TaskStatus.completed,
-        "timeline": _log(state, "MATCH / RANK", f"Ranked {len(scored)} results"),
+        "timeline": _log(
+            state,
+            "MATCH / RANK",
+            f"Ranked {len(state.get('normalized', []))} results; returning top {len(scored)}",
+        ),
     }
 
 

@@ -781,6 +781,71 @@ def domain_of(url: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Boolean keyword mapping for custom-source search boxes
+# ---------------------------------------------------------------------------
+
+# seek (and most boolean search boxes) silently return junk/zero for very
+# long keyword strings — mirror LinkedIn's MAX_NOT_TERMS conservatism.
+MAX_NOT_TERMS = 4
+
+
+def _quote_term(term: str) -> str:
+    """Quote multi-word terms so ' AND '/' OR ' inside them stays literal."""
+    return f'"{term}"' if " " in term else term
+
+
+def build_boolean_keywords(queries: list[str], excludes: list[str] | None) -> str:
+    """Merge plan queries + excludes into ONE boolean string for a site's
+    keyword box (seek's 'Keywords in CV / Profile', etc.).
+
+    seek's box accepts `a AND b`, `a OR b`, `NOT (x OR y)` (placeholder
+    'e.g. digital AND sales'). Multiple plan queries are OR'd; excludes
+    become a single NOT group capped at MAX_NOT_TERMS (5+ NOT terms return
+    zero results on several boolean engines — LinkedIn quirk, same trap).
+
+    Example: queries=["software engineer", "developer"],
+             excludes=["recruiter", "talent acquisition"]
+      ->     '"software engineer" OR "developer" NOT ("recruiter" OR "talent acquisition")'
+    """
+    qs = [q.strip() for q in (queries or []) if q and q.strip()]
+    if not qs:
+        return ""
+    # Quote multi-word queries unless they already contain boolean syntax.
+    parts = [
+        _quote_term(q) if (" " in q and not any(k in q.upper() for k in (" AND ", " OR ", "NOT "))) else q
+        for q in qs
+    ]
+    keywords = " OR ".join(parts) if len(parts) > 1 else parts[0]
+
+    terms = [e.strip() for e in (excludes or []) if e and e.strip()]
+    if terms:
+        quoted = " OR ".join(_quote_term(t) for t in terms[:MAX_NOT_TERMS])
+        keywords = f"{keywords} NOT ({quoted})"
+    return keywords
+
+
+def filter_excluded_results(
+    results: list[dict[str, Any]], excludes: list[str] | None
+) -> list[dict[str, Any]]:
+    """Post-filter results whose text mentions an excluded term.
+
+    The NOT() clause in the keyword string is capped, so this enforces the
+    FULL exclude list. Checks title + the usual text fields loosely.
+    """
+    terms = [e.strip().lower() for e in (excludes or []) if e and e.strip()]
+    if not terms or not results:
+        return results
+    kept = []
+    for r in results:
+        blob = " ".join(
+            str(r.get(k) or "") for k in ("title", "company", "location", "summary", "name", "headline", "current_role")
+        ).lower()
+        if not any(t in blob for t in terms):
+            kept.append(r)
+    return kept
+
+
+# ---------------------------------------------------------------------------
 # LLM auto-record: discover a site's search flow without a human recording
 # ---------------------------------------------------------------------------
 

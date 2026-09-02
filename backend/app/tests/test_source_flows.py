@@ -1,11 +1,63 @@
 """Tests for the guided-wizard templatizer and domain parsing."""
 
-from app.services.source_flows import domain_of, templatize
+from app.services.source_flows import (
+    build_boolean_keywords,
+    domain_of,
+    filter_excluded_results,
+    templatize,
+)
 
 
 def test_domain_of_strips_www():
     assert domain_of("https://www.fastjob.com/jobs") == "fastjob.com"
     assert domain_of("http://FastJob.com") == "fastjob.com"
+
+
+def test_boolean_keywords_single_query_no_excludes():
+    assert build_boolean_keywords(["software engineer"], []) == '"software engineer"'
+
+
+def test_boolean_keywords_multi_query_or():
+    out = build_boolean_keywords(["software engineer", "developer"], [])
+    assert out == '"software engineer" OR developer'
+
+
+def test_boolean_keywords_with_excludes():
+    out = build_boolean_keywords(
+        ["software engineer"], ["recruiter", "talent acquisition"]
+    )
+    assert out == '"software engineer" NOT (recruiter OR "talent acquisition")'
+
+
+def test_boolean_keywords_cap_not_terms():
+    # 5 excludes -> only first 4 in the NOT clause (boolean-engine quirk:
+    # 5+ silently returns zero results).
+    out = build_boolean_keywords(["dev"], ["a", "b", "c", "d", "e"])
+    assert 'NOT (a OR b OR c OR d)' in out
+    assert ' e' not in out
+
+
+def test_boolean_keywords_preserves_existing_syntax():
+    q = 'digital AND sales NOT (hr OR "people ops")'
+    assert build_boolean_keywords([q], []) == q
+
+
+def test_boolean_keywords_empty():
+    assert build_boolean_keywords([], []) == ""
+
+
+def test_filter_excluded_results_drops_matches():
+    results = [
+        {"title": "Senior Python Dev", "company": "Acme"},
+        {"title": "Tech Recruiter", "company": "HireCo"},
+    ]
+    kept = filter_excluded_results(results, ["recruiter"])
+    assert [r["title"] for r in kept] == ["Senior Python Dev"]
+
+
+def test_filter_excluded_results_no_excludes_noop():
+    results = [{"title": "Dev"}]
+    assert filter_excluded_results(results, None) is results
 
 
 def test_templatize_empty_events():
