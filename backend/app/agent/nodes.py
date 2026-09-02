@@ -36,6 +36,47 @@ def _candidate_adapters() -> dict[str, Any]:
     return _CANDIDATE_PLATFORM_ADAPTERS
 
 
+def _normalize_flow_candidate(r: dict[str, Any], source_name: str, idx: int) -> dict[str, Any]:
+    """Map one raw flow-extracted row to the canonical candidate schema.
+
+    Extension/Playwright extraction returns {title, company, location,
+    summary, url, raw_text}. score_candidate() reads name/headline/
+    source_url — without this mapping every row renders as "Unknown".
+
+    SEEK (and similar) candidate cards often have NO links and their name
+    lives in the card text, so:
+      - name     = title, else first non-empty line of raw_text
+      - headline = the role line ("Python Developer at X, May 2025 - ...")
+      - source_url = url, else a synthetic seek-style id so dedup and
+        persistence don't collapse all rows into one empty-URL bucket.
+    """
+    raw_text = str(r.get("raw_text") or "")
+    lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
+    name = str(r.get("title") or "").strip() or (lines[0] if lines else "")
+    headline = (
+        str(r.get("summary") or "").strip()
+        or str(r.get("company") or "").strip()
+        or (lines[1] if len(lines) > 1 else None)
+    )
+    source_url = str(r.get("url") or "").strip()
+    if not source_url and name:
+        # Deterministic synthetic id — stable across searches for the same
+        # name+headline so dedup/persistence treat it as one candidate.
+        digest = abs(hash((name, headline))) % 10_000_000
+        source_url = f"{source_name.lower().replace(' ', '-')}-candidate/{digest}"
+    return {
+        "id": r.get("id") or f"flow-{abs(hash((name, headline, idx)))}",
+        "name": name or f"{source_name} candidate {idx + 1}",
+        "headline": headline or None,
+        "location": r.get("location") or None,
+        "summary": str(r.get("summary") or "")[:500],
+        "skills": [],
+        "experience": raw_text[:800],
+        "source": source_name,
+        "source_url": source_url,
+    }
+
+
 async def _search_candidates_via_flow(
     source_name: str,
     queries: list[str],
@@ -131,9 +172,9 @@ async def _search_candidates_via_flow(
         results = result["results"]
 
     results = filter_excluded_results(results or [], excludes or None)
-    for r in results:
-        r.setdefault("source", source.name)
-        r.setdefault("title", "")
+    results = [
+        _normalize_flow_candidate(r, source.name, i) for i, r in enumerate(results)
+    ]
     return {
         "raw_results": results,
         "needs_human": False,
@@ -349,10 +390,11 @@ async def _search_custom_sources(
                     failed.append(f"{source.name}: session expired ({wall_reason})")
                     return
                 results = filter_excluded_results(results, plan_excludes or None)
-                for r in results:
-                    r.setdefault("source", source.name)
-                    r.setdefault("title", "")
-                    raw.append(r)
+                results = [
+                    _normalize_flow_candidate(r, source.name, i)
+                    for i, r in enumerate(results)
+                ]
+                raw.extend(results)
                 ok.append(f"{source.name}: {len(results)} (agent)")
                 return
             except Exception as exc:
@@ -383,10 +425,10 @@ async def _search_custom_sources(
                         await db2.commit()
             return
         results = filter_excluded_results(results, plan_excludes or None)
-        for r in results:
-            r.setdefault("source", source.name)
-            r.setdefault("title", "")
-            raw.append(r)
+        results = [
+            _normalize_flow_candidate(r, source.name, i) for i, r in enumerate(results)
+        ]
+        raw.extend(results)
         ok.append(f"{source.name}: {len(results)}")
 
     await asyncio.gather(*(_run_one(s) for s in sources))
@@ -660,11 +702,18 @@ def normalize(state: AgentState) -> AgentState:
 
 
 def deduplicate(state: AgentState) -> AgentState:
-    """DEDUPLICATE: drop duplicates on (source, source_url)."""
+    """DEDUPLICATE: drop duplicates on (source, source_url).
+
+    Rows with an empty source_url never collide — the identity falls back
+    to (source, title/name) so text-only extractions (e.g. SEEK cards with
+    no links) don't collapse into a single survivor.
+    """
     seen: set[tuple[str, str]] = set()
     unique: list[dict[str, Any]] = []
     for item in state.get("normalized", []):
-        key = (str(item.get("source", "")), str(item.get("source_url", "")))
+        url = str(item.get("source_url", "") or "")
+        identity = url or str(item.get("name") or item.get("title") or "")
+        key = (str(item.get("source", "")), identity)
         if key not in seen:
             seen.add(key)
             unique.append(item)
