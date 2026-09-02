@@ -13,7 +13,7 @@
 | **Base URL (dev)** | `http://localhost:8000` |
 | **Auth** | `X-API-Key` header (required) |
 | **Model** | **Async**: start task → poll status → fetch results (30–120s) |
-| **Platform** | `linkedin` only (currently supported) |
+| **Platforms** | `linkedin` + any enabled source with an active `find_candidates` flow (currently also `jobstreet - candidate`) |
 | **Rate limit** | Per API key, default 30 req/min (`429` + `Retry-After` on breach) |
 
 ### Integration flow
@@ -62,9 +62,9 @@ Either **simple mode** (single `query`) or **plan mode** (`queries` + plan field
 | Field | Type | Required | Constraints | Description |
 |-------|------|----------|-------------|-------------|
 | `query` | string\|null | one of `query`/`queries` | — | Simple candidate criteria; treated as a one-query plan when `queries` absent |
-| `queries` | string[]\|null | one of `query`/`queries` | max **5** | Boolean search queries, run in sequence and merged |
-| `exclude` | string[]\|null | no | max **10** | Terms excluded via `NOT (...)` and post-filter |
-| `platforms` | string[]\|null | no | max **5** | Search platforms run **in parallel and merged** (e.g. `["linkedin", "jobstreet - candidate"]`); results are combined, ranked, and the **top 10** returned |
+| `queries` | string[]\|null | one of `query`/`queries` | soft cap **5** | Boolean search queries, run in sequence and merged. **More than 5 is accepted** and truncated to the first 5 |
+| `exclude` | string[]\|null | no | soft cap **10** | Terms excluded via `NOT (...)` and post-filter. **More than 10 is accepted** and truncated to the first 10 |
+| `platforms` | string[]\|null | no | soft cap **5** | Search platforms run **in sequence and merged** (e.g. `["linkedin", "jobstreet - candidate"]`); results are combined, ranked, and the **top 10** returned. More than 5 is accepted and truncated. Unknown platform **names** are rejected with `422` |
 | `platform` | string\|null | no | — | Legacy single platform (same as one-element `platforms[]`); prefer `platforms` |
 | `location` | string\|null | no | — | Location filter, e.g. `"Singapore"` |
 | `salary` | string\|null | no | — | Salary context (ranking criteria only, not searchable) |
@@ -80,9 +80,13 @@ Platform names are case-insensitive.
 | Condition | Response |
 |-----------|----------|
 | No `query` and no `queries` | `422` — "Provide `queries` (list) or `query` (string)" |
-| Unsupported `platform` | `422` — lists supported platforms |
-| `queries` > 5 or `exclude` > 10 | `422 validation_error` |
+| Unsupported platform **name** (e.g. typo) | `422` — lists supported platforms |
 | Missing/invalid API key | `401` |
+
+> **Oversized inputs are never rejected.** `queries`, `exclude`, and
+> `platforms` accept any count; the server silently truncates to the caps
+> (5 / 10 / 5) and runs the first N. External systems can always send
+> their full list without a `422`.
 
 #### Response `201`
 
@@ -151,6 +155,7 @@ Response `200`:
       "subtitle": "Hands-On Software Architect | Principal / Staff Engineer...",
       "location": "Singapore, Singapore",
       "source": "linkedin_people",
+      "source_platform": "LinkedIn",
       "source_url": "https://www.linkedin.com/in/yap-chean-wei/",
       "match_score": 90.0,
       "match_reason": "20+ yrs, Singapore-based, hands-on architect...",
@@ -184,8 +189,9 @@ Response `200`:
 | `title` | string | Candidate name |
 | `subtitle` | string\|null | Headline |
 | `location` | string\|null | Location |
-| `source` | string | e.g. `linkedin_people` |
-| `source_url` | string\|null | Source link |
+| `source` | string | Raw platform id, e.g. `linkedin_people`, `jobstreet - candidate` |
+| `source_platform` | string\|null | **Display-friendly platform label** — `LinkedIn`, `JobStreet`, `MyCareersFuture`, `FastJobs` — for UI badges |
+| `source_url` | string\|null | **Openable link to the candidate's page on the source platform.** LinkedIn results carry the real profile URL; flow-based platforms that expose no per-candidate deep links (e.g. SEEK/JobStreet) carry the platform's search page — open it and search the candidate name |
 | `match_score` | float 0–100 | Ranked relevance score (higher = better) |
 | `match_reason` | string\|null | Human-readable explanation |
 | `evidence` | array | Traceable evidence entries `{field, value, source_url, source_text}` |
@@ -296,7 +302,8 @@ with httpx.Client(base_url=BASE, headers=HEADERS, timeout=60) as client:
 
     results = client.get(f"/api/v1/tasks/{task_id}/results").json()
     for item in results["results"]:
-        print(f"{item['match_score']:>5}  {item['title']}  {item['subtitle']}")
+        platform = item.get("source_platform") or item["source"]
+        print(f"{item['match_score']:>5}  [{platform}]  {item['title']}  —  {item.get('source_url')}")
 ```
 
 ---
@@ -308,6 +315,8 @@ with httpx.Client(base_url=BASE, headers=HEADERS, timeout=60) as client:
 - **Respect 429 + `Retry-After`.** Rate limits are per API key.
 - **Send `X-Request-ID`** to correlate your logs with server errors (echoed in the error envelope).
 - **Rank by `match_score`**, but read `match_reason`, `credibility.flags`, and `gaps` — prefer high match + high credibility.
+- **Show `source_platform`** in UIs; use `source` (raw id) for programmatic filtering.
+- **`source_url` is always openable**, but semantics differ per platform: LinkedIn = direct profile URL; SEEK/JobStreet = platform search page (search the candidate name there — no public per-candidate deep links exist).
 - **Every result is traceable** via `evidence[]` and `source_url`.
 - **Auth config (server-side):** `API_KEYS="key1:60,key2:30"` in `backend/.env` (`:N` = req/min cap).
 
