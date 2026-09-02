@@ -19,6 +19,7 @@ from app.api.security import require_api_key
 from app.db import get_db
 from app.models.orm import SearchTask
 from app.models.schemas import (
+    MAX_PLAN_EXCLUDES,
     ApprovalDecision,
     ApprovalRequest,
     BrowserSessionView,
@@ -26,7 +27,6 @@ from app.models.schemas import (
     CandidateSearchRequest,
     JobSearchRequest,
     MatchResult,
-    MAX_PLAN_EXCLUDES,
     SearchHistoryItem,
     SearchHistoryResponse,
     SearchTaskResult,

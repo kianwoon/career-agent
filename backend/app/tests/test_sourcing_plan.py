@@ -5,7 +5,6 @@ Covers the end-to-end contract with the external system's analysis panel
 """
 
 import pytest
-from pydantic import ValidationError
 
 from app.models.schemas import (
     MAX_PLAN_EXCLUDES,
