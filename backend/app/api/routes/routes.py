@@ -26,6 +26,7 @@ from app.models.schemas import (
     CandidateSearchRequest,
     JobSearchRequest,
     MatchResult,
+    MAX_PLAN_EXCLUDES,
     SearchHistoryItem,
     SearchHistoryResponse,
     SearchTaskResult,
@@ -93,7 +94,11 @@ async def start_candidate_search(
         source_ids=req.sources,
         plan={
             "queries": queries,
-            "exclude": [e.strip() for e in (req.exclude or []) if e and e.strip()],
+            "exclude": [
+                e.strip()
+                for e in (req.exclude or [])[:MAX_PLAN_EXCLUDES]
+                if e and e.strip()
+            ],
             "platforms": [p.lower() for p in platforms],
             "salary": req.salary,
             "employment_type": req.employment_type,

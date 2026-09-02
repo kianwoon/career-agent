@@ -71,8 +71,9 @@ def test_plan_platforms_default_empty():
 
 
 def test_plan_platforms_max_cap():
-    with pytest.raises(ValidationError):
-        CandidateSearchRequest(query="x", platforms=["p"] * (MAX_PLAN_PLATFORMS + 1))
+    """Oversized platform lists are truncated, not rejected (external callers must not 422)."""
+    req = CandidateSearchRequest(query="x", platforms=["p"] * (MAX_PLAN_PLATFORMS + 3))
+    assert len(req.plan_platforms()) == MAX_PLAN_PLATFORMS
 
 
 def test_route_plan_multi_platforms():
@@ -86,10 +87,11 @@ def test_route_plan_multi_platforms():
 
 
 def test_plan_caps_enforced():
-    with pytest.raises(ValidationError):
-        CandidateSearchRequest(queries=[f"q{i}" for i in range(MAX_PLAN_QUERIES + 1)])
-    with pytest.raises(ValidationError):
-        CandidateSearchRequest(query="x", exclude=[f"e{i}" for i in range(MAX_PLAN_EXCLUDES + 1)])
+    """Oversized queries/excludes are truncated, not rejected."""
+    req = CandidateSearchRequest(queries=[f"q{i}" for i in range(MAX_PLAN_QUERIES + 1)])
+    assert len(req.plan_queries()) == MAX_PLAN_QUERIES
+    req2 = CandidateSearchRequest(query="x", exclude=[f"e{i}" for i in range(MAX_PLAN_EXCLUDES + 1)])
+    assert len(req2.exclude) == MAX_PLAN_EXCLUDES + 1  # parse keeps all; route truncates
 
 
 def test_caps_values():

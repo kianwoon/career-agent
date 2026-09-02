@@ -76,13 +76,20 @@ class CandidateSearchRequest(BaseModel):
     )
     queries: list[str] | None = Field(
         default=None,
-        max_length=MAX_PLAN_QUERIES,
-        description="Boolean search queries run in sequence and merged, max 5",
+        description=(
+            "Boolean search queries run in sequence and merged. More than "
+            f"{MAX_PLAN_QUERIES} is accepted but silently truncated to the first "
+            f"{MAX_PLAN_QUERIES} (each query is a paced page load — ban risk)"
+        ),
     )
     exclude: list[str] | None = Field(
         default=None,
-        max_length=MAX_PLAN_EXCLUDES,
-        description="Terms to exclude via NOT (...) and post-filter, max 10",
+        description=(
+            "Terms to exclude via NOT (...) and post-filter. More than "
+            f"{MAX_PLAN_EXCLUDES} is accepted but silently truncated to the first "
+            f"{MAX_PLAN_EXCLUDES} (boolean engines return zero results with too "
+            "many NOT terms)"
+        ),
     )
     platform: str | None = Field(
         default=None,
@@ -90,8 +97,11 @@ class CandidateSearchRequest(BaseModel):
     )
     platforms: list[str] | None = Field(
         default=None,
-        max_length=MAX_PLAN_PLATFORMS,
-        description="Search platforms to run in sequence and merge, e.g. ['LinkedIn']. Unknown platforms are rejected, max 5",
+        description=(
+            "Search platforms to run in sequence and merge, e.g. ['LinkedIn']. "
+            f"More than {MAX_PLAN_PLATFORMS} is accepted but silently truncated to "
+            f"the first {MAX_PLAN_PLATFORMS}. Unknown platforms are rejected"
+        ),
     )
     salary: str | None = Field(
         default=None,
@@ -108,15 +118,20 @@ class CandidateSearchRequest(BaseModel):
     )
 
     def plan_queries(self) -> list[str]:
-        """Normalized query list for the plan (queries[] or the single query)."""
+        """Normalized query list (queries[] or the single query), capped at MAX_PLAN_QUERIES.
+
+        Oversized inputs are truncated, not rejected — external callers may
+        send large lists and must not get a 422 for it.
+        """
         if self.queries:
-            return [q.strip() for q in self.queries if q and q.strip()]
+            cleaned = [q.strip() for q in self.queries if q and q.strip()]
+            return cleaned[:MAX_PLAN_QUERIES]
         return [self.query.strip()] if self.query and self.query.strip() else []
 
     def plan_platforms(self) -> list[str]:
-        """Normalized platform list (platforms[] or the legacy single platform)."""
+        """Normalized platform list (platforms[] or the legacy single platform), capped at MAX_PLAN_PLATFORMS."""
         raw = self.platforms or ([self.platform] if self.platform else [])
-        return [p.strip() for p in raw if p and p.strip()]
+        return [p.strip() for p in raw if p and p.strip()][:MAX_PLAN_PLATFORMS]
 
 
 class TaskStatusResponse(BaseModel):
