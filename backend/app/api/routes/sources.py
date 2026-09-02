@@ -117,17 +117,47 @@ async def delete_source(source_id: str, db: AsyncSession = Depends(get_db)) -> N
     await db.commit()
 
 
-class SourceEnabledUpdate(BaseModel):
-    enabled: bool
+class SourceUpdate(BaseModel):
+    enabled: bool | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    base_url: str | None = Field(default=None, min_length=1, max_length=1000)
 
 
 @router.patch("/{source_id}", response_model=SourceView)
 async def update_source(
-    source_id: str, req: SourceEnabledUpdate, db: AsyncSession = Depends(get_db)
+    source_id: str, req: SourceUpdate, db: AsyncSession = Depends(get_db)
 ) -> SourceView:
-    """Enable/disable a source (e.g. turn off a built-in like LinkedIn)."""
+    """Update a source: enable/disable, rename, or repoint its base_url.
+
+    base_url repointing matters for sites whose landing page isn't the working
+    app (e.g. SEEK: sg.employer.seek.com is marketing; the Talent Search
+    candidate app lives at /talentsearch behind OAuth).
+    """
     source = await _get_source(source_id, db)
-    source.enabled = req.enabled
+    if req.enabled is not None:
+        source.enabled = req.enabled
+    if req.name is not None:
+        source.name = req.name.strip()
+    if req.base_url is not None:
+        url = req.base_url.strip()
+        if not url.startswith(("http://", "https://")):
+            url = f"https://{url}"
+        domain = domain_of(url)
+        if not domain or ("." not in domain and domain != "localhost"):
+            raise HTTPException(
+                400,
+                f"'{req.base_url.strip()}' is not a valid site URL — "
+                "use something like sg.jobstreet.com",
+            )
+        clash = (
+            await db.execute(
+                select(Source).where(Source.domain == domain, Source.id != source.id)
+            )
+        ).scalar_one_or_none()
+        if clash:
+            raise HTTPException(409, f"A source for {domain} already exists")
+        source.base_url = url
+        source.domain = domain
     await db.commit()
     await db.refresh(source)
     flows = (
