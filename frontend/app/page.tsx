@@ -148,7 +148,14 @@ export default function Home() {
   const [planSalary, setPlanSalary] = useState("");
   const [planEmploymentType, setPlanEmploymentType] = useState("");
   const [planLocation, setPlanLocation] = useState("Singapore");
-  const [planPlatform, setPlanPlatform] = useState("LinkedIn");
+  // Multi-platform selection (candidate mode). "LinkedIn" is preselected;
+  // the search runs each selected platform and merges the results. An empty
+  // selection is allowed — the backend defaults to LinkedIn.
+  const [planPlatforms, setPlanPlatforms] = useState<string[]>(["linkedin"]);
+  const togglePlatform = (p: string) =>
+    setPlanPlatforms((prev) =>
+      prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]
+    );
   const loginDoneRef = useRef(false);
   const __wizLoginPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const wizardStartingRef = useRef(false);
@@ -652,7 +659,7 @@ export default function Home() {
           ? {
               queries: queries.length > 0 ? queries : undefined,
               exclude: excludes.length > 0 ? excludes : undefined,
-              platform: planPlatform.trim().toLowerCase() || "linkedin",
+              platforms: planPlatforms.length > 0 ? planPlatforms : ["linkedin"],
               salary: planSalary.trim() || undefined,
               employment_type: planEmploymentType.trim() || undefined,
             }
@@ -1003,16 +1010,23 @@ export default function Home() {
           {mode === "candidates" && (
             <div className="plan-panel" role="group" aria-label="Sourcing plan">
               <div className="plan-grid">
-                <label className="plan-field">
-                  <span>Platform</span>
-                  <input
-                    type="text"
-                    value={planPlatform}
-                    onChange={(e) => setPlanPlatform(e.target.value)}
-                    placeholder="LinkedIn"
-                    disabled={isRunning}
-                  />
-                </label>
+                <div className="plan-field" role="group" aria-label="Platforms">
+                  <span>Platforms</span>
+                  <div className="platform-chips">
+                    {["linkedin"].map((p) => (
+                      <button
+                        key={p}
+                        type="button"
+                        className={`platform-chip${planPlatforms.includes(p) ? " selected" : ""}`}
+                        onClick={() => togglePlatform(p)}
+                        disabled={isRunning}
+                        aria-pressed={planPlatforms.includes(p)}
+                      >
+                        {p === "linkedin" ? "LinkedIn" : p}
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 <label className="plan-field">
                   <span>Location</span>
                   <input

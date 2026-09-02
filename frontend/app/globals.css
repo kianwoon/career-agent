@@ -277,6 +277,35 @@ body {
   border-color: var(--accent);
 }
 
+/* Multi-platform selector chips */
+.platform-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.platform-chip {
+  border: 1px solid var(--border);
+  background: var(--bg-elev-2);
+  color: var(--text-dim);
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.platform-chip.selected {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.platform-chip:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 .plan-hint {
   margin: 10px 0 0;
   font-size: 12px;

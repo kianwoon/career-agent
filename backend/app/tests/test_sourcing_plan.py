@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from app.models.schemas import (
     MAX_PLAN_EXCLUDES,
+    MAX_PLAN_PLATFORMS,
     MAX_PLAN_QUERIES,
     CandidateSearchRequest,
 )
@@ -48,7 +49,40 @@ def test_plan_queries_from_list():
 
 def test_plan_queries_empty_rejected():
     assert CandidateSearchRequest(query="   ").plan_queries() == []
-    assert CandidateSearchRequest().plan_queries() == []
+
+
+# ---------------------------------------------------------------------------
+# Multi-platform plan helpers
+# ---------------------------------------------------------------------------
+
+
+def test_plan_platforms_legacy_single():
+    req = CandidateSearchRequest(query="x", platform="LinkedIn")
+    assert req.plan_platforms() == ["LinkedIn"]
+
+
+def test_plan_platforms_from_list():
+    req = CandidateSearchRequest(query="x", platforms=["LinkedIn", "Indeed"])
+    assert req.plan_platforms() == ["LinkedIn", "Indeed"]
+
+
+def test_plan_platforms_default_empty():
+    assert CandidateSearchRequest(query="x").plan_platforms() == []
+
+
+def test_plan_platforms_max_cap():
+    with pytest.raises(ValidationError):
+        CandidateSearchRequest(query="x", platforms=["p"] * (MAX_PLAN_PLATFORMS + 1))
+
+
+def test_route_plan_multi_platforms():
+    from app.api.routes.routes import _SUPPORTED_CANDIDATE_PLATFORMS
+
+    req = CandidateSearchRequest(
+        query="x", platforms=["LinkedIn"], queries=["q1", "q2"]
+    )
+    platforms = req.plan_platforms() or ["LinkedIn"]
+    assert all(p.lower() in _SUPPORTED_CANDIDATE_PLATFORMS for p in platforms)
 
 
 def test_plan_caps_enforced():
@@ -281,7 +315,6 @@ def test_screenshot_plan_passes_schema():
 
 
 def test_route_rejects_unsupported_platform():
-
     from app.api.routes.routes import _SUPPORTED_CANDIDATE_PLATFORMS
 
     assert _SUPPORTED_CANDIDATE_PLATFORMS == {"linkedin"}

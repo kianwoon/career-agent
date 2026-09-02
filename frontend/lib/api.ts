@@ -19,6 +19,9 @@ export interface SearchRequest {
   plan?: {
     queries?: string[];
     exclude?: string[];
+    /** Preferred: multiple platforms, run in sequence and merged. */
+    platforms?: string[];
+    /** Legacy single platform; superseded by `platforms`. */
     platform?: string;
     salary?: string;
     employment_type?: string;

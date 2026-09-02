@@ -68,11 +68,12 @@ async def start_candidate_search(
     queries = req.plan_queries()
     if not queries:
         raise HTTPException(status_code=422, detail="Provide `queries` (list) or `query` (string)")
-    platform = (req.platform or "LinkedIn").strip()
-    if platform.lower() not in _SUPPORTED_CANDIDATE_PLATFORMS:
+    platforms = req.plan_platforms() or ["LinkedIn"]
+    unknown = [p for p in platforms if p.lower() not in _SUPPORTED_CANDIDATE_PLATFORMS]
+    if unknown:
         raise HTTPException(
             status_code=422,
-            detail=f"Unsupported platform {platform!r}; supported: {sorted(_SUPPORTED_CANDIDATE_PLATFORMS)}",
+            detail=f"Unsupported platform(s) {unknown!r}; supported: {sorted(_SUPPORTED_CANDIDATE_PLATFORMS)}",
         )
     return await _start_task(
         db,
@@ -83,7 +84,7 @@ async def start_candidate_search(
         plan={
             "queries": queries,
             "exclude": [e.strip() for e in (req.exclude or []) if e and e.strip()],
-            "platform": platform,
+            "platforms": [p.lower() for p in platforms],
             "salary": req.salary,
             "employment_type": req.employment_type,
         },

@@ -58,6 +58,7 @@ class JobSearchRequest(BaseModel):
 # load on LinkedIn, so more than a handful is a rate-limit/ban risk.
 MAX_PLAN_QUERIES = 5
 MAX_PLAN_EXCLUDES = 10
+MAX_PLAN_PLATFORMS = 5
 
 
 class CandidateSearchRequest(BaseModel):
@@ -85,7 +86,12 @@ class CandidateSearchRequest(BaseModel):
     )
     platform: str | None = Field(
         default=None,
-        description="Search platform from the sourcing plan, e.g. 'LinkedIn'. Unknown platforms are rejected",
+        description="Legacy single platform, e.g. 'LinkedIn'. Prefer `platforms`",
+    )
+    platforms: list[str] | None = Field(
+        default=None,
+        max_length=MAX_PLAN_PLATFORMS,
+        description="Search platforms to run in sequence and merge, e.g. ['LinkedIn']. Unknown platforms are rejected, max 5",
     )
     salary: str | None = Field(
         default=None,
@@ -106,6 +112,11 @@ class CandidateSearchRequest(BaseModel):
         if self.queries:
             return [q.strip() for q in self.queries if q and q.strip()]
         return [self.query.strip()] if self.query and self.query.strip() else []
+
+    def plan_platforms(self) -> list[str]:
+        """Normalized platform list (platforms[] or the legacy single platform)."""
+        raw = self.platforms or ([self.platform] if self.platform else [])
+        return [p.strip() for p in raw if p and p.strip()]
 
 
 class TaskStatusResponse(BaseModel):
