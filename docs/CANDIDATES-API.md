@@ -50,6 +50,7 @@ Either **simple mode** (single `query`) or **plan mode** (`queries` + plan field
   "query": "Java, Kafka, microservices, banking",
   "queries": ["Java AND Kafka", "payments engineer AND microservices"],
   "exclude": ["intern", "unpaid"],
+  "platforms": ["linkedin", "jobstreet - candidate"],
   "platform": "LinkedIn",
   "location": "Singapore",
   "salary": "SGD 120k-180k",
@@ -63,11 +64,16 @@ Either **simple mode** (single `query`) or **plan mode** (`queries` + plan field
 | `query` | string\|null | one of `query`/`queries` | — | Simple candidate criteria; treated as a one-query plan when `queries` absent |
 | `queries` | string[]\|null | one of `query`/`queries` | max **5** | Boolean search queries, run in sequence and merged |
 | `exclude` | string[]\|null | no | max **10** | Terms excluded via `NOT (...)` and post-filter |
-| `platform` | string\|null | no | `linkedin` | Search platform; **unknown platforms rejected** |
+| `platforms` | string[]\|null | no | max **5** | Search platforms run **in parallel and merged** (e.g. `["linkedin", "jobstreet - candidate"]`); results are combined, ranked, and the **top 10** returned |
+| `platform` | string\|null | no | — | Legacy single platform (same as one-element `platforms[]`); prefer `platforms` |
 | `location` | string\|null | no | — | Location filter, e.g. `"Singapore"` |
 | `salary` | string\|null | no | — | Salary context (ranking criteria only, not searchable) |
 | `employment_type` | string\|null | no | — | Employment type (ranking criteria only) |
 | `sources` | string[]\|null | no | — | Source IDs to include; null/empty = all enabled sources |
+
+Valid platform ids: `linkedin` plus any enabled source with an active
+`find_candidates` flow (discover them via `GET /api/v1/search/platforms`).
+Platform names are case-insensitive.
 
 #### Validation errors
 
@@ -247,7 +253,7 @@ BASE="http://localhost:8000"
 TASK=$(curl -s -X POST "$BASE/api/v1/search/candidates" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: $KEY" \
-  -d '{"queries":["Java AND Kafka AND payments"],"exclude":["intern"],"platform":"LinkedIn","location":"Singapore"}' \
+  -d '{"queries":["Java AND Kafka AND payments"],"exclude":["intern"],"platforms":["linkedin","jobstreet - candidate"],"location":"Singapore"}' \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['task_id'])")
 
 # 2. Poll (every 5s, max ~2min)
@@ -261,7 +267,7 @@ for i in $(seq 1 24); do
   sleep 5
 done
 
-# 3. Results
+# 3. Results — merged from ALL requested platforms, ranked, top 10
 curl -s "$BASE/api/v1/tasks/$TASK/results" -H "X-API-Key: $KEY"
 ```
 
