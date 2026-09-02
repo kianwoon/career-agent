@@ -1167,7 +1167,10 @@ export default function Home() {
                         </span>
                       </div>
                       {!ready && <span className="source-warn">Setup needed for {mode === "jobs" ? "job" : "candidate"} search</span>}
-                      {pendingLoginSource?.id === s.id && (
+                      {/* Only offer capture while the session is still missing —
+                          once has_session flips true (e.g. captured, or restored
+                          from an earlier run) the button would be a dead end. */}
+                      {pendingLoginSource?.id === s.id && !s.has_session && (
                         <button
                           className="btn small primary"
                           disabled={!!wizardBusy}
