@@ -1539,6 +1539,23 @@ body {
   background: transparent;
 }
 
+/* "×" button inside an active flow pill — removes the flow */
+.flow-remove {
+  margin-left: 4px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 11px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+  opacity: 0.6;
+}
+
+.flow-remove:hover {
+  opacity: 1;
+}
+
 .source-card-actions {
   display: flex;
   flex-wrap: wrap;

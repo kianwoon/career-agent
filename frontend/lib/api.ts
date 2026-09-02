@@ -177,6 +177,21 @@ export async function updateSourceEnabled(id: string, enabled: boolean): Promise
   return res.json();
 }
 
+/** Delete a recorded flow (find_jobs / find_candidates) for a source, by flow type. */
+export async function deleteFlow(sourceId: string, flowType: string): Promise<void> {
+  const base = await resolveApiBase();
+  const headers: Record<string, string> = {};
+  const key = await resolveApiKey();
+  if (key) headers["X-API-Key"] = key;
+  const res = await fetch(`${base}/api/v1/sources/${sourceId}/flows/${flowType}`, {
+    method: "DELETE",
+    headers,
+  });
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`Delete flow failed with status ${res.status}`);
+  }
+}
+
 export async function wizardStart(
   sourceId: string,
   mode: "login" | "record",

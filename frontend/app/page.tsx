@@ -18,6 +18,7 @@ import {
   agentRecordFiltersStop,
   createSource,
   deleteSource,
+  deleteFlow,
   updateSourceEnabled,
   wizardStart,
   wizardStatus,
@@ -625,8 +626,21 @@ export default function Home() {
   async function handleDeleteSource(source: SourceView) {
     await deleteSource(source.id).catch(() => {});
     await reloadSources();
-    await reloadSources();
     setTimeline((prev) => addEvent(prev, "info", `Source removed: ${source.name}.`));
+  }
+
+  async function handleDeleteFlow(source: SourceView, flowType: "find_jobs" | "find_candidates") {
+    try {
+      await deleteFlow(source.id, flowType);
+      await reloadSources();
+      setTimeline((prev) =>
+        addEvent(prev, "info", `${flowType === "find_jobs" ? "Jobs" : "Candidates"} flow removed for ${source.name}.`)
+      );
+    } catch (e) {
+      setTimeline((prev) =>
+        addEvent(prev, "warn", `Could not remove flow: ${e instanceof Error ? e.message : e}`)
+      );
+    }
   }
 
   function handleModeChange(next: SearchMode) {
@@ -1206,9 +1220,31 @@ export default function Home() {
                         </span>
                         <span className={`status-pill ${s.flows.find_jobs === "active" ? "ok" : "off"}`}>
                           jobs flow {s.flows.find_jobs === "active" ? "✓" : "—"}
+                          {s.flows.find_jobs === "active" && !isRunning && (
+                            <button
+                              className="flow-remove"
+                              aria-label="Remove jobs flow"
+                              title="Remove jobs flow (record again to restore)"
+                              disabled={isRunning}
+                              onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleDeleteFlow(s, "find_jobs"); }}
+                            >
+                              ×
+                            </button>
+                          )}
                         </span>
                         <span className={`status-pill ${s.flows.find_candidates === "active" ? "ok" : "off"}`}>
                           candidates flow {s.flows.find_candidates === "active" ? "✓" : "—"}
+                          {s.flows.find_candidates === "active" && !isRunning && (
+                            <button
+                              className="flow-remove"
+                              aria-label="Remove candidates flow"
+                              title="Remove candidates flow (record again to restore)"
+                              disabled={isRunning}
+                              onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleDeleteFlow(s, "find_candidates"); }}
+                            >
+                              ×
+                            </button>
+                          )}
                         </span>
                       </div>
                       {!ready && <span className="source-warn">Setup needed for {mode === "jobs" ? "job" : "candidate"} search</span>}

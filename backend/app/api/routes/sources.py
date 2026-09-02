@@ -769,6 +769,28 @@ async def list_flows(source_id: str, db: AsyncSession = Depends(get_db)) -> list
     ]
 
 
+@router.delete("/{source_id}/flows/{flow_type}", status_code=204, response_model=None)
+async def delete_flow(
+    source_id: str, flow_type: str, db: AsyncSession = Depends(get_db)
+) -> None:
+    """Remove a recorded flow by type (find_jobs / find_candidates)."""
+    if flow_type not in FLOW_TYPES:
+        raise HTTPException(400, f"flow_type must be one of {FLOW_TYPES}")
+    flows = (
+        await db.execute(
+            select(SourceFlow).where(
+                SourceFlow.source_id == source_id,
+                SourceFlow.flow_type == flow_type,
+            )
+        )
+    ).scalars().all()
+    if not flows:
+        raise HTTPException(404, "Flow not found")
+    for flow in flows:
+        await db.delete(flow)
+    await db.commit()
+
+
 @router.patch("/{source_id}/flows/{flow_id}", response_model=SourceFlowView)
 async def update_flow(
     source_id: str, flow_id: str, req: SourceFlowUpdate, db: AsyncSession = Depends(get_db)
