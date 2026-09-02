@@ -1278,12 +1278,13 @@ export default function Home() {
                             ) : (
                               <button
                                 className="btn small"
-                                disabled={!!wizardBusy || isRunning || !s.flows.find_jobs}
+                                disabled={!!wizardBusy || isRunning || (!s.flows.find_jobs && !s.flows.find_candidates)}
                                 onClick={(e) => {
                                   e.preventDefault();
-                                  handleRecordFilters(s, "find_jobs", "start");
+                                  // Attach filters to whichever flow exists (jobs preferred).
+                                  handleRecordFilters(s, s.flows.find_jobs ? "find_jobs" : "find_candidates", "start");
                                 }}
-                                title="Record filter-panel clicks (Industry, Salary, Work Type…) and apply them on every job search"
+                                title="Record filter-panel clicks (Industry, Salary, Work Type…) and apply them on every search"
                               >
                                 Record filters
                               </button>
