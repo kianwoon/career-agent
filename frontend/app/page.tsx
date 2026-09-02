@@ -670,6 +670,24 @@ export default function Home() {
       .split("\n")
       .map((q) => q.trim())
       .filter(Boolean);
+    // Mirror backend caps (MAX_PLAN_QUERIES/MAX_PLAN_EXCLUDES) so the user
+    // gets an inline message instead of a 422 after the task starts.
+    if (queries.length > 5) {
+      setTimeline((prev) =>
+        addEvent(prev, "warn", `Too many queries: ${queries.length}. Use at most 5 boolean queries (one per line) — merge related ones with OR.`)
+      );
+      return;
+    }
+    const excludesEarly = planExcludes
+      .split(/[,\n]/)
+      .map((e) => e.trim())
+      .filter(Boolean);
+    if (excludesEarly.length > 10) {
+      setTimeline((prev) =>
+        addEvent(prev, "warn", `Too many exclude terms: ${excludesEarly.length}. Use at most 10.`)
+      );
+      return;
+    }
     if (mode === "candidates" && queries.length > 0) {
       // Plan mode: no single query needed.
     } else if (!query.trim()) {
@@ -1102,7 +1120,14 @@ export default function Home() {
                   />
                 </label>
                 <label className="plan-field plan-field-wide">
-                  <span>Boolean queries (one per line, max 5)</span>
+                  <span>
+                    Boolean queries (one per line, max 5)
+                    {planQueries.split("\n").filter((q) => q.trim()).length > 5 && (
+                      <em style={{ color: "var(--warn, #e0a300)", marginLeft: 6 }}>
+                        — {planQueries.split("\n").filter((q) => q.trim()).length} entered, over the limit
+                      </em>
+                    )}
+                  </span>
                   <textarea
                     rows={4}
                     value={planQueries}
