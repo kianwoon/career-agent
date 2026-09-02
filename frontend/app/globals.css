@@ -1522,12 +1522,16 @@ body {
 }
 
 /* Flow pills occupy the full row so all three pills line up evenly,
-   regardless of whether the × remove button is present. */
+   regardless of whether the × remove button is present. A fixed height
+   keeps every pill identical — nested inline buttons (line-height: 1)
+   otherwise shrink the flow pills shorter than "signed in". */
 .source-card-status .status-pill {
   flex: 1 1 100%;
   display: inline-flex;
   align-items: center;
   justify-content: space-between;
+  min-height: 22px;
+  line-height: 1;
 }
 
 .status-pill.ok {
@@ -1559,6 +1563,10 @@ body {
   padding: 0 2px;
   cursor: pointer;
   opacity: 0.6;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
 }
 
 .flow-remove:hover {
