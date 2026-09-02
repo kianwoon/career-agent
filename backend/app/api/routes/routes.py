@@ -69,11 +69,21 @@ async def start_candidate_search(
     if not queries:
         raise HTTPException(status_code=422, detail="Provide `queries` (list) or `query` (string)")
     platforms = req.plan_platforms() or ["LinkedIn"]
-    unknown = [p for p in platforms if p.lower() not in _SUPPORTED_CANDIDATE_PLATFORMS]
+    # Valid platforms = built-in adapters + enabled sources with an active
+    # find_candidates flow (any such source can act as a platform).
+    from app.agent.nodes import _flow_platforms
+
+    flow_platforms = await _flow_platforms()
+    unknown = [
+        p for p in platforms
+        if p.lower() not in _SUPPORTED_CANDIDATE_PLATFORMS
+        and p.lower() not in flow_platforms
+    ]
     if unknown:
+        supported = sorted(_SUPPORTED_CANDIDATE_PLATFORMS | flow_platforms)
         raise HTTPException(
             status_code=422,
-            detail=f"Unsupported platform(s) {unknown!r}; supported: {sorted(_SUPPORTED_CANDIDATE_PLATFORMS)}",
+            detail=f"Unsupported platform(s) {unknown!r}; supported: {supported}",
         )
     return await _start_task(
         db,
@@ -93,8 +103,26 @@ async def start_candidate_search(
 
 # Platforms the candidate adapter can actually search today. The sourcing
 # plan names the platform; anything outside this set is rejected loudly
-# instead of silently searching the wrong site.
+# instead of silently searching the wrong site. Built-in only — enabled
+# sources with an active find_candidates flow are accepted dynamically too.
 _SUPPORTED_CANDIDATE_PLATFORMS = {"linkedin"}
+
+
+@router.get("/search/platforms")
+async def candidate_platforms() -> dict:
+    """Candidate-search platforms available right now.
+
+    Built-in adapters plus any enabled source with an active
+    find_candidates flow (those run via their recorded flow).
+    """
+    from app.agent.nodes import _flow_platforms
+
+    flow_platforms = await _flow_platforms()
+    return {
+        "platforms": sorted(_SUPPORTED_CANDIDATE_PLATFORMS | flow_platforms),
+        "builtin": sorted(_SUPPORTED_CANDIDATE_PLATFORMS),
+        "flow": sorted(flow_platforms),
+    }
 
 
 async def _default_user_id(db: AsyncSession) -> str | None:

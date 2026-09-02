@@ -481,6 +481,18 @@ export async function fetchSearchHistory(): Promise<SearchHistoryResponse> {
   return getJson<SearchHistoryResponse>(`${base}/api/v1/search/history`);
 }
 
+/** Available candidate-search platforms (builtin + sources with a candidates flow). */
+export interface CandidatePlatforms {
+  platforms: string[];
+  builtin: string[];
+  flow: string[];
+}
+
+export async function fetchCandidatePlatforms(): Promise<CandidatePlatforms> {
+  const base = await resolveApiBase();
+  return getJson<CandidatePlatforms>(`${base}/api/v1/search/platforms`);
+}
+
 // ---------------------------------------------------------------------------
 // Browser session management (capture / replay / refresh)
 // ---------------------------------------------------------------------------

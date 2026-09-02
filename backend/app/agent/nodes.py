@@ -16,6 +16,8 @@ import asyncio
 import logging
 from typing import Any, TypedDict
 
+from sqlalchemy import func, select
+
 from app.models.schemas import ActivityEvent, MatchResult, SearchType, TaskStatus
 
 logger = logging.getLogger(__name__)
@@ -32,6 +34,135 @@ def _candidate_adapters() -> dict[str, Any]:
 
         _CANDIDATE_PLATFORM_ADAPTERS["linkedin"] = search_linkedin_people
     return _CANDIDATE_PLATFORM_ADAPTERS
+
+
+async def _search_candidates_via_flow(
+    source_name: str,
+    queries: list[str],
+    excludes: list[str] | None = None,
+    location: str | None = None,
+) -> dict[str, Any]:
+    """Run a candidate search on a custom source via its recorded flow.
+
+    Lets any source with an active `find_candidates` flow act as a
+    sourcing platform. Resolves the source by name (case-insensitive),
+    builds the boolean keyword string from the plan, and executes the
+    flow through the browser-extension agent (falling back to Playwright)
+    — the same machinery `_search_custom_sources` uses.
+    """
+    from sqlalchemy import select
+
+    from app.db import async_session
+    from app.models.orm import Source, SourceFlow
+    from app.services.source_flows import build_boolean_keywords, execute_flow, filter_excluded_results
+
+    async with async_session() as db:
+        source = (
+            await db.execute(
+                select(Source).where(func.lower(Source.name) == source_name.lower())
+            )
+        ).scalar_one_or_none()
+        if source is None:
+            return {"raw_results": [], "needs_human": True, "human_reason": f"Unknown source: {source_name}"}
+        flow = (
+            await db.execute(
+                select(SourceFlow).where(
+                    SourceFlow.source_id == source.id,
+                    SourceFlow.flow_type == "find_candidates",
+                    SourceFlow.status == "active",
+                )
+            )
+        ).scalars().first()
+
+    if flow is None:
+        return {
+            "raw_results": [],
+            "needs_human": True,
+            "human_reason": f"{source.name}: no active find_candidates flow — record one from the Sources panel",
+        }
+
+    flow_query = build_boolean_keywords(queries, excludes) or " ".join(queries)
+
+    # Prefer the browser-extension agent (real browser, never blocked);
+    # fall back to server-side Playwright.
+    from app.services.agent_relay import agent_registry
+
+    results: list[dict[str, Any]] | None = None
+    if agent_registry.connected:
+        try:
+            data = await agent_registry.dispatch(
+                "run_flow",
+                {
+                    "baseUrl": source.base_url,
+                    "query": flow_query,
+                    "steps": flow.steps,
+                },
+                timeout_s=180,
+            )
+            if isinstance(data, dict) and data.get("needs_human"):
+                return {
+                    "raw_results": [],
+                    "needs_human": True,
+                    "human_reason": f"{source.name}: {data.get('error') or 'site showing a login page'}",
+                }
+            results = (data.get("results") if isinstance(data, dict) else data) or []
+        except Exception as exc:
+            logger.warning("Agent run_flow failed for %s: %s — falling back to Playwright", source.name, exc)
+            results = None
+
+    if results is None:
+        result = await execute_flow(
+            base_url=source.base_url,
+            steps=flow.steps,
+            query=flow_query,
+            storage_state_encrypted=source.session_state,
+            card_selectors=flow.steps[-1] if flow.steps and flow.steps[-1].get("card") else None,
+        )
+        if result.get("needs_human") or not result.get("results"):
+            reason = result.get("human_reason", "no results")
+            return {
+                "raw_results": [],
+                "needs_human": bool(result.get("needs_human")),
+                "human_reason": f"{source.name}: {reason}",
+            }
+        results = result["results"]
+
+    results = filter_excluded_results(results or [], excludes or None)
+    for r in results:
+        r.setdefault("source", source.name)
+        r.setdefault("title", "")
+    return {
+        "raw_results": results,
+        "needs_human": False,
+        "human_reason": None,
+        "plan_detail": f"{source.name} flow: {len(results)} results",
+    }
+
+
+async def _flow_platforms() -> set[str]:
+    """Names of enabled sources that have an active find_candidates flow.
+
+    These are valid candidate-search platforms in addition to the
+    built-in adapter registry.
+    """
+    from sqlalchemy import select
+
+    from app.db import async_session
+    from app.models.orm import Source, SourceFlow
+
+    async with async_session() as db:
+        rows = (
+            await db.execute(
+                select(Source.name)
+                .join(SourceFlow, SourceFlow.source_id == Source.id)
+                .where(
+                    Source.enabled.is_(True),
+                    SourceFlow.flow_type == "find_candidates",
+                    SourceFlow.status == "active",
+                )
+            )
+        ).scalars().all()
+    return {r.lower() for r in rows}
 
 
 class AgentState(TypedDict, total=False):
@@ -409,16 +540,26 @@ async def run_search(state: AgentState) -> AgentState:
         needs_human = False
         human_reason: str | None = None
         plan_details: list[str] = []
-        unsupported = [p for p in platforms if p not in _candidate_adapters()]
+        # Valid platforms = built-in adapters + any enabled source with an
+        # active find_candidates flow (Option B: sources become platforms).
+        flow_platforms = await _flow_platforms()
+
+        def _resolve(p: str) -> Any:
+            return _candidate_adapters().get(p) or (
+                _search_candidates_via_flow if p in flow_platforms else None
+            )
+
+        unsupported = [p for p in platforms if _resolve(p) is None]
         if unsupported:
+            supported = sorted(set(_candidate_adapters()) | flow_platforms)
             human_reason = (
                 f"Unsupported platform(s): {', '.join(unsupported)}; "
-                f"supported: {sorted(_candidate_adapters())}"
+                f"supported: {supported}"
             )
             needs_human = True
         try:
             for platform in platforms:
-                adapter = _candidate_adapters().get(platform)
+                adapter = _resolve(platform)
                 if adapter is None:
                     continue
                 if not queries:

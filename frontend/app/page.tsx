@@ -5,6 +5,7 @@ import {
   startSearch,
   fetchTaskResults,
   fetchSearchHistory,
+  fetchCandidatePlatforms,
   createBrowserSession,
   captureBrowserSession,
   replayBrowserSession,
@@ -152,9 +153,11 @@ export default function Home() {
   const [planEmploymentType, setPlanEmploymentType] = useState("");
   const [planLocation, setPlanLocation] = useState("Singapore");
   // Multi-platform selection (candidate mode). "LinkedIn" is preselected;
-  // the search runs each selected platform and merges the results. An empty
-  // selection is allowed — the backend defaults to LinkedIn.
+  // the search runs each selected platform and merges the results. The
+  // available chip list is fetched from the backend (builtin adapters +
+  // sources with an active find_candidates flow).
   const [planPlatforms, setPlanPlatforms] = useState<string[]>(["linkedin"]);
+  const [availablePlatforms, setAvailablePlatforms] = useState<string[]>(["linkedin"]);
   // Manual filter recording in progress: "<sourceId>:<flowType>" or null.
   const [recordingFilters, setRecordingFilters] = useState<string | null>(null);
   const togglePlatform = (p: string) =>
@@ -221,6 +224,9 @@ export default function Home() {
     listSources()
       .then((s) => setCustomSources(s))
       .catch(() => {});
+    fetchCandidatePlatforms()
+      .then((p) => setAvailablePlatforms(p.platforms))
+      .catch(() => {});
     // Poll the agent status — updates when the extension connects/disconnects.
     const pollAgent = setInterval(() => {
       agentStatus().then(setAgentConnected).catch(() => setAgentConnected(false));
@@ -233,6 +239,9 @@ export default function Home() {
   async function reloadSources() {
     try {
       setCustomSources(await listSources());
+      fetchCandidatePlatforms()
+        .then((p) => setAvailablePlatforms(p.platforms))
+        .catch(() => {});
     } catch {
       /* ignore */
     }
@@ -1058,7 +1067,7 @@ export default function Home() {
                 <div className="plan-field" role="group" aria-label="Platforms">
                   <span>Platforms</span>
                   <div className="platform-chips">
-                    {["linkedin"].map((p) => (
+                    {availablePlatforms.map((p) => (
                       <button
                         key={p}
                         type="button"
@@ -1067,7 +1076,7 @@ export default function Home() {
                         disabled={isRunning}
                         aria-pressed={planPlatforms.includes(p)}
                       >
-                        {p === "linkedin" ? "LinkedIn" : p}
+                        {p === "linkedin" ? "LinkedIn" : p.charAt(0).toUpperCase() + p.slice(1)}
                       </button>
                     ))}
                   </div>
