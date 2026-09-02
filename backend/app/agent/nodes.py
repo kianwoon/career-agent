@@ -50,11 +50,14 @@ async def _search_candidates_via_flow(
     flow through the browser-extension agent (falling back to Playwright)
     — the same machinery `_search_custom_sources` uses.
     """
-    from sqlalchemy import select
 
     from app.db import async_session
     from app.models.orm import Source, SourceFlow
-    from app.services.source_flows import build_boolean_keywords, execute_flow, filter_excluded_results
+    from app.services.source_flows import (
+        build_boolean_keywords,
+        execute_flow,
+        filter_excluded_results,
+    )
 
     async with async_session() as db:
         source = (
@@ -145,7 +148,6 @@ async def _flow_platforms() -> set[str]:
     These are valid candidate-search platforms in addition to the
     built-in adapter registry.
     """
-    from sqlalchemy import select
 
     from app.db import async_session
     from app.models.orm import Source, SourceFlow
@@ -275,7 +277,6 @@ async def _search_custom_sources(
 
     Returns (raw_results, ok_labels, failed_labels).
     """
-    from sqlalchemy import select
 
     from app.db import async_session
     from app.models.orm import Source, SourceFlow
