@@ -73,3 +73,15 @@ def test_wizard_start_unknown_source_404(client):
         headers=_headers(),
     )
     assert r.status_code == 404
+
+
+def test_create_source_rejects_dotless_url(client):
+    """A bare word URL ("JobStreet") would navigate login to https://jobstreet/
+    — reject it at creation so the swapped-fields typo can't store garbage."""
+    r = client.post(
+        "/api/v1/sources",
+        json={"name": "JobStreet", "base_url": "JobStreet"},
+        headers=_headers(),
+    )
+    assert r.status_code == 400
+    assert "not a valid site URL" in r.json()["error"]["message"]

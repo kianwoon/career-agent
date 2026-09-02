@@ -228,6 +228,16 @@ export default function Home() {
 
   async function handleAddSource() {
     if (!newSourceName.trim() || !newSourceUrl.trim()) return;
+    // Client-side sanity check: a URL with no dot ("JobStreet") would create
+    // a source whose login tab opens https://jobstreet/ — nowhere. Catch the
+    // swapped-fields typo here where we can say exactly what went wrong.
+    const rawUrl = newSourceUrl.trim().replace(/^https?:\/\//i, "");
+    if (!rawUrl.includes(".")) {
+      setTimeline((prev) =>
+        addEvent(prev, "warn", `Add source failed: "${newSourceUrl.trim()}" doesn't look like a site URL — put the address (e.g. sg.jobstreet.com) in the URL field and the display name in the Name field.`)
+      );
+      return;
+    }
     setWizardBusy("create");
     try {
       const src = await createSource(newSourceName.trim(), newSourceUrl.trim());

@@ -84,8 +84,15 @@ async def create_source(
     if not url.startswith(("http://", "https://")):
         url = f"https://{url}"
     domain = domain_of(url)
-    if not domain:
-        raise HTTPException(400, "Invalid base_url")
+    # A bare word ("JobStreet") would silently become https://jobstreet/ —
+    # navigate-to-nowhere. A real site host needs a dot (localhost exempt
+    # for dev). Rejecting here surfaces the typo at creation time.
+    if not domain or ("." not in domain and domain != "localhost"):
+        raise HTTPException(
+            400,
+            f"'{req.base_url.strip()}' is not a valid site URL — "
+            "use something like sg.jobstreet.com",
+        )
 
     existing = (
         await db.execute(select(Source).where(Source.domain == domain))
