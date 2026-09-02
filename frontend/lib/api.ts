@@ -107,13 +107,21 @@ export async function agentRecord(
 }
 
 async function putJson<T>(url: string, body: unknown): Promise<T> {
+  // Must attach the API key like postJson/getJson — without it the backend
+  // 401s and session capture silently fails ("stuck" login flow).
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const key = await resolveApiKey();
+  if (key) headers["X-API-Key"] = key;
   const res = await fetch(url, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`Request failed with status ${res.status}`);
-  return res.json();
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(`Request failed with status ${res.status}: ${detail}`);
+  }
+  return (await res.json()) as T;
 }
 
 export async function createSource(name: string, baseUrl: string): Promise<SourceView> {
@@ -137,9 +145,12 @@ export async function deleteSource(id: string): Promise<void> {
 
 export async function updateSourceEnabled(id: string, enabled: boolean): Promise<SourceView> {
   const base = await resolveApiBase();
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const key = await resolveApiKey();
+  if (key) headers["X-API-Key"] = key;
   const res = await fetch(`${base}/api/v1/sources/${id}`, {
     method: "PATCH",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify({ enabled }),
   });
   if (!res.ok) throw new Error(`Update failed with status ${res.status}`);
