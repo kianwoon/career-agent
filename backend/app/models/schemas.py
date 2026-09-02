@@ -177,6 +177,9 @@ class MatchResult(BaseModel):
     subtitle: str | None = None  # company (jobs) or headline (candidates)
     location: str | None = None
     source: str
+    # Display-friendly platform label derived from `source`
+    # (e.g. "LinkedIn", "JobStreet") — for UI badges.
+    source_platform: str | None = None
     source_url: str | None = None
     match_score: float = Field(..., ge=0.0, le=100.0)
     match_reason: str | None = None

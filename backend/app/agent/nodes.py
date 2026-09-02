@@ -36,7 +36,9 @@ def _candidate_adapters() -> dict[str, Any]:
     return _CANDIDATE_PLATFORM_ADAPTERS
 
 
-def _normalize_flow_candidate(r: dict[str, Any], source_name: str, idx: int) -> dict[str, Any]:
+def _normalize_flow_candidate(
+    r: dict[str, Any], source_name: str, idx: int, base_url: str | None = None
+) -> dict[str, Any]:
     """Map one raw flow-extracted row to the canonical candidate schema.
 
     Extension/Playwright extraction returns {title, company, location,
@@ -47,8 +49,9 @@ def _normalize_flow_candidate(r: dict[str, Any], source_name: str, idx: int) -> 
     lives in the card text, so:
       - name     = title, else first non-empty line of raw_text
       - headline = the role line ("Python Developer at X, May 2025 - ...")
-      - source_url = url, else a synthetic seek-style id so dedup and
-        persistence don't collapse all rows into one empty-URL bucket.
+      - source_url = the card's href when present, else the source's
+        base_url (an openable platform page — candidates have no public
+        deep links there; the user opens it and searches the name).
     """
     raw_text = str(r.get("raw_text") or "")
     lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
@@ -59,11 +62,10 @@ def _normalize_flow_candidate(r: dict[str, Any], source_name: str, idx: int) -> 
         or (lines[1] if len(lines) > 1 else None)
     )
     source_url = str(r.get("url") or "").strip()
-    if not source_url and name:
-        # Deterministic synthetic id — stable across searches for the same
-        # name+headline so dedup/persistence treat it as one candidate.
-        digest = abs(hash((name, headline))) % 10_000_000
-        source_url = f"{source_name.lower().replace(' ', '-')}-candidate/{digest}"
+    if not source_url and base_url:
+        # Openable platform landing page (e.g. SEEK talent search) — the
+        # external system's user can search the candidate name there.
+        source_url = base_url
     return {
         "id": r.get("id") or f"flow-{abs(hash((name, headline, idx)))}",
         "name": name or f"{source_name} candidate {idx + 1}",
@@ -73,7 +75,7 @@ def _normalize_flow_candidate(r: dict[str, Any], source_name: str, idx: int) -> 
         "skills": [],
         "experience": raw_text[:800],
         "source": source_name,
-        "source_url": source_url,
+        "source_url": source_url or None,
     }
 
 
@@ -173,7 +175,8 @@ async def _search_candidates_via_flow(
 
     results = filter_excluded_results(results or [], excludes or None)
     results = [
-        _normalize_flow_candidate(r, source.name, i) for i, r in enumerate(results)
+        _normalize_flow_candidate(r, source.name, i, source.base_url)
+        for i, r in enumerate(results)
     ]
     return {
         "raw_results": results,
@@ -391,7 +394,7 @@ async def _search_custom_sources(
                     return
                 results = filter_excluded_results(results, plan_excludes or None)
                 results = [
-                    _normalize_flow_candidate(r, source.name, i)
+                    _normalize_flow_candidate(r, source.name, i, source.base_url)
                     for i, r in enumerate(results)
                 ]
                 raw.extend(results)
@@ -426,7 +429,8 @@ async def _search_custom_sources(
             return
         results = filter_excluded_results(results, plan_excludes or None)
         results = [
-            _normalize_flow_candidate(r, source.name, i) for i, r in enumerate(results)
+            _normalize_flow_candidate(r, source.name, i, source.base_url)
+        for i, r in enumerate(results)
         ]
         raw.extend(results)
         ok.append(f"{source.name}: {len(results)}")
@@ -702,18 +706,19 @@ def normalize(state: AgentState) -> AgentState:
 
 
 def deduplicate(state: AgentState) -> AgentState:
-    """DEDUPLICATE: drop duplicates on (source, source_url).
+    """DEDUPLICATE: drop duplicates on (source, source_url, name).
 
-    Rows with an empty source_url never collide — the identity falls back
-    to (source, title/name) so text-only extractions (e.g. SEEK cards with
-    no links) don't collapse into a single survivor.
+    Flow extractions may share one URL per platform (the landing/search
+    page used as the openable link when a site exposes no per-candidate
+    hrefs), so the NAME is part of the identity — two different
+    candidates on the same platform page must both survive.
     """
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     unique: list[dict[str, Any]] = []
     for item in state.get("normalized", []):
         url = str(item.get("source_url", "") or "")
-        identity = url or str(item.get("name") or item.get("title") or "")
-        key = (str(item.get("source", "")), identity)
+        name = str(item.get("name") or item.get("title") or "")
+        key = (str(item.get("source", "")), url.lower(), name.lower())
         if key not in seen:
             seen.add(key)
             unique.append(item)

@@ -159,7 +159,9 @@ async function cmdExtract(cardSelector, fields, maxItems) {
           company: pick(fieldMap && fieldMap.company),
           location: pick(fieldMap && fieldMap.location),
           summary: pick(fieldMap && fieldMap.summary),
-          url: (c.querySelector("a") && c.querySelector("a").href) || "",
+          // Prefer a child link; fall back to the card itself being one
+          // (e.g. <a class="result-card">…</a> — querySelector misses that).
+          url: (c.querySelector("a") && c.querySelector("a").href) || c.href || "",
           raw_text: (c.innerText || "").slice(0, 500),
         });
       }

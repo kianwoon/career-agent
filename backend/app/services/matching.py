@@ -63,6 +63,28 @@ def _tokenize(text: str) -> set[str]:
     return set(re.findall(r"[a-z0-9+#.]+", (text or "").lower()))
 
 
+# Raw source ids -> display-friendly platform labels. Unmatched ids fall
+# back to title-casing the id (e.g. "glassdoor - candidate" -> "Glassdoor - Candidate").
+_PLATFORM_LABELS = {
+    "linkedin": "LinkedIn",
+    "linkedin_people": "LinkedIn",
+    "mycareersfuture": "MyCareersFuture",
+    "fastjobs": "FastJobs",
+    "jobstreet": "JobStreet",
+}
+
+
+def _platform_display_name(source: str | None) -> str | None:
+    """Human-readable platform label for a raw source id."""
+    if not source:
+        return None
+    key = source.strip().lower()
+    for token, label in _PLATFORM_LABELS.items():
+        if token in key:
+            return label
+    return source.strip().title()
+
+
 def keyword_overlap(query_tokens: set[str], text_tokens: set[str]) -> float:
     """Fraction of query tokens found in text (0..1)."""
     if not query_tokens:
@@ -240,6 +262,7 @@ def score_candidate(candidate: dict[str, Any], job: dict[str, Any]) -> MatchResu
         subtitle=candidate.get("headline"),
         location=candidate.get("location"),
         source=candidate.get("source", "unknown"),
+        source_platform=_platform_display_name(candidate.get("source")),
         source_url=candidate.get("source_url"),
         match_score=score,
         match_reason=reason,

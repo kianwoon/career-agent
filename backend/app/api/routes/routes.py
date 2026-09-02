@@ -272,9 +272,16 @@ async def _run_task(
                         db.add(entity)
                         await db.flush()
                 else:
+                    # Identity = platform + URL + name. Flow-based sources
+                    # may share one landing URL across candidates, so URL
+                    # alone cannot be the dedup key here either.
                     entity = (
                         await db.execute(
-                            select(Candidate).where(Candidate.source_url == (r.source_url or ""))
+                            select(Candidate).where(
+                                Candidate.source == r.source,
+                                Candidate.source_url == (r.source_url or ""),
+                                Candidate.name == r.title,
+                            )
                         )
                     ).scalar_one_or_none()
                     if entity is None:
