@@ -35,6 +35,7 @@ from app.models.schemas import (
     TaskStatusResponse,
 )
 from app.services.browser import BrowserError, browser_service
+from app.services.matching import _platform_display_name
 
 router = APIRouter(
     prefix="/api/v1",
@@ -443,6 +444,7 @@ async def get_task_results(
                     subtitle=entity.headline,
                     location=entity.location,
                     source=entity.source,
+                    source_platform=_platform_display_name(entity.source),
                     source_url=entity.source_url,
                     match_score=ev.score,
                     match_reason=ev.reason,
@@ -464,6 +466,7 @@ async def get_task_results(
                     subtitle=entity.company,
                     location=entity.location,
                     source=entity.source,
+                    source_platform=_platform_display_name(entity.source),
                     source_url=entity.source_url,
                     match_score=ev.score,
                     match_reason=ev.reason,
