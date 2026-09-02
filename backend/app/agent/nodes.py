@@ -566,11 +566,23 @@ async def run_search(state: AgentState) -> AgentState:
                 if not queries:
                     plan_details.append(f"{platform}: no queries")
                     continue
-                result = await adapter(
-                    queries=queries,
-                    excludes=excludes or None,
-                    location=location,
-                )
+                # Flow-based adapters are generic — one function serving every
+                # custom source — so they take the platform name to resolve
+                # which source's flow to run. Built-in adapters are
+                # platform-specific and don't.
+                if adapter is _search_candidates_via_flow:
+                    result = await adapter(
+                        source_name=platform,
+                        queries=queries,
+                        excludes=excludes or None,
+                        location=location,
+                    )
+                else:
+                    result = await adapter(
+                        queries=queries,
+                        excludes=excludes or None,
+                        location=location,
+                    )
                 p_raw = result.get("raw_results", [])
                 raw.extend(p_raw)
                 if result.get("needs_human"):
