@@ -1530,7 +1530,10 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: space-between;
+  height: 22px;
   min-height: 22px;
+  padding-top: 0;
+  padding-bottom: 0;
   line-height: 1;
 }
 
