@@ -727,6 +727,130 @@ async function cmdLinkedinJobsSearch(params) {
   };
 }
 
+// --- manual filter recorder --------------------------------------------------
+// Records the user's clicks in the agent tab (filter panels, dropdowns, tabs)
+// so a flow can replay them after the keyword search. Two commands:
+//   start_record — injects a capture-phase click listener into the agent tab
+//   stop_record  — reads the collected events and tears the listener down
+// Events live on window.__caRecord in the page itself, so soft navigations
+// within an SPA (seek's filter panel re-renders in place) don't lose them.
+
+async function cmdStartRecord() {
+  // Ensure we have an agent tab (about:blank is fine — the user will navigate
+  // it or it's already on the site from a previous discover).
+  await execOnTab(() => {
+    if (window.__caRecord) return { already: true };
+    window.__caRecord = { events: [], capture: null };
+    const state = window.__caRecord;
+
+    // Build a CSS selector for a clicked element: prefer unique id, then
+    // data-testid/aria-label, then a short tag+class path (max 4 levels).
+    function buildSelector(el) {
+      if (!(el instanceof Element)) return null;
+      if (el.id && document.querySelectorAll(`#${CSS.escape(el.id)}`).length === 1) {
+        return `#${CSS.escape(el.id)}`;
+      }
+      const dt = el.getAttribute("data-testid") || el.getAttribute("data-test");
+      if (dt && document.querySelectorAll(`[data-testid="${dt}"]`).length === 1) {
+        return `[data-testid="${dt}"]`;
+      }
+      const aria = el.getAttribute("aria-label");
+      if (aria && document.querySelectorAll(`[aria-label="${aria}"]`).length === 1) {
+        return `[aria-label="${aria}"]`;
+      }
+      // name+type for form controls
+      if (el.name && document.getElementsByName(el.name).length === 1) {
+        return `${el.tagName.toLowerCase()}[name="${el.name}"]`;
+      }
+      const parts = [];
+      let cur = el;
+      let depth = 0;
+      while (cur && cur instanceof Element && depth < 4) {
+        let part = cur.tagName.toLowerCase();
+        if (cur.id && document.querySelectorAll(`#${CSS.escape(cur.id)}`).length === 1) {
+          parts.unshift(`#${CSS.escape(cur.id)}`);
+          break;
+        }
+        if (cur.className && typeof cur.className === "string" && cur.className.trim()) {
+          const cls = cur.className.trim().split(/\s+/).slice(0, 2);
+          const scoped = cls.map((c) => `.${CSS.escape(c)}`).join("");
+          part += scoped;
+        }
+        // nth-of-type disambiguation among siblings
+        const parent = cur.parentElement;
+        if (parent) {
+          const sameTag = Array.from(parent.children).filter((c) => c.tagName === cur.tagName);
+          if (sameTag.length > 1) {
+            part += `:nth-of-type(${sameTag.indexOf(cur) + 1})`;
+          }
+        }
+        parts.unshift(part);
+        cur = cur.parentElement;
+        depth += 1;
+      }
+      return parts.join(" > ");
+    }
+
+    const capture = (ev) => {
+      try {
+        // Only left clicks on real elements; ignore the recorder's own UI.
+        if (ev.button !== 0) return;
+        const el = ev.target;
+        if (!(el instanceof Element)) return;
+        if (el.closest("[data-ca-record-ignore]")) return;
+        const label = (
+          el.getAttribute("aria-label") ||
+          el.getAttribute("title") ||
+          (el.textContent || "").trim().slice(0, 60) ||
+          el.tagName.toLowerCase()
+        );
+        state.events.push({
+          action: "click",
+          selector: buildSelector(el),
+          text: label,
+          ts: Date.now(),
+        });
+        // Visual feedback flash so the user sees what's captured.
+        const prev = el.style.outline;
+        el.style.outline = "2px solid #2e9e5b";
+        setTimeout(() => {
+          el.style.outline = prev;
+        }, 400);
+      } catch {
+        /* never let the recorder break the page */
+      }
+    };
+    state.capture = capture;
+    // capture phase + pointerdown so dropdown option handlers (which may
+    // unmount the element on click) still get recorded.
+    document.addEventListener("click", capture, true);
+    return { ok: true };
+  });
+  return { ok: true, recording: true };
+}
+
+async function cmdStopRecord() {
+  const events =
+    (await execOnTab(() => {
+      const state = window.__caRecord;
+      if (!state) return null;
+      const out = state.events.slice();
+      if (state.capture) document.removeEventListener("click", state.capture, true);
+      delete window.__caRecord;
+      return out;
+    })) || [];
+  // Drop events with no usable selector; collapse rapid duplicate clicks
+  // (double-click on the same target records twice).
+  const cleaned = [];
+  for (const e of events) {
+    if (!e.selector) continue;
+    const last = cleaned[cleaned.length - 1];
+    if (last && last.selector === e.selector && e.ts - last.ts < 400) continue;
+    cleaned.push({ action: "click", selector: e.selector, text: e.text });
+  }
+  return { ok: true, events: cleaned, count: cleaned.length };
+}
+
 // --- dispatch -------------------------------------------------------------
 
 async function executeCommand(cmd) {
@@ -740,6 +864,8 @@ async function executeCommand(cmd) {
     case "run_flow": return cmdRunFlow(params.baseUrl, params.query, params.steps);
     case "discover_flow": return cmdDiscoverFlow(params.baseUrl, params.query, params.flowType);
     case "get_cookies": return cmdGetCookies(params.url);
+    case "start_record": return cmdStartRecord();
+    case "stop_record": return cmdStopRecord();
     case "linkedin_people_plan": return cmdLinkedinPeoplePlan(params);
     case "linkedin_people_enrich": return cmdLinkedinPeopleEnrich(params);
     case "linkedin_jobs_search": return cmdLinkedinJobsSearch(params);

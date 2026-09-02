@@ -109,6 +109,23 @@ export async function agentRecord(
   });
 }
 
+/** Start recording the user's filter clicks in the agent tab. */
+export async function agentRecordFiltersStart(sourceId: string): Promise<void> {
+  const base = await resolveApiBase();
+  await postJson(`${base}/api/v1/sources/${sourceId}/agent_record/start`, {});
+}
+
+/** Stop recording and merge the captured filter clicks into the flow. */
+export async function agentRecordFiltersStop(
+  sourceId: string,
+  flowType: "find_jobs" | "find_candidates"
+): Promise<void> {
+  const base = await resolveApiBase();
+  await postJson(`${base}/api/v1/sources/${sourceId}/agent_record/stop`, {
+    flow_type: flowType,
+  });
+}
+
 async function putJson<T>(url: string, body: unknown): Promise<T> {
   // Must attach the API key like postJson/getJson — without it the backend
   // 401s and session capture silently fails ("stuck" login flow).

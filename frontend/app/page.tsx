@@ -14,6 +14,8 @@ import {
   agentLogin,
   agentSaveSession,
   agentRecord,
+  agentRecordFiltersStart,
+  agentRecordFiltersStop,
   createSource,
   deleteSource,
   updateSourceEnabled,
@@ -152,6 +154,8 @@ export default function Home() {
   // the search runs each selected platform and merges the results. An empty
   // selection is allowed — the backend defaults to LinkedIn.
   const [planPlatforms, setPlanPlatforms] = useState<string[]>(["linkedin"]);
+  // Manual filter recording in progress: "<sourceId>:<flowType>" or null.
+  const [recordingFilters, setRecordingFilters] = useState<string | null>(null);
   const togglePlatform = (p: string) =>
     setPlanPlatforms((prev) =>
       prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]
@@ -588,6 +592,33 @@ export default function Home() {
       );
     } finally {
       setWizardBusy(null);
+    }
+  }
+
+  /** Manual filter recording: capture the user's filter-panel clicks and
+   * merge them into the flow so every search replays those filters. */
+  async function handleRecordFilters(source: SourceView, flowType: "find_jobs" | "find_candidates", phase: "start" | "stop") {
+    if (!agentConnected) return;
+    setWizardBusy(`${source.id}:filters:${phase}`);
+    try {
+      if (phase === "start") {
+        await agentRecordFiltersStart(source.id);
+        setRecordingFilters(`${source.id}:${flowType}`);
+        setTimeline((prev) =>
+          addEvent(prev, "action", `Recording filters for ${source.name} — in the agent tab, run a search, click the filter options you want, then press "Done recording filters" here.`)
+        );
+      } else {
+        await agentRecordFiltersStop(source.id, flowType);
+        setTimeline((prev) => addEvent(prev, "success", `Filters saved for ${source.name} — they'll be applied on every ${flowType === "find_jobs" ? "job" : "candidate"} search.`));
+        await reloadSources();
+      }
+    } catch (e) {
+      setTimeline((prev) =>
+        addEvent(prev, "warn", `Filter recording failed: ${e instanceof Error ? e.message : e}`)
+      );
+    } finally {
+      setWizardBusy(null);
+      if (phase === "stop") setRecordingFilters(null);
     }
   }
 
@@ -1232,6 +1263,31 @@ export default function Home() {
                             >
                               {s.flows.find_candidates === "active" ? "Re-record candidates" : "Record candidates"}
                             </button>
+                            {recordingFilters === `${s.id}:find_jobs` ? (
+                              <button
+                                className="btn small primary"
+                                disabled={!!wizardBusy}
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  handleRecordFilters(s, "find_jobs", "stop");
+                                }}
+                                title="Save the filter clicks you just made into the flow"
+                              >
+                                ✓ Done recording filters
+                              </button>
+                            ) : (
+                              <button
+                                className="btn small"
+                                disabled={!!wizardBusy || isRunning || !s.flows.find_jobs}
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  handleRecordFilters(s, "find_jobs", "start");
+                                }}
+                                title="Record filter-panel clicks (Industry, Salary, Work Type…) and apply them on every job search"
+                              >
+                                Record filters
+                              </button>
+                            )}
                           </>
                         ) : (
                           <>

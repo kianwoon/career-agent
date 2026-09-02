@@ -356,6 +356,111 @@ async def agent_session_store(
     return _source_view(source, list(flows))
 
 
+@router.post("/{source_id}/agent_record/start")
+async def agent_record_manual_start(
+    source_id: str, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """Start recording the user's filter clicks in the agent tab.
+
+    The user does the keyword search (or it's already on screen), then clicks
+    the filter-panel options they want (Industry, Salary, Work Type…). Every
+    click is captured in the page; /agent_record/stop collects them and merges
+    them into the flow after the search steps.
+    """
+    await _get_source(source_id, db)  # 404 if unknown source
+    from app.services.agent_relay import agent_registry
+
+    try:
+        await agent_registry.dispatch("start_record", {}, timeout_s=30)
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc))
+    return {"ok": True, "recording": True}
+
+
+@router.post("/{source_id}/agent_record/stop", response_model=SourceFlowView)
+async def agent_record_manual_stop(
+    source_id: str,
+    req: AgentRecordRequest,
+    db: AsyncSession = Depends(get_db),
+) -> SourceFlowView:
+    """Stop recording, merge captured clicks into the flow, save it.
+
+    Merge order: [search steps …] + [recorded filter clicks] + [extract card].
+    The search prefix is reused from the existing flow when present (keyword
+    fill + Enter + wait); otherwise a minimal navigate is used.
+    """
+    source = await _get_source(source_id, db)
+    if req.flow_type not in FLOW_TYPES:
+        raise HTTPException(400, f"flow_type must be one of {FLOW_TYPES}")
+
+    from app.services.agent_relay import agent_registry
+
+    try:
+        data = await agent_registry.dispatch("stop_record", {}, timeout_s=30)
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc))
+    clicks = (data or {}).get("events", [])
+    if not clicks:
+        raise HTTPException(
+            422, "No clicks were recorded — click some filter options, then press Stop"
+        )
+
+    # Prefix: reuse the existing flow's search steps up to (and including)
+    # the last non-extract step, so keyword + submit + waits replay as before.
+    existing = (
+        await db.execute(
+            select(SourceFlow).where(
+                SourceFlow.source_id == source.id,
+                SourceFlow.flow_type == req.flow_type,
+            )
+        )
+    ).scalar_one_or_none()
+    prefix: list[dict[str, Any]] = []
+    if existing and existing.steps:
+        for step in existing.steps:
+            if "card" in step or step.get("action") == "extract":
+                break
+            prefix.append(step)
+    if not prefix:
+        prefix = [
+            {"action": "navigate", "url": source.base_url},
+            {"action": "wait", "seconds": 3},
+        ]
+
+    # Suffix: the extract step from the existing flow, if any.
+    suffix: list[dict[str, Any]] = []
+    if existing and existing.steps:
+        for step in existing.steps:
+            if "card" in step or step.get("action") == "extract":
+                suffix = [step]
+                break
+    if not suffix:
+        raise HTTPException(
+            502, "No result-card step in the existing flow — press Record jobs first"
+        )
+
+    steps = prefix + clicks + suffix
+
+    if existing:
+        existing.steps = steps
+        existing.status = "active"
+        existing.last_verified_at = datetime.utcnow()
+        flow = existing
+    else:
+        flow = SourceFlow(source_id=source.id, flow_type=req.flow_type, steps=steps)
+        db.add(flow)
+    await db.commit()
+    await db.refresh(flow)
+    return SourceFlowView(
+        id=flow.id,
+        source_id=flow.source_id,
+        flow_type=flow.flow_type,
+        steps=flow.steps,
+        status=flow.status,
+        created_at=flow.created_at,
+    )
+
+
 @router.post("/{source_id}/agent_record", response_model=SourceFlowView)
 async def agent_record(
     source_id: str,
