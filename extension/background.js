@@ -804,9 +804,45 @@ async function loop() {
   }
 }
 
+// Guard against multiple concurrent loops (alarm + startup + install can
+// each kick one): only one while-loop runs the poll cycle at a time.
+let looping = false;
+async function loopGuarded() {
+  if (looping) return;
+  looping = true;
+  try {
+    await loop();
+  } finally {
+    looping = false;
+  }
+}
+
+// Popup "Save & connect" restarts the loop so a changed apiBase applies now
+// instead of waiting for the next alarm wake.
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg && msg.type === "restart-loop") {
+    looping = false; // allow a fresh loop with the new config
+    loopGuarded();
+  }
+});
+
 // A persistent while-loop in the service worker keeps it alive while active,
-// and every fetch wakes it if suspended. Also re-kick on browser events so a
-// suspended worker resumes promptly.
-chrome.runtime.onStartup.addListener(loop);
-chrome.runtime.onInstalled.addListener(loop);
-loop();
+// and every fetch wakes it if suspended. Chrome suspends idle MV3 workers
+// after ~30s regardless of pending work, killing the loop — so a
+// chrome.alarms heartbeat (minimum period 30s, but reliable) re-kicks the
+// loop whenever the worker is woken. Every fetch in pollOnce() itself wakes
+// the worker too when a command arrives mid-suspension isn't possible; the
+// alarm bounds the worst-case reconnect latency to ~30s.
+const HEARTBEAT_ALARM = "career-agent-heartbeat";
+
+chrome.runtime.onStartup.addListener(loopGuarded);
+chrome.runtime.onInstalled.addListener(loopGuarded);
+
+chrome.alarms.create(HEARTBEAT_ALARM, { periodInMinutes: 0.5 });
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === HEARTBEAT_ALARM) {
+    loopGuarded();
+  }
+});
+
+loopGuarded();

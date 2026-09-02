@@ -25,6 +25,11 @@ logger = logging.getLogger(__name__)
 
 COMMAND_TIMEOUT_S = 180.0
 
+# MV3 Chrome can only fire alarms every >=30s, so a suspended worker that
+# wakes on its alarm polls at best every ~30s. 40s covers that cadence with
+# headroom while still expiring a genuinely-closed browser within a minute.
+CONNECTED_WINDOW_S = 40.0
+
 
 @dataclass
 class Command:
@@ -50,8 +55,8 @@ class AgentRegistry:
 
     @property
     def connected(self) -> bool:
-        """The agent is 'connected' if it polled recently (within 15s)."""
-        return self.last_poll_ts is not None and (time.time() - self.last_poll_ts) < 15
+        """The agent is 'connected' if it polled recently (within 40s)."""
+        return self.last_poll_ts is not None and (time.time() - self.last_poll_ts) < CONNECTED_WINDOW_S
 
     async def wait_for_agent(self, timeout_s: float = 20.0) -> None:
         deadline = time.time() + timeout_s
