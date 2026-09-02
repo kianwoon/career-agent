@@ -1521,6 +1521,15 @@ body {
   white-space: nowrap;
 }
 
+/* Flow pills occupy the full row so all three pills line up evenly,
+   regardless of whether the × remove button is present. */
+.source-card-status .status-pill {
+  flex: 1 1 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
 .status-pill.ok {
   color: var(--green, #34d399);
   border-color: color-mix(in srgb, var(--green, #34d399) 35%, transparent);
