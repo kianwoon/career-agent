@@ -50,6 +50,13 @@ class AgentRegistry:
         self.pending: list[Command] = []
         self._seen_ids: set[str] = set()
         self.last_poll_ts: float | None = None  # liveness signal for /status
+        # All commands share ONE browser tab, so concurrent dispatches
+        # (e.g. LinkedIn plan + jobstreet flow in asyncio.gather) execute
+        # back-to-back in the tab while each caller's timeout keeps ticking
+        # — queued callers time out even though their command never ran.
+        # Serialize dispatch+await so timeouts measure execution, not queue
+        # wait.
+        self._exec_lock = asyncio.Lock()
 
     # -- API-side dispatch --------------------------------------------------
 
@@ -73,15 +80,16 @@ class AgentRegistry:
     ) -> Any:
         """Enqueue a command and await the extension's result."""
         await self.wait_for_agent()
-        cmd = Command(id=f"cmd-{uuid.uuid4().hex[:12]}", action=action, params=params)
-        self.pending.append(cmd)
-        try:
-            return await asyncio.wait_for(cmd.future, timeout=timeout_s)
-        except TimeoutError:
-            self.pending = [c for c in self.pending if c.id != cmd.id]
-            raise RuntimeError(
-                f"Agent command '{action}' timed out after {timeout_s:.0f}s (is the browser open?)"
-            )
+        async with self._exec_lock:
+            cmd = Command(id=f"cmd-{uuid.uuid4().hex[:12]}", action=action, params=params)
+            self.pending.append(cmd)
+            try:
+                return await asyncio.wait_for(cmd.future, timeout=timeout_s)
+            except TimeoutError:
+                self.pending = [c for c in self.pending if c.id != cmd.id]
+                raise RuntimeError(
+                    f"Agent command '{action}' timed out after {timeout_s:.0f}s (is the browser open?)"
+                )
 
     # -- extension-side poll/result -----------------------------------------
 
