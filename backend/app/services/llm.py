@@ -179,7 +179,7 @@ class LLMService:
                 {
                     "id": cand.get("id"),
                     "name": cand.get("name"),
-                    "headline": cand.get("headline", "")[:200],
+                    "headline": (cand.get("headline") or "")[:200],
                     "location": cand.get("location"),
                     "skills": cand.get("skills", [])[:15],
                     "summary_excerpt": (cand.get("summary") or "")[:400],
