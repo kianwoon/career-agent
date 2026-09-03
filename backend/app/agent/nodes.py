@@ -38,7 +38,7 @@ def _candidate_adapters() -> dict[str, Any]:
 
 def _normalize_flow_candidate(
     r: dict[str, Any], source_name: str, idx: int, base_url: str | None = None
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     """Map one raw flow-extracted row to the canonical candidate schema.
 
     Extension/Playwright extraction returns {title, company, location,
@@ -56,6 +56,22 @@ def _normalize_flow_candidate(
     raw_text = str(r.get("raw_text") or "")
     lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
     name = str(r.get("title") or "").strip() or (lines[0] if lines else "")
+    # Page-chrome junk guard: when a recorded card selector drifts (seek
+    # rotates obfuscated classes), extraction can return the whole app root
+    # and the "name" becomes the page's first text line ("Skip to
+    # content"). Drop obvious chrome instead of ranking it as a candidate.
+    chrome_markers = (
+        "skip to content",
+        "sign in",
+        "log in",
+        "accept all",
+        "privacy policy",
+        "toggle menu",
+    )
+    if name.lower().rstrip("…") in chrome_markers or (
+        not str(r.get("title") or "").strip() and len(raw_text) > 400
+    ):
+        return None
     headline = (
         str(r.get("summary") or "").strip()
         or str(r.get("company") or "").strip()
@@ -200,8 +216,9 @@ async def _search_candidates_via_flow(
 
     results = filter_excluded_results(results or [], excludes or None)
     results = [
-        _normalize_flow_candidate(r, source.name, i, source.base_url)
+        normalized
         for i, r in enumerate(results)
+        if (normalized := _normalize_flow_candidate(r, source.name, i, source.base_url))
     ]
     return {
         "raw_results": results,
@@ -419,8 +436,13 @@ async def _search_custom_sources(
                     return
                 results = filter_excluded_results(results, plan_excludes or None)
                 results = [
-                    _normalize_flow_candidate(r, source.name, i, source.base_url)
+                    normalized
                     for i, r in enumerate(results)
+                    if (
+                        normalized := _normalize_flow_candidate(
+                            r, source.name, i, source.base_url
+                        )
+                    )
                 ]
                 raw.extend(results)
                 ok.append(f"{source.name}: {len(results)} (agent)")
@@ -454,8 +476,13 @@ async def _search_custom_sources(
             return
         results = filter_excluded_results(results, plan_excludes or None)
         results = [
-            _normalize_flow_candidate(r, source.name, i, source.base_url)
-        for i, r in enumerate(results)
+            normalized
+            for i, r in enumerate(results)
+            if (
+                normalized := _normalize_flow_candidate(
+                    r, source.name, i, source.base_url
+                )
+            )
         ]
         raw.extend(results)
         ok.append(f"{source.name}: {len(results)}")
