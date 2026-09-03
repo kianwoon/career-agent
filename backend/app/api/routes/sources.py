@@ -439,6 +439,49 @@ async def agent_record_manual_stop(
             502, "No result-card step in the existing flow — press Record jobs first"
         )
 
+    # Probe the stored extract against the LIVE results page: seek rotates
+    # obfuscated classes, so a stored card selector can silently rot to
+    # junk/zero rows. When it's dead, re-detect the card from the current
+    # page via the extension (find_result_card) instead of saving the same
+    # broken step again — re-record must be able to heal the selector.
+    extract_ok = False
+    try:
+        probe_url = source.base_url
+        probe_q = (req.query_hint or "qc").strip() or "qc"
+        await agent_registry.dispatch(
+            "run_flow",
+            {
+                "baseUrl": probe_url,
+                "query": probe_q,
+                "steps": prefix + suffix,
+            },
+            timeout_s=90,
+        )
+        rows = await agent_registry.dispatch(
+            "extract",
+            {"card": suffix[0].get("card", ""), "fields": suffix[0].get("fields", {}), "maxItems": 10},
+            timeout_s=30,
+        )
+        real = [
+            r for r in (rows or [])
+            if isinstance(r, dict)
+            and (r.get("title") or "").strip()
+            and len(r.get("raw_text") or "") > 60
+        ]
+        extract_ok = len(real) >= 2
+    except Exception:
+        extract_ok = False
+    if not extract_ok:
+        try:
+            found = await agent_registry.dispatch("find_result_card", {}, timeout_s=30)
+            if found and found.get("found") and found.get("card"):
+                suffix = [{
+                    "card": found["card"],
+                    "fields": {"title": "a"},
+                }]
+        except Exception:
+            pass  # keep the old suffix; better than failing the whole save
+
     steps = prefix + clicks + suffix
 
     if existing:

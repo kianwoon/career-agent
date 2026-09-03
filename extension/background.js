@@ -905,6 +905,63 @@ async function cmdStartRecord() {
   return { ok: true, recording: true };
 }
 
+// find_result_card — detect the repeating result-row container on the
+// CURRENT page so a rotten extract selector can be re-synthesized during
+// re-record (seek rotates obfuscated classes; a stored card selector dies
+// silently). Strategy: group elements by tag+first-class signature, find
+// the signature with the most siblings (3+) whose rows carry substantial
+// multi-line text and at least one link — that's the results list.
+async function cmdFindResultCard() {
+  return execOnTab(() => {
+    const groups = new Map();
+    for (const el of document.querySelectorAll("body *")) {
+      if (el.closest("[data-ca-record-ignore]")) continue;
+      const sig =
+        el.tagName.toLowerCase() +
+        (typeof el.className === "string" && el.className.trim()
+          ? "." + el.className.trim().split(/\s+/).slice(0, 2).join(".")
+          : "");
+      let g = groups.get(sig);
+      if (!g) {
+        g = [];
+        groups.set(sig, g);
+      }
+      g.push(el);
+    }
+    let best = null;
+    for (const [sig, els] of groups) {
+      if (els.length < 3 || els.length > 60) continue;
+      let good = 0;
+      for (const el of els) {
+        const text = (el.innerText || "").trim();
+        if (text.length < 80 || !text.includes("\n")) continue;
+        if (!el.querySelector("a[href]")) continue;
+        good += 1;
+      }
+      if (good < 3 || good < els.length * 0.5) continue;
+      if (!best || good > best.good) best = { sig, good, sample: els[0] };
+    }
+    if (!best) return { found: false };
+    // Build a selector for the sample row: parent-id/#app prefix + signature.
+    const parent = best.sample.parentElement;
+    let prefix = "";
+    if (parent) {
+      let cur = parent;
+      const chain = [];
+      while (cur && cur instanceof Element && chain.length < 3) {
+        if (cur.id && document.querySelectorAll(`#${CSS.escape(cur.id)}`).length === 1) {
+          chain.unshift(`#${CSS.escape(cur.id)}`);
+          break;
+        }
+        chain.unshift(cur.tagName.toLowerCase());
+        cur = cur.parentElement;
+      }
+      prefix = chain.length > 1 ? chain.join(" > ") + " > " : "";
+    }
+    return { found: true, card: prefix + best.sig, count: best.good };
+  });
+}
+
 async function cmdStopRecord() {
   const events =
     (await execOnTab(() => {
@@ -942,6 +999,7 @@ async function executeCommand(cmd) {
     case "get_cookies": return cmdGetCookies(params.url);
     case "start_record": return cmdStartRecord();
     case "stop_record": return cmdStopRecord();
+    case "find_result_card": return cmdFindResultCard();
     case "linkedin_people_plan": return cmdLinkedinPeoplePlan(params);
     case "linkedin_people_enrich": return cmdLinkedinPeopleEnrich(params);
     case "linkedin_jobs_search": return cmdLinkedinJobsSearch(params);

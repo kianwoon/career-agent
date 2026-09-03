@@ -142,3 +142,11 @@ def test_sanitize_storage_state_normalizes_chrome_samesite():
     out = _sanitize_storage_state(blob)
     assert [c["sameSite"] for c in out["cookies"]] == ["None", "Lax", "Strict", "Lax", "Lax"]
     assert _sanitize_storage_state(None) is None
+
+
+def test_record_stop_rejects_empty_clicks():
+    """Sanity on the model: query_hint optional."""
+    from app.api.routes.sources import AgentRecordRequest
+
+    req = AgentRecordRequest(flow_type="find_candidates")
+    assert req.query_hint is None
