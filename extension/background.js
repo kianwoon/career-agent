@@ -181,7 +181,13 @@ async function cmdGetCookies(url) {
     expires: c.expirationDate || -1,
     httpOnly: c.httpOnly,
     secure: c.secure,
-    sameSite: c.sameSite === "unspecified" ? "Lax" : c.sameSite,
+    // Playwright only accepts Strict|Lax|None. Chrome's cookies API returns
+    // "unspecified" | "lax" | "strict" | "no_restriction" — normalize all of them.
+    sameSite: c.sameSite === "no_restriction" || c.sameSite === "none"
+      ? "None"
+      : c.sameSite === "strict"
+        ? "Strict"
+        : "Lax", // covers "lax" and "unspecified"
   }));
 }
 

@@ -643,6 +643,35 @@ async def _looks_logged_out(page: Any, base_domain: str) -> str | None:
     return None
 
 
+def _sanitize_storage_state(storage_state_encrypted: str | None) -> dict[str, Any] | None:
+    """Decrypt a storage_state blob and make it Playwright-safe.
+
+    Cookies captured by the extension may carry Chrome-style sameSite values
+    ("no_restriction", "lax", "strict", "unspecified"); Playwright's
+    new_context() only accepts Strict|Lax|None and rejects the context
+    otherwise — which used to crash the whole candidate search. Normalize
+    here so already-stored blobs are repaired at load time.
+    """
+    if not storage_state_encrypted:
+        return None
+    try:
+        state = json.loads(decrypt_session_state(storage_state_encrypted))
+    except Exception as exc:
+        logger.warning("Could not decrypt source session state: %s", exc)
+        return None
+    _VALID_SAMESITE = {"Strict", "Lax", "None"}
+    for cookie in state.get("cookies") or []:
+        ss = cookie.get("sameSite")
+        if ss not in _VALID_SAMESITE:
+            cookie["sameSite"] = {
+                "no_restriction": "None",
+                "none": "None",
+                "strict": "Strict",
+                "lax": "Lax",
+            }.get(ss if isinstance(ss, str) else "", "Lax")
+    return state
+
+
 async def execute_flow(
     base_url: str,
     steps: list[dict[str, Any]],
@@ -656,12 +685,7 @@ async def execute_flow(
     If the site bounces us to a login page (expired cookies), the reason
     says so explicitly so the UI can prompt a re-login.
     """
-    state = None
-    if storage_state_encrypted:
-        try:
-            state = json.loads(decrypt_session_state(storage_state_encrypted))
-        except Exception as exc:
-            logger.warning("Could not decrypt source session state: %s", exc)
+    state = _sanitize_storage_state(storage_state_encrypted)
 
     base_domain = domain_of(base_url)
     pw = await async_playwright().start()

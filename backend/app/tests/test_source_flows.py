@@ -119,3 +119,26 @@ def test_templatize_only_first_fill_becomes_query():
     assert fills[0].get("param") is None
     assert fills[0]["value"] == "Singapore"
     assert fills[1].get("param") == "query"
+
+
+def test_sanitize_storage_state_normalizes_chrome_samesite():
+    """Chrome cookie sameSite values must be mapped to Playwright's
+    Strict|Lax|None — a bad value used to crash new_context() and pause
+    the whole candidate search with a misleading 'session expired'."""
+    from app.services.encryption import encrypt_session_state
+    from app.services.source_flows import _sanitize_storage_state
+
+    bad = {
+        "cookies": [
+            {"name": "a", "sameSite": "no_restriction"},
+            {"name": "b", "sameSite": "lax"},
+            {"name": "c", "sameSite": "strict"},
+            {"name": "d", "sameSite": "unspecified"},
+            {"name": "e"},  # missing sameSite
+        ],
+        "origins": [],
+    }
+    blob = encrypt_session_state(__import__("json").dumps(bad))
+    out = _sanitize_storage_state(blob)
+    assert [c["sameSite"] for c in out["cookies"]] == ["None", "Lax", "Strict", "Lax", "Lax"]
+    assert _sanitize_storage_state(None) is None
