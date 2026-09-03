@@ -70,12 +70,18 @@ async def start_candidate_search(
     queries = req.plan_queries()
     if not queries:
         raise HTTPException(status_code=422, detail="Provide `queries` (list) or `query` (string)")
-    platforms = req.plan_platforms() or ["LinkedIn"]
+    # Default = every usable candidate platform: the built-in LinkedIn
+    # adapter PLUS all enabled sources with an active find_candidates flow
+    # (e.g. "jobstreet - candidate"). Callers opting out name platforms
+    # explicitly. This makes the documented "search all candidate sources"
+    # behavior the default instead of requiring every caller to enumerate
+    # platform names.
     # Valid platforms = built-in adapters + enabled sources with an active
     # find_candidates flow (any such source can act as a platform).
     from app.agent.nodes import _flow_platforms
 
     flow_platforms = await _flow_platforms()
+    platforms = req.plan_platforms() or ["LinkedIn", *sorted(flow_platforms)]
     unknown = [
         p for p in platforms
         if p.lower() not in _SUPPORTED_CANDIDATE_PLATFORMS
