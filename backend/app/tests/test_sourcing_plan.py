@@ -403,3 +403,22 @@ def test_relevance_gate_single_group_plan_requires_group_match():
     kept, dropped = _gate_relaxed_rows(rows, queries)
     assert dropped == 1
     assert kept[0]["source_url"] == "u1"
+
+
+def test_broad_variants_strip_quotes_and_and_chains():
+    from app.services.linkedin_people import _broad_variants
+
+    qs = [
+        '("QC technician" OR "quality control") AND (microarray OR GeneChip)',
+        'QA/QC OR "batch record review"',
+        "Cytoscan",
+    ]
+    out = _broad_variants(qs)
+    assert out == [
+        "QC technician OR quality control",
+        "QA/QC OR batch record review",
+        "Cytoscan",
+    ]
+    # No OR-group anywhere -> single bare term preserved
+    assert _broad_variants(["plain query"]) == ["plain query"]
+    assert _broad_variants([]) == []

@@ -166,6 +166,16 @@ async def _search_candidates_via_flow(
         )
         if result.get("needs_human") or not result.get("results"):
             reason = result.get("human_reason", "no results")
+            # Genuine session expiry — flag the flow so setup shows "Re-login"
+            # (parity with _run_one's broken-flow handling).
+            if result.get("needs_human") and (
+                "expired" in reason.lower() or "login" in reason.lower()
+            ):
+                async with async_session() as db2:
+                    db_flow = await db2.get(SourceFlow, flow.id)
+                    if db_flow:
+                        db_flow.status = "broken"
+                        await db2.commit()
             return {
                 "raw_results": [],
                 "needs_human": bool(result.get("needs_human")),

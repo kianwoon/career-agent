@@ -123,6 +123,32 @@ def _first_or_group(query: str) -> str | None:
     return None
 
 
+def _broad_variants(queries: list[str]) -> list[str]:
+    """Build maximally-broad LinkedIn queries from a strict plan.
+
+    Live evidence (2026-09-03): when ALL strict AND-chains return 0 and even
+    the first-OR-group relaxed pass yields only noise, quoted multi-word
+    phrases are the blocker — LinkedIn people search matches unquoted
+    multi-word text much more loosely. Strip quotes and AND-chains, keep
+    only the first OR-group's terms as a bare OR-list, deduped across the
+    plan. Returns [] when there's nothing meaningful to widen.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for q in queries:
+        group = _first_or_group(q)
+        if not group:
+            # No OR-group: fall back to the first AND-separated bare term.
+            group = q
+        broad = " OR ".join(
+            t.strip().strip('"') for t in group.split(" OR ") if t.strip()
+        ).strip()
+        if broad and broad.lower() not in seen:
+            seen.add(broad.lower())
+            out.append(broad)
+    return out
+
+
 def _or_groups(query: str) -> list[list[str]]:
     """Parse a boolean query into its top-level AND-separated term groups.
 
@@ -748,6 +774,30 @@ async def search_linkedin_people(
                 results["plan_detail"] = (
                     f"{results.get('plan_detail', '')} + relaxed (gate dropped {gate_dropped}) → {len(combined)} unique"
                 )
+                # Second widen pass: strict AND relaxed both produced nothing
+                # usable — retry with quote-free, AND-free broad variants.
+                if not combined:
+                    broad = _broad_variants(queries)
+                    if broad:
+                        extra2 = await agent_registry.dispatch(
+                            "linkedin_people_plan",
+                            {
+                                "queries": [_apply_excludes(g, excludes) for g in broad],
+                                "excludes": [],
+                                "location": location or "",
+                                "enrichBudget": ENRICH_BUDGET,
+                            },
+                            timeout_s=max(180, 90 * len(broad)),
+                        )
+                        broad_rows, broad_dropped = _gate_relaxed_rows(
+                            _filter_excluded(extra2.get("raw_results", []), excludes),
+                            queries,
+                        )
+                        combined2 = dedupe_candidates(results["raw_results"] + broad_rows)
+                        results["raw_results"] = combined2
+                        results["plan_detail"] = (
+                            f"{results.get('plan_detail', '')} + broad (gate dropped {broad_dropped}) → {len(combined2)} unique"
+                        )
         # Final safety net: if the merged set is still entirely unenriched
         # (no row has real profile sections), spend the enrich budget now so
         # 2nd-round assessment has data to score. Detect unenriched rows by
