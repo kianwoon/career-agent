@@ -524,11 +524,35 @@ async function cmdLinkedinPeoplePlan(params) {
     }
     const { candidates, error } = await cmdLinkedinPeopleExtract();
     let n = error ? 0 : candidates.length;
-    // A real logged-in results page essentially never renders zero profile
-    // cards for a normal keyword query — zero usually means a soft throttle
-    // (empty/redirect page) the wall guard can't see. Back off and retry
-    // once before giving up on this query.
+    // Extract can zero out on a perfectly good results page (live evidence:
+    // complex multi-OR queries land on layouts the container heuristic
+    // scores 0 while /in/ links exist — harvest found 2 on the SAME page).
+    // So when extract is empty, harvest THIS page immediately before
+    // navigating away, instead of assuming throttling.
+    let harvested = [];
     if (n === 0) {
+      harvested = await execOnTab(() => {
+        const out = [];
+        const seen = new Set();
+        for (const a of document.querySelectorAll("a[href*='/in/']")) {
+          const href = a.getAttribute("href") || "";
+          if (!href || seen.has(href)) continue;
+          const name =
+            (a.innerText || "").trim() ||
+            (a.getAttribute("aria-label") || "").trim() ||
+            (a.querySelector("img")?.getAttribute("alt") || "").trim();
+          const card = a.closest("li, div");
+          const text = (card?.innerText || "").trim();
+          if (!name && !text) continue;
+          seen.add(href);
+          out.push({ name, href, text: text.slice(0, 800) });
+        }
+        return out.slice(0, 25);
+      }) || [];
+    }
+    // Only when the page truly has NO profile links at all treat it as a
+    // soft throttle: back off, retry once.
+    if (n === 0 && harvested.length === 0) {
       await sleep(4000 + Math.floor(Math.random() * 3000));
       await cmdNavigate(linkedinSearchUrl("people", q));
       await sleep(2500);
@@ -539,11 +563,28 @@ async function cmdLinkedinPeoplePlan(params) {
         if (n > 0) candidates.push(...retry.candidates);
       }
     }
+    for (const f of harvested) {
+      let name = (f.name || "").trim().split("•")[0].trim();
+      if (!name) name = "LinkedIn Member";
+      candidates.push({
+        id: "li-people-ext-" + Math.abs([...(name + f.href)].reduce((a, c) => (a * 31 + c.charCodeAt(0)) | 0, 7)),
+        name,
+        headline: null,
+        location: null,
+        summary: (f.text || "").slice(0, 500),
+        current_role: null,
+        skills: [],
+        source: "linkedin_people",
+        source_url: f.href,
+        _hit_count: 1,
+      });
+    }
+    n = candidates.length;
     consecutiveZeroes = n === 0 ? consecutiveZeroes + 1 : 0;
     perQuery.push(`${q.slice(0, 30)}${q.length > 30 ? "…" : ""}: ${n}`);
     merged.push(...candidates);
-    // Several zero pages in a row = LinkedIn is throttling this tab. Stop
-    // burning the remaining queries and report honestly.
+    // Several truly-empty pages in a row = throttled. Stop burning the
+    // remaining queries; report honestly.
     if (consecutiveZeroes >= 2 && merged.length === 0) {
       blocker = "LinkedIn returned empty results pages repeatedly — likely throttling; wait a few minutes and re-run";
       break;
