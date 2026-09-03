@@ -63,9 +63,24 @@ def _normalize_flow_candidate(
     )
     source_url = str(r.get("url") or "").strip()
     if not source_url and base_url:
-        # Openable platform landing page (e.g. SEEK talent search) — the
-        # external system's user can search the candidate name there.
-        source_url = base_url
+        # SEEK talent search: cards carry no hrefs, and the bare base_url is
+        # a blank results page. The openable deep link is a profile SEARCH
+        # for the candidate's name (validated live by the user):
+        #   /talentsearch/search/profiles?...&uncoupledFreeText=<name>
+        if "seek.com" in base_url:
+            from urllib.parse import quote
+            source_url = (
+                "https://sg.employer.seek.com/talentsearch/search/profiles"
+                "?locationList=24553&nation=24553&pageNumber=1"
+                "&salaryNation=24553&salaryType=MONTHLY&searchId=112aa"
+                "&searchType=new_search&sortBy=relevance"
+                f"&uncoupledFreeText={quote(name or '')}"
+                "&willingToRelocate=false"
+            )
+        else:
+            # Generic platform landing page — the user opens it and
+            # searches the candidate name there.
+            source_url = base_url
     return {
         "id": r.get("id") or f"flow-{abs(hash((name, headline, idx)))}",
         "name": name or f"{source_name} candidate {idx + 1}",
