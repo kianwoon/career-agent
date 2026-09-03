@@ -58,6 +58,10 @@ _CERT_PATTERN = re.compile(
 # results found' page). 4 terms always works. So we cap the query-level
 # NOT at MAX_NOT_TERMS and enforce the tail via the backend post-filter.
 MAX_NOT_TERMS = 4
+# Combined query+NOT length beyond which LinkedIn people search serves an
+# empty results page (live evidence 2026-09-03: ~170-char complex base +
+# 40-char NOT clause → zero; each part alone fine). Conservative cap.
+MAX_QUERY_NOT_LEN = 140
 
 
 def _apply_excludes(query: str, excludes: list[str] | None) -> str:
@@ -75,7 +79,15 @@ def _apply_excludes(query: str, excludes: list[str] | None) -> str:
     quoted = " OR ".join(
         f'"{t}"' if " " in t else t for t in terms[:MAX_NOT_TERMS]
     )
-    return f"{query} NOT ({quoted})"
+    clause = f" NOT ({quoted})"
+    # Live evidence (2026-09-03): long multi-OR base queries + the NOT
+    # clause reliably make LinkedIn's people search serve an EMPTY page
+    # (zero /in/ links), while each part alone works. Cap the combined
+    # length — the backend post-filter (_filter_excluded) still enforces
+    # the full exclude list on results.
+    if len(query) + len(clause) > MAX_QUERY_NOT_LEN:
+        return query
+    return f"{query}{clause}"
 
 
 def _filter_excluded(

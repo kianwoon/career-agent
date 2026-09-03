@@ -422,3 +422,19 @@ def test_broad_variants_strip_quotes_and_and_chains():
     # No OR-group anywhere -> single bare term preserved
     assert _broad_variants(["plain query"]) == ["plain query"]
     assert _broad_variants([]) == []
+
+
+def test_apply_excludes_drops_not_clause_on_long_queries():
+    """Long multi-OR base + NOT(...) makes LinkedIn serve empty pages — the
+    clause must be skipped (backend post-filter still enforces excludes)."""
+    from app.services.linkedin_people import _apply_excludes
+
+    long_q = (
+        '("QC technician" OR "quality control technician" OR "QC analyst") '
+        'AND (microarray OR GeneChip OR "genomic assay")'
+    )
+    short_q = "QC technician"
+    ex = ["marketing", "professor", "postdoc"]
+    assert "NOT" not in _apply_excludes(long_q, ex)
+    assert "NOT (marketing" in _apply_excludes(short_q, ex)
+    assert _apply_excludes(short_q, None) == short_q
