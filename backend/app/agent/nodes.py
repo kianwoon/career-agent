@@ -67,9 +67,20 @@ def _normalize_flow_candidate(
         "accept all",
         "privacy policy",
         "toggle menu",
+        "your saved searches",
+        "saved searches will appear",
+        "filter by",
+        "matching candidates",
+        "hide names",
+        "sorted by",
+        "previous",
+        "next",
     )
-    if name.lower().rstrip("…") in chrome_markers or (
-        not str(r.get("title") or "").strip() and len(raw_text) > 400
+    lowered = name.lower()
+    if (
+        lowered.rstrip("…") in chrome_markers
+        or any(m in lowered for m in chrome_markers[6:])
+        or (not str(r.get("title") or "").strip() and len(raw_text) > 400)
     ):
         return None
     headline = (

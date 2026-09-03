@@ -216,7 +216,16 @@ async function cmdRunFlow(baseUrl, query, steps) {
       if (wall) {
         return { results: [], needs_human: true, error: "Session expired — the site is showing a login page" };
       }
-      results.push(...(await cmdExtract(step.card, step.fields || {}, 30)));
+      let rows = await cmdExtract(step.card, step.fields || {}, 30);
+      // Seek loads results asynchronously — the first extract can run while
+      // the page still shows the empty-state placeholder. Retry once after
+      // an extra beat before accepting 0 rows.
+      const realRows = (rs) => rs.filter((r) => (r.title || "").trim() || (r.raw_text || "").length > 60);
+      if (realRows(rows).length === 0) {
+        await sleep(5000);
+        rows = rows.concat(await cmdExtract(step.card, step.fields || {}, 30));
+      }
+      results.push(...rows);
     }
   }
   return { results };
