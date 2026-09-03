@@ -732,16 +732,28 @@ async def search_linkedin_people(
         # LinkedIn quirk: NOT clauses are capped at MAX_NOT_TERMS (5+ terms
         # return zero results), so the tail excludes are NOT in the query.
         # Enforce the FULL list here via post-filter on the returned rows.
-        data = await agent_registry.dispatch(
-            "linkedin_people_plan",
-            {
-                "queries": effective_queries,
-                "excludes": [],  # already folded into effective_queries
-                "location": location or "",
-                "enrichBudget": ENRICH_BUDGET,
-            },
-            timeout_s=max(180, 90 * len(effective_queries)),
-        )
+        try:
+            data = await agent_registry.dispatch(
+                "linkedin_people_plan",
+                {
+                    "queries": effective_queries,
+                    "excludes": [],  # already folded into effective_queries
+                    "location": location or "",
+                    "enrichBudget": ENRICH_BUDGET,
+                },
+                timeout_s=max(180, 90 * len(effective_queries)),
+            )
+        except Exception as exc:
+            # The extension dropped mid-plan (MV3 service worker sleep,
+            # websocket blip). Falling through to the CDP/Playwright
+            # fallback here burns minutes on a stale ngrok tunnel and
+            # crashes with an opaque Page.goto error — surface the real
+            # cause instead.
+            logger.warning("Agent linkedin_people_plan dispatch failed: %s", exc)
+            raise BrowserError(
+                "Extension agent went offline mid-search — re-open the app "
+                "so the agent reconnects, then re-run"
+            ) from exc
         raw_rows = _filter_excluded(data.get("raw_results", []), excludes)
         results = {
             "raw_results": raw_rows,
@@ -755,16 +767,20 @@ async def search_linkedin_people(
         # surfacing the pause.
         if results["needs_human"] and "throttl" in (results.get("human_reason") or "").lower():
             await asyncio.sleep(45)
-            retry = await agent_registry.dispatch(
-                "linkedin_people_plan",
-                {
-                    "queries": effective_queries,
-                    "excludes": [],
-                    "location": location or "",
-                    "enrichBudget": ENRICH_BUDGET,
-                },
-                timeout_s=max(180, 90 * len(effective_queries)),
-            )
+            try:
+                retry = await agent_registry.dispatch(
+                    "linkedin_people_plan",
+                    {
+                        "queries": effective_queries,
+                        "excludes": [],
+                        "location": location or "",
+                        "enrichBudget": ENRICH_BUDGET,
+                    },
+                    timeout_s=max(180, 90 * len(effective_queries)),
+                )
+            except Exception as exc:
+                logger.warning("Throttle-retry dispatch failed: %s", exc)
+                return results  # keep the original throttle pause
             retry_rows = _filter_excluded(retry.get("raw_results", []), excludes)
             if retry_rows:
                 results = {
@@ -875,6 +891,9 @@ async def search_linkedin_people(
     # One shared CDP connection for the whole plan: repeated browser-level
     # connect/disconnect cycles wedge Brave's DevTools endpoint; a single
     # held connection avoids it. Lazy: connects only if a query needs it.
+    logger.warning(
+        "Agent registry offline — falling back to CDP plan at %s", BRAVE_CDP_URL
+    )
     from app.services.linkedin import _connect_with_best_session
 
     plan_session = _PlanSession(_connect_with_best_session)
