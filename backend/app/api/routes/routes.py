@@ -81,7 +81,14 @@ async def start_candidate_search(
     from app.agent.nodes import _flow_platforms
 
     flow_platforms = await _flow_platforms()
-    platforms = req.plan_platforms() or ["LinkedIn", *sorted(flow_platforms)]
+    default_platforms = ["LinkedIn", *sorted(flow_platforms)]
+    platforms = req.plan_platforms() or default_platforms
+    # Legacy-default shape: callers that hardcoded the old default
+    # (["LinkedIn"] / platform:"LinkedIn") actually want every candidate
+    # source — widen it to the full set. Any other explicit list is
+    # respected as a deliberate narrowing.
+    if [p.lower() for p in platforms] == ["linkedin"]:
+        platforms = default_platforms
     unknown = [
         p for p in platforms
         if p.lower() not in _SUPPORTED_CANDIDATE_PLATFORMS
