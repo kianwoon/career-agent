@@ -96,6 +96,9 @@ async def agent_execute(req: FlowExecuteRequest) -> dict[str, Any]:
                     timeout_s=60,
                 )
                 results = data if isinstance(data, list) else []
+            elif action == "find_result_card":
+                data = await agent_registry.dispatch("find_result_card", {}, timeout_s=30)
+                results = [data] if isinstance(data, dict) else []
     except RuntimeError as exc:
         return {"results": [], "needs_human": False, "error": str(exc)}
 
