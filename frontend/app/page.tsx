@@ -244,9 +244,10 @@ export default function Home() {
         .then((p) => setAvailablePlatforms(p.platforms))
         .catch(() => {});
       // Sources refreshed after a re-login — clear the stale "Re-login
-      // required" banner unless some source still lacks a session it had
-      // before (the banner reappears if a search pauses again anyway).
-      if (srcs.every((s) => s.has_session)) {
+      // required" banner once every source that CAN hold a session does.
+      // FastJobs is guest-browsing (never has_session), so requiring all
+      // sources would pin the banner forever.
+      if (srcs.every((s) => s.has_session || s.name.toLowerCase().includes("fastjobs"))) {
         setReloginNeeded(null);
       }
     } catch {
