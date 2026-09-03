@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.errors import install_error_handlers
@@ -98,6 +99,19 @@ app.include_router(agent_router, prefix="/api/v1")
 app.include_router(agent_router, prefix="/v1")
 app.include_router(sources_router, prefix="/v1", dependencies=router.dependencies)
 app.include_router(router, prefix="/v1")
+# Koyeb strips the leading /api from documented URLs before they reach us:
+#   documented  /api/v1/search/candidates   → arrives as /v1/search/candidates
+#   deployed    /api/v1/api/v1/...          → arrives as /v1/api/v1/...
+# The main router carries an INTERNAL prefix="/api/v1", so neither spelling
+# matched /v1/search/candidates and every documented external call 404'd.
+# Rewrite stripped paths to the router's internal prefix instead of stacking
+# more duplicate mounts.
+@app.middleware("http")
+async def _restore_stripped_api_prefix(request: Request, call_next: Any) -> Any:
+    path = request.scope.get("path", "")
+    if path.startswith("/v1/") and not path.startswith("/v1/api/"):
+        request.scope["path"] = "/api/v1" + path[len("/v1"):]
+    return await call_next(request)
 
 
 @app.get("/")
