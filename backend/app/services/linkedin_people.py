@@ -12,6 +12,7 @@ Safety:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import random
@@ -736,6 +737,32 @@ async def search_linkedin_people(
             "human_reason": data.get("human_reason"),
             "plan_detail": data.get("plan_detail"),
         }
+        # Throttle (soft-empty pages) is transient — single-query probes run
+        # minutes later succeed against the same tab. When the plan aborts
+        # with a throttle blocker, cool down and re-dispatch ONCE before
+        # surfacing the pause.
+        if results["needs_human"] and "throttl" in (results.get("human_reason") or "").lower():
+            await asyncio.sleep(45)
+            retry = await agent_registry.dispatch(
+                "linkedin_people_plan",
+                {
+                    "queries": effective_queries,
+                    "excludes": [],
+                    "location": location or "",
+                    "enrichBudget": ENRICH_BUDGET,
+                },
+                timeout_s=max(180, 90 * len(effective_queries)),
+            )
+            retry_rows = _filter_excluded(retry.get("raw_results", []), excludes)
+            if retry_rows:
+                results = {
+                    "raw_results": retry_rows,
+                    "needs_human": False,
+                    "human_reason": None,
+                    "plan_detail": (
+                        f"{results.get('plan_detail', '')} + throttle-retry → {len(retry_rows)} unique"
+                    ),
+                }
         # Sparse strict plan: append relaxed OR-group variants in a second
         # pass. Pass 1 spends the enrich budget only on ITS rows; the relaxed
         # pass gets the full budget whenever pass 1 produced nothing (the
