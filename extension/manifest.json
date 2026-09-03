@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Career Agent Browser",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "Lets the Career Agent cloud run job/candidate searches in YOUR logged-in browser. No tunnels, no server browsers, no blocks.",
   "permissions": ["scripting", "tabs", "storage", "cookies", "alarms"],
   "host_permissions": ["http://localhost/*", "http://127.0.0.1/*", "https://career-agent-kianwoon-88223cd5.koyeb.app/*", "https://*/*", "http://*/*"],

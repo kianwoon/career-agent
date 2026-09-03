@@ -510,7 +510,10 @@ async function cmdLinkedinPeoplePlan(params) {
   let blocker = null;
   let consecutiveZeroes = 0;
   for (const q of queries) {
-    await sleep(1200 + Math.floor(Math.random() * 1500)); // polite pacing
+    // LinkedIn rate-limits rapid successive distinct people searches —
+    // live evidence: 1-query plans always succeed, 5-query plans at ~2s
+    // pacing reliably trip the soft throttle (empty pages). Pace 6-11s.
+    await sleep(6000 + Math.floor(Math.random() * 5000)); // polite pacing
     await cmdNavigate(linkedinSearchUrl("people", q));
     await sleep(1500);
     const wall = await linkedinWallGuard();
