@@ -508,6 +508,7 @@ async function cmdLinkedinPeoplePlan(params) {
   const merged = [];
   const perQuery = [];
   let blocker = null;
+  let consecutiveZeroes = 0;
   for (const q of queries) {
     await sleep(1200 + Math.floor(Math.random() * 1500)); // polite pacing
     await cmdNavigate(linkedinSearchUrl("people", q));
@@ -519,8 +520,31 @@ async function cmdLinkedinPeoplePlan(params) {
       continue;
     }
     const { candidates, error } = await cmdLinkedinPeopleExtract();
-    perQuery.push(`${q.slice(0, 30)}${q.length > 30 ? "…" : ""}: ${error ? 0 : candidates.length}`);
+    let n = error ? 0 : candidates.length;
+    // A real logged-in results page essentially never renders zero profile
+    // cards for a normal keyword query — zero usually means a soft throttle
+    // (empty/redirect page) the wall guard can't see. Back off and retry
+    // once before giving up on this query.
+    if (n === 0) {
+      await sleep(4000 + Math.floor(Math.random() * 3000));
+      await cmdNavigate(linkedinSearchUrl("people", q));
+      await sleep(2500);
+      const wall2 = await linkedinWallGuard();
+      if (!wall2) {
+        const retry = await cmdLinkedinPeopleExtract();
+        n = retry.error ? 0 : retry.candidates.length;
+        if (n > 0) candidates.push(...retry.candidates);
+      }
+    }
+    consecutiveZeroes = n === 0 ? consecutiveZeroes + 1 : 0;
+    perQuery.push(`${q.slice(0, 30)}${q.length > 30 ? "…" : ""}: ${n}`);
     merged.push(...candidates);
+    // Several zero pages in a row = LinkedIn is throttling this tab. Stop
+    // burning the remaining queries and report honestly.
+    if (consecutiveZeroes >= 2 && merged.length === 0) {
+      blocker = "LinkedIn returned empty results pages repeatedly — likely throttling; wait a few minutes and re-run";
+      break;
+    }
   }
   // Safety net: if every query parsed empty, harvest ALL /in/ links on the
   // LAST results page directly (name from link text / aria-label / img alt).
