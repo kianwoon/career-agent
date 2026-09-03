@@ -197,8 +197,18 @@ async def _search_candidates_via_flow(
                 }
             results = (data.get("results") if isinstance(data, dict) else data) or []
         except Exception as exc:
-            logger.warning("Agent run_flow failed for %s: %s — falling back to Playwright", source.name, exc)
-            results = None
+            # Do NOT fall back to server-side Playwright for flow sources:
+            # the stored cookie blob is stale by definition (the extension
+            # browser is the live session) and seek's rotated markup makes
+            # the fallback useless — it only produces misleading "session
+            # expired" pauses. Report the dispatch failure as a soft miss.
+            logger.warning("Agent run_flow failed for %s: %s", source.name, exc)
+            return {
+                "raw_results": [],
+                "needs_human": False,
+                "human_reason": None,
+                "plan_detail": f"{source.name}: agent dispatch failed ({str(exc)[:80]})",
+            }
 
     if results is None:
         result = await execute_flow(
@@ -700,6 +710,11 @@ async def run_search(state: AgentState) -> AgentState:
                     needs_human = True
                     if result.get("human_reason"):
                         human_reason = result["human_reason"]
+                # A blocked platform must not nuke rows other platforms
+                # produced: pause only when NOTHING was found anywhere.
+                if needs_human and raw:
+                    needs_human = False
+                    human_reason = None
                 plan_details.append(
                     result.get("plan_detail") or f"{platform}: {len(p_raw)} results"
                 )
