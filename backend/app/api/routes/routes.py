@@ -173,8 +173,12 @@ async def _start_task(
     await db.refresh(task)
 
     # Return immediately; run the agent in the background so the caller does
-    # not block. Poll GET /tasks/{id} for completion.
-    asyncio.create_task(_run_task(task.id, task_type, query, location, source_ids, plan))
+    # not block. Poll GET /tasks/{id} for completion. A watchdog fails the
+    # task after TASK_HARD_TIMEOUT_S so a hung browser/Playwright call can
+    # never leave a task "running" forever.
+    asyncio.create_task(
+        _run_task_with_watchdog(task.id, task_type, query, location, source_ids, plan)
+    )
     return TaskStatusResponse(
         task_id=task.id,
         type=task_type,
@@ -185,6 +189,50 @@ async def _start_task(
         completed_at=task.completed_at,
         error=task.error,
     )
+
+
+TASK_HARD_TIMEOUT_S = 720.0  # 12 min: full plan + throttle retry + enrichment
+
+
+async def _run_task_with_watchdog(
+    task_id: str,
+    task_type: SearchType,
+    query: str,
+    location: str | None,
+    source_ids: list[str] | None = None,
+    plan: dict | None = None,
+) -> None:
+    """Run _run_task with a hard deadline.
+
+    A hung Playwright/LLM call used to leave the task "running" forever with
+    no way to stop it. On deadline the task is failed client-visibly; the
+    underlying coroutine is cancelled (its DB writes are transactional per
+    step, so a cancel mid-run just means no results persisted).
+    """
+    try:
+        await asyncio.wait_for(
+            _run_task(task_id, task_type, query, location, source_ids, plan),
+            timeout=TASK_HARD_TIMEOUT_S,
+        )
+    except TimeoutError:
+        from app.db import async_session as _session_factory
+
+        async with _session_factory() as db:
+            task = await db.get(SearchTask, task_id)
+            if task is not None and task.status not in (
+                TaskStatus.completed.value,
+                TaskStatus.failed.value,
+                TaskStatus.paused.value,
+            ):
+                task.status = TaskStatus.failed.value
+                task.error = (
+                    "Search timed out after "
+                    f"{int(TASK_HARD_TIMEOUT_S / 60)} minutes — please retry"
+                )
+                task.completed_at = datetime.utcnow()
+                await db.commit()
+    except asyncio.CancelledError:
+        raise
 
 
 async def _run_task(
@@ -228,6 +276,11 @@ async def _run_task(
 
         try:
             result_state = await supervisor_graph.ainvoke(initial)
+            # A user cancel flipped the status while the pipeline ran —
+            # don't resurrect the task with results after the fact.
+            await db.refresh(task)
+            if task.status == TaskStatus.failed.value and task.error == "Cancelled by user":
+                return
             task.status = result_state.get("status", TaskStatus.completed).value
             task.workflow_state = "complete"
             if result_state.get("error"):
@@ -385,6 +438,36 @@ async def search_history(db: AsyncSession = Depends(get_db)) -> SearchHistoryRes
             )
         )
     return SearchHistoryResponse(items=items)
+
+
+@router.post("/tasks/{task_id}/cancel", response_model=TaskStatusResponse)
+async def cancel_task(task_id: str, db: AsyncSession = Depends(get_db)) -> TaskStatusResponse:
+    """Mark a running task as cancelled so the UI stops waiting on it.
+
+    The background coroutine cannot be reached from HTTP context reliably
+    (it may be blocked in a synchronous browser call); instead we flip the
+    status — the watchdog/normal completion path never overwrites a
+    terminal status, and the runner checks before persisting results.
+    """
+    task = await db.get(SearchTask, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.status in (TaskStatus.completed.value, TaskStatus.failed.value, TaskStatus.paused.value):
+        raise HTTPException(status_code=409, detail=f"Task already {task.status}")
+    task.status = TaskStatus.failed.value
+    task.error = "Cancelled by user"
+    task.completed_at = datetime.utcnow()
+    await db.commit()
+    return TaskStatusResponse(
+        task_id=task.id,
+        type=SearchType(task.type),
+        status=TaskStatus.failed,
+        workflow_state=task.workflow_state,
+        created_at=task.created_at,
+        started_at=task.started_at,
+        completed_at=task.completed_at,
+        error=task.error,
+    )
 
 
 @router.get("/tasks/{task_id}", response_model=TaskStatusResponse)
