@@ -150,6 +150,9 @@ async def test_people_plan_relaxed_second_pass(monkeypatch):
                     "location": "Singapore",
                     "source": "linkedin_people",
                     "source_url": f"https://www.linkedin.com/in/p{i}/",
+                    # Relaxed rows must pass the relevance gate: match both
+                    # plan OR-groups ('agency accounting' + 'insurance').
+                    "headline": f"agency accounting specialist {i}, insurance desk",
                     "_hit_count": 1,
                 }
                 for i in range(5)
@@ -210,6 +213,8 @@ async def test_unenriched_rows_get_enrichment_topup(monkeypatch):
                     "location": "Singapore",
                     "source": "linkedin_people",
                     "source_url": f"https://www.linkedin.com/in/p{i}/",
+                    # Relaxed rows must pass the relevance gate.
+                    "headline": f"agency accounting specialist {i}, insurance desk",
                     "summary": "card text only",
                     "_hit_count": 1,
                 }

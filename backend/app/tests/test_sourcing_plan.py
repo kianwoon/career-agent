@@ -236,8 +236,11 @@ async def test_search_linkedin_people_plan_orchestration(monkeypatch):
             return {"raw_results": [], "needs_human": False, "human_reason": None}
         return {
             "raw_results": [
-                {"source_url": "https://linkedin.com/in/a", "headline": "Intern Accountant"},
-                {"source_url": "https://linkedin.com/in/b", "headline": "Senior Exec"},
+                # Relaxed-pass rows must still satisfy the plan's group shape
+                # (gate drops rows matching no plan group): headline needs a
+                # term from >=2 groups, e.g. 'agency accounting' + 'insurance'.
+                {"source_url": "https://linkedin.com/in/a", "headline": "intern at an agency accounting firm, insurance desk"},
+                {"source_url": "https://linkedin.com/in/b", "headline": "Senior agency accounting exec, insurance"},
             ],
             "needs_human": False,
             "human_reason": None,
@@ -337,3 +340,66 @@ def test_excludes_cover_screenshot_terms():
     for term in terms[MAX_NOT_TERMS:]:
         expected = f'"{term}"' if " " in term else term
         assert expected not in built
+
+
+# ---------------------------------------------------------------------------
+# Relaxed-pass relevance gate
+# ---------------------------------------------------------------------------
+
+
+def test_or_groups_parses_and_shape():
+    from app.services.linkedin_people import _or_groups
+
+    groups = _or_groups('("QC technician" OR "QC analyst") AND (microarray OR GeneChip)')
+    assert groups == [["qc technician", "qc analyst"], ["microarray", "genechip"]]
+
+    # Bare AND terms become single-term groups.
+    assert _or_groups('"a" AND "b"') == [["a"], ["b"]]
+    # Single group, no AND.
+    assert _or_groups('("x" OR "y")') == [["x", "y"]]
+    assert _or_groups("") == []
+
+
+def test_relevance_gate_drops_single_group_noise():
+    """Live regression: relaxed pass returned a lawyer for a QC+microarray plan."""
+    from app.services.linkedin_people import _gate_relaxed_rows
+
+    queries = ['("QC technician" OR "quality control technician") AND (microarray OR GeneChip)']
+    rows = [
+        {   # matches group 1 only (QC in headline) but nothing from group 2 -> DROP
+            "source_url": "https://linkedin.com/in/lawyer",
+            "headline": "In-House Counsel | Technology & Privacy Law",
+        },
+        {   # matches both groups -> KEEP
+            "source_url": "https://linkedin.com/in/good",
+            "headline": "quality control technician, microarray assays at Genomics Co",
+        },
+        {   # 'Axiom' company-name collision only matches group 2 -> DROP
+            "source_url": "https://linkedin.com/in/axiom-dev",
+            "headline": "Developer at Axiom IT Solutions",
+        },
+    ]
+    kept, dropped = _gate_relaxed_rows(rows, queries)
+    assert dropped == 2
+    assert [r["source_url"] for r in kept] == ["https://linkedin.com/in/good"]
+
+
+def test_relevance_gate_keeps_all_without_parseable_groups():
+    from app.services.linkedin_people import _gate_relaxed_rows
+
+    rows = [{"source_url": "u", "headline": "anything"}]
+    kept, dropped = _gate_relaxed_rows(rows, [])
+    assert (kept, dropped) == (rows, 0)
+
+
+def test_relevance_gate_single_group_plan_requires_group_match():
+    from app.services.linkedin_people import _gate_relaxed_rows
+
+    queries = ['("kyc analyst" OR "onboarding analyst")']
+    rows = [
+        {"source_url": "u1", "headline": "KYC Analyst at DBS"},
+        {"source_url": "u2", "headline": "Software Engineer"},
+    ]
+    kept, dropped = _gate_relaxed_rows(rows, queries)
+    assert dropped == 1
+    assert kept[0]["source_url"] == "u1"

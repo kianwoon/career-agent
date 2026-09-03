@@ -123,6 +123,98 @@ def _first_or_group(query: str) -> str | None:
     return None
 
 
+def _or_groups(query: str) -> list[list[str]]:
+    """Parse a boolean query into its top-level AND-separated term groups.
+
+    '("QC tech" OR "QC analyst") AND (microarray OR GeneChip)' ->
+    [["qc tech", "qc analyst"], ["microarray", "genechip"]]
+
+    Parenthesized groups become one group each; bare terms outside groups
+    split on AND into single-term groups. Term text is lowercased, quotes
+    stripped. Returns [] when nothing parseable.
+    """
+    groups: list[list[str]] = []
+    buf = ""
+    depth = 0
+
+    def _split_or(text: str) -> list[str]:
+        parts = text.split(" OR ") if " OR " in text.upper() else [text]
+        return [p.strip() for p in parts if p.strip()]
+
+    def _flush(text: str) -> None:
+        # Bare top-level text is AND-separated terms (possibly quoted); the
+        # connector itself must never become a group.
+        for chunk in re.split(r"\s+AND\s+", text, flags=re.IGNORECASE):
+            for term in _split_or(chunk):
+                term = term.strip().strip('"').strip().lower()
+                if term and term.upper() != "AND":
+                    groups.append([term])
+
+    for ch in query:
+        if ch == "(":
+            depth += 1
+            if depth == 1:
+                _flush(buf)
+                buf = ""
+                continue
+        elif ch == ")" and depth > 0:
+            depth -= 1
+            if depth == 0:
+                # Whole group is one AND-unit; its OR-terms stay together.
+                terms = [
+                    t.strip().strip('"').strip().lower()
+                    for t in _split_or(buf)
+                ]
+                if terms:
+                    groups.append(terms)
+                buf = ""
+                continue
+        buf += ch
+    _flush(buf)
+    # Merge consecutive single-term groups is NOT done — each is its own
+    # AND-position, which is exactly the shape the gate checks.
+    return groups
+
+
+def _matches_plan_groups(candidate: dict[str, Any], groups: list[list[str]]) -> bool:
+    """True when the candidate card matches >=2 distinct plan groups.
+
+    Used to gate RELAXED-pass rows only: LinkedIn's keyword search returns
+    fuzzy matches for the group-only variant, so a card must loosely satisfy
+    the plan's AND shape (a term from at least two different groups) to be
+    relevant. Single-group plans require matching that group.
+    """
+    if not groups:
+        return True
+    hay = " ".join(
+        str(candidate.get(k) or "")
+        for k in ("headline", "current_role", "summary", "experience", "location")
+    ).lower()
+    hits = sum(1 for g in groups if any(t in hay for t in g))
+    return hits >= 2 if len(groups) >= 2 else hits >= 1
+
+
+def _gate_relaxed_rows(
+    rows: list[dict[str, Any]], queries: list[str]
+) -> tuple[list[dict[str, Any]], int]:
+    """Drop relaxed-pass rows that don't loosely match the plan structure.
+
+    Returns (kept, dropped). A row is kept if it satisfies ANY plan query's
+    group shape (>=2 distinct OR-groups matched, or the single group).
+    """
+    all_groups = [g for q in queries if (g := _or_groups(q))]
+    if not all_groups:
+        return rows, 0
+    kept: list[dict[str, Any]] = []
+    dropped = 0
+    for r in rows:
+        if any(_matches_plan_groups(r, g) for g in all_groups):
+            kept.append(r)
+        else:
+            dropped += 1
+    return kept, dropped
+
+
 def _normalize_profile_url(url: str) -> str:
     """Canonical form of a profile URL for dedupe (path only, no query/fragment).
 
@@ -644,12 +736,17 @@ async def search_linkedin_people(
                     },
                     timeout_s=max(180, 90 * len(relaxed)),
                 )
-                combined = dedupe_candidates(
-                    results["raw_results"] + _filter_excluded(extra.get("raw_results", []), excludes)
+                relaxed_rows, gate_dropped = _gate_relaxed_rows(
+                    _filter_excluded(extra.get("raw_results", []), excludes), queries
                 )
+                if gate_dropped:
+                    logger.info(
+                        "Relaxed-pass relevance gate dropped %d irrelevant rows", gate_dropped
+                    )
+                combined = dedupe_candidates(results["raw_results"] + relaxed_rows)
                 results["raw_results"] = combined
                 results["plan_detail"] = (
-                    f"{results.get('plan_detail', '')} + relaxed → {len(combined)} unique"
+                    f"{results.get('plan_detail', '')} + relaxed (gate dropped {gate_dropped}) → {len(combined)} unique"
                 )
         # Final safety net: if the merged set is still entirely unenriched
         # (no row has real profile sections), spend the enrich budget now so
@@ -736,6 +833,9 @@ async def _run_plan(
             if result.get("needs_human") and not found:
                 needs_human = needs_human or result.get("human_reason")
                 continue
+            found, gate_dropped = _gate_relaxed_rows(found, queries)
+            if gate_dropped:
+                logger.info("Relaxed-pass relevance gate dropped %d rows", gate_dropped)
             merged.extend(found)
         uniques = dedupe_candidates(merged)
 
