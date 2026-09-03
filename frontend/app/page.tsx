@@ -238,10 +238,17 @@ export default function Home() {
 
   async function reloadSources() {
     try {
-      setCustomSources(await listSources());
+      const srcs = await listSources();
+      setCustomSources(srcs);
       fetchCandidatePlatforms()
         .then((p) => setAvailablePlatforms(p.platforms))
         .catch(() => {});
+      // Sources refreshed after a re-login — clear the stale "Re-login
+      // required" banner unless some source still lacks a session it had
+      // before (the banner reappears if a search pauses again anyway).
+      if (srcs.every((s) => s.has_session)) {
+        setReloginNeeded(null);
+      }
     } catch {
       /* ignore */
     }
