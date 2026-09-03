@@ -90,14 +90,53 @@ async function execOnTab(fn, args = []) {
   return res && res[0] && res[0].result;
 }
 
+// waitForPageReady — poll until the document is actually usable instead of
+// trusting fixed sleeps (slow renders made the next action hit a half-built
+// page: empty-state extraction, fill on a missing input). Criteria:
+// document.complete AND no ongoing fetch/XHR burst AND DOM stable.
+async function waitForPageReady(timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const s = await execOnTab(() => ({
+      complete: document.readyState === "complete",
+      pending: performance.getEntriesByType("resource").filter(
+        (e) => e.responseEnd === 0
+      ).length,
+      domLen: document.body ? document.body.innerHTML.length : 0,
+    })).catch(() => null);
+    if (s && s.complete && s.pending === 0) {
+      // DOM-settle beat: two identical innerHTML lengths a beat apart.
+      await sleep(600);
+      const s2 = await execOnTab(() => (document.body ? document.body.innerHTML.length : 0)).catch(() => 0);
+      if (s2 === s.domLen) return true;
+    }
+    await sleep(400);
+  }
+  return false; // proceed anyway — caller steps have their own guards
+}
+
 async function cmdNavigate(url) {
   if (!/^https?:\/\//i.test(url)) url = "https://" + url;
   await ensureTab(url);
-  await sleep(2500); // SPA render beat
+  await waitForPageReady(); // replaces the blind 2.5s SPA beat
   return { url };
 }
 
+async function waitForElement(selector, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const found = await execOnTab((sel) => !!document.querySelector(sel), [selector]).catch(() => false);
+    if (found) return true;
+    await sleep(300);
+  }
+  return false;
+}
+
 async function cmdFill(selector, text) {
+  // Wait for the input to exist before typing — slow SPA renders used to
+  // make the fill throw "Element not found" even though the field appears
+  // a second later.
+  await waitForElement(selector);
   const r = await execOnTab((sel, txt) => {
     const el = document.querySelector(sel);
     if (!el) return { ok: false, error: "Element not found: " + sel };
@@ -118,6 +157,7 @@ async function cmdFill(selector, text) {
 }
 
 async function cmdClick(selector) {
+  await waitForElement(selector);
   const r = await execOnTab((sel) => {
     const el = document.querySelector(sel);
     if (!el) return { ok: false, error: "Element not found: " + sel };
@@ -126,7 +166,7 @@ async function cmdClick(selector) {
     return { ok: true };
   }, [selector]);
   if (!r || !r.ok) throw new Error((r && r.error) || "click failed");
-  await sleep(1500);
+  await waitForPageReady(8000); // clicked pages usually navigate/re-render
   return r;
 }
 
@@ -139,7 +179,7 @@ async function cmdPress(key) {
     }
     el.dispatchEvent(new KeyboardEvent("keyup", { key: k, bubbles: true }));
   }, [key]);
-  await sleep(2000);
+  await waitForPageReady(12000); // search submit re-renders the page
   return { ok: true, key };
 }
 
@@ -216,6 +256,9 @@ async function cmdRunFlow(baseUrl, query, steps) {
       if (wall) {
         return { results: [], needs_human: true, error: "Session expired — the site is showing a login page" };
       }
+      // Results render asynchronously — wait for the card selector to exist
+      // before extracting instead of racing the page build.
+      await waitForElement(step.card, 12000);
       let rows = await cmdExtract(step.card, step.fields || {}, 30);
       // Seek loads results asynchronously — the first extract can run while
       // the page still shows the empty-state placeholder. Retry once after
