@@ -13,6 +13,14 @@ const ACTIVE_POLL_MS = 300; // fast polling while a flow runs
 
 let API_BASE = DEFAULT_API;
 let busy = false;
+// Watchdog for the busy flag: a leaked command promise (tab closed mid-
+// chrome.scripting.executeScript, hung SPA) never settles, .finally() never
+// runs, and busy would stay true forever — every later command instantly
+// rejected "agent busy" (seen live 2026-09-04). The longest legit command is
+// a 5-query LinkedIn plan (~2-3 min); 4 min clears any real straggler.
+const COMMAND_WATCHDOG_MS = 4 * 60 * 1000;
+let currentCmdStartedAt = 0;
+let currentCmdAction = "";
 // Identifies this service-worker instance; sent with every poll so the
 // backend can instantly fail commands orphaned by a worker reload instead
 // of letting them burn their full dispatch timeout.
@@ -1107,6 +1115,15 @@ async function pollOnce() {
   // stale cookie blob ("Session expired" pause). Executing a command and
   // polling are independent fetches; only skip fetching a SECOND command
   // while one is running.
+  // Watchdog: if a command runs far beyond every server timeout, its
+  // promise leaked (tab closed mid-injection, hung injection) and busy
+  // would be stuck true FOREVER — every later command instantly rejected
+  // as "agent busy". Force-clear so the agent self-heals.
+  if (busy && currentCmdStartedAt && Date.now() - currentCmdStartedAt > COMMAND_WATCHDOG_MS) {
+    console.warn("[ca] watchdog: force-clearing stuck busy after", currentCmdAction, Date.now() - currentCmdStartedAt, "ms");
+    busy = false;
+    currentCmdStartedAt = 0;
+  }
   const res = await fetch(`${API_BASE}/api/v1/agent/poll?boot=${encodeURIComponent(BOOT_ID)}`);
   if (!res.ok) {
     setBadge(false);
@@ -1117,11 +1134,14 @@ async function pollOnce() {
     const { id, action, params } = data.command;
     setBadge(true);
     busy = true;
+    currentCmdStartedAt = Date.now();
+    currentCmdAction = action;
     executeCommand({ action, params })
       .then((result) => postResult(id, true, result, null))
       .catch((e) => postResult(id, false, null, String((e && e.message) || e)))
       .finally(() => {
         busy = false;
+        currentCmdStartedAt = 0;
       });
   } else if (data.command && busy) {
     // One command at a time — drop the extra command, it will time out
