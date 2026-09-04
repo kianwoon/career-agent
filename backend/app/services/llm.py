@@ -54,6 +54,11 @@ class LLMService:
         return {
             "model": self._settings.llm_model_name,
             "max_tokens": self._settings.llm_max_tokens,
+            # GLM thinking models can return thinking-only responses (no
+            # text block) — useless for machine-consumed answers (query
+            # compaction, rerank JSON). Disable thinking so we always get
+            # an answer; harmless on models that ignore the param.
+            "thinking": {"type": "disabled"},
             "system": [{"type": "text", "text": system}],
             "messages": [
                 {"role": "user", "content": [{"type": "text", "text": user}]}
@@ -77,10 +82,18 @@ class LLMService:
                 resp.raise_for_status()
                 data = resp.json()
                 # Anthropic-format response: content array with text blocks.
+                # GLM thinking models may return ONLY thinking blocks
+                # (reasoning with no trailing text) — that is NOT an answer,
+                # so return None and let callers use their deterministic
+                # fallback (a thinking dump as a search query / rerank JSON
+                # would poison results worse than no LLM at all).
                 for block in data.get("content", []):
-                    if block.get("type") == "text":
+                    if block.get("type") == "text" and (block.get("text") or "").strip():
                         return block.get("text")
-                logger.warning("LLM response had no text block: %s", str(data)[:200])
+                if any(b.get("type") in ("thinking", "redacted_thinking") for b in data.get("content", [])):
+                    logger.warning("LLM returned thinking-only response (no text block); using fallback")
+                else:
+                    logger.warning("LLM response had no text block: %s", str(data)[:200])
                 return None
         except Exception as exc:
             logger.warning("LLM call failed: %s", exc)

@@ -67,3 +67,38 @@ def test_normalize_flow_candidate_clamps_long_fields():
     assert out is not None
     assert len(out["name"]) <= 255
     assert len(out["location"] or "") <= 255
+
+
+def test_normalize_flow_candidate_splits_glued_role_variants():
+    # Loose title text (title field holds the whole card, no camel glue
+    # point after the surname) must still split name from role.
+    for blob, name in [
+        ("Kwong-Meng ChowQC Manager II at Bio-Rad Laboratories Apr 2021 - Feb 2025 (3 years 11 months)", "Kwong-Meng Chow"),
+        ("Ho Kiat, Thomas TayQA Supervisor at AbbVie Operations Singapore Jan 2017 - Present (9 years 9 months)", "Ho Kiat, Thomas Tay"),
+        ("THINESHWARAN GUNASEKARANLaboratory Technician at Thermo Fisher Scientific Mar 2022 - Apr 2025 (3 years 2 months)", "THINESHWARAN GUNASEKARAN"),
+    ]:
+        out = _normalize_flow_candidate({"title": blob, "raw_text": blob}, "jobstreet - candidate", 0)
+        assert out is not None, blob
+        assert out["name"] == name, f"{blob} -> {out['name']}"
+
+
+def test_normalize_flow_candidate_drops_ui_junk_names():
+    junk = "SingaporeSGD 15,000+ monthlyAdd to poolUpdated 11 months agoSend jobSend messageAccess profile"
+    assert _normalize_flow_candidate({"title": junk, "raw_text": junk}, "jobstreet - candidate", 0) is None
+
+
+def test_deduplicate_collapses_seek_search_and_profile_rows():
+    from app.agent.nodes import deduplicate
+
+    state = {
+        "normalized": [
+            {"name": "Tang Yee Henn", "source": "jobstreet - candidate",
+             "source_url": "https://sg.employer.seek.com/talentsearch/profile/504751178?x=1"},
+            {"name": "Tang Yee Henn", "source": "jobstreet - candidate",
+             "source_url": "https://sg.employer.seek.com/talentsearch/search/profiles?uncoupledFreeText=Tang%20Yee%20Henn"},
+        ],
+        "timeline": [],
+    }
+    out = deduplicate(state)
+    assert len(out["normalized"]) == 1
+    assert "/profile/" in out["normalized"][0]["source_url"]

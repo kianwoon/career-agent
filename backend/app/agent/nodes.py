@@ -63,16 +63,50 @@ def _normalize_flow_candidate(
     raw_text = str(r.get("raw_text") or "")
     lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
     raw_name = str(r.get("title") or "").strip() or (lines[0] if lines else "")
-    # Card-selector drift returns the whole card (or app root) as one
-    # concatenated blob: "Tang Yee HennSenior QC Technician (Deputy Shift
-    # Lead) at ...". Split NAME from ROLE at the first INNER capital that
-    # starts a word glued to a lowercase letter (…HennSenior…, e… at…),
-    # then cut: names are short, roles go to headline/experience.
+    # SEEK cards glue role text to the name with no separator when the
+    # recorded card selector drifts ("...HennSenior QC Technician…" /
+    # "...ChowQC Manager II…" / "...TayQA Supervisor…"). Split NAME from
+    # ROLE with a name-aware matcher instead of the first camel bump:
+    #   - "Xxx ...Yyy<ROLE>" where <ROLE> starts with a known job-title
+    #     keyword (QC/QA/Technician/Manager/Supervisor/Engineer/…) glued to
+    #     the surname. The name is the short head before it.
+    #   - Fallback: first inner camel split (…HennSenior…), name = head.
     name = raw_name
     tail = ""
-    m = re.search(r"(?<=[a-z])(?=[A-Z][a-z])", raw_name)
-    if m and (len(raw_name) > _NAME_DISPLAY_MAX or not str(r.get("title") or "").strip()):
-        name, tail = raw_name[: m.start()], raw_name[m.start():]
+    # Seniority-prefix roles ("Senior QC Technician…") have the cleanest
+    # anchor: split right at the seniority word glued to the surname.
+    m = re.search(
+        r"^(?P<name>.{2,60}?)"
+        r"(?P<role>(?:Senior|Sr\.|Junior|Jr\.|Lead|Chief|Head|Deputy|Assistant|Associate)\s+.+)$",
+        raw_name,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    glue = m and re.search(r"(?<=[A-Za-z…)-])(?=[A-Z])", raw_name[: m.start("role") + 1])
+    if m and glue:
+        name, tail = raw_name[: m.start("role")].strip(), raw_name[m.start("role"):].strip()
+    else:
+        # Bare roles with no seniority prefix ("…ChowQC Manager II…",
+        # "…TayQA Supervisor…", "…GUNASEKARANLaboratory Technician…"):
+        # find a known role keyword glued to the surname. Case-insensitive
+        # — all-caps surnames glue to a capitalized role word.
+        m2 = re.search(
+            r"(?<=[A-Za-z)])(?=(?:QC|QA|Quality|Laboratory|Lab|Production|Process|Validation|"
+            r"Technician|Technologist|Manager|Supervisor|Engineer|Chemist|Specialist|Analyst|"
+            r"Director|Executive|Officer|Coordinator|Assistant)\b)",
+            raw_name,
+            flags=re.IGNORECASE,
+        )
+        if m2 and len(raw_name) > 20:
+            name, tail = raw_name[: m2.start()].strip(), raw_name[m2.start():].strip()
+        else:
+            m3 = re.search(r"(?<=[a-z])(?=[A-Z][a-z])", raw_name)
+            if m3 and (len(raw_name) > _NAME_DISPLAY_MAX or not str(r.get("title") or "").strip()):
+                name, tail = raw_name[: m3.start()], raw_name[m3.start():]
+    # A name with digits / @ / 'monthly' / 'pool' / SGD is card-body junk,
+    # not a person — drop the row instead of ranking it. (Role words like
+    # "QC Manager" are fine — only UI chrome triggers the drop.)
+    if re.search(r"[\d@]|monthly|add to pool|^updated|send (job|message)|access profile|\bSGD\b", name, re.IGNORECASE):
+        return None
     # Page-chrome junk guard: when a recorded card selector drifts (seek
     # rotates obfuscated classes), extraction can return the whole app root
     # and the "name" becomes the page's first text line ("Skip to
@@ -811,22 +845,30 @@ def normalize(state: AgentState) -> AgentState:
 
 
 def deduplicate(state: AgentState) -> AgentState:
-    """DEDUPLICATE: drop duplicates on (source, source_url, name).
+    """DEDUPLICATE: drop duplicates on (source, name), preferring deep links.
 
     Flow extractions may share one URL per platform (the landing/search
     page used as the openable link when a site exposes no per-candidate
     hrefs), so the NAME is part of the identity — two different
-    candidates on the same platform page must both survive.
+    candidates on the same platform page must both survive. Conversely
+    SEEK emits the same person twice (a /profile/<id> deep link AND a
+    generic /search/profiles?...&uncoupledFreeText=<name> row) — collapse
+    those to one, keeping the deep link.
     """
-    seen: set[tuple[str, str, str]] = set()
-    unique: list[dict[str, Any]] = []
+    best: dict[tuple[str, str], dict[str, Any]] = {}
     for item in state.get("normalized", []):
         url = str(item.get("source_url", "") or "")
         name = str(item.get("name") or item.get("title") or "")
-        key = (str(item.get("source", "")), url.lower(), name.lower())
-        if key not in seen:
-            seen.add(key)
-            unique.append(item)
+        key = (str(item.get("source", "")), name.strip().lower())
+        prev = best.get(key)
+        if prev is None:
+            best[key] = item
+        elif "uncoupledFreeText=" in str(prev.get("source_url", "") or "") and "uncoupledFreeText=" not in url:
+            best[key] = item  # prefer the deep link over the search page
+    unique = list(best.values())
+    # Preserve first-seen order.
+    order = {id(v): i for i, v in enumerate(state.get("normalized", []))}
+    unique.sort(key=lambda v: order.get(id(v), 0))
     return {
         **state,
         "normalized": unique,

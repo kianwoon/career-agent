@@ -151,9 +151,46 @@ def parse_roles(experience_text: str) -> list[RoleEntry]:
         <Location> · On-site/Hybrid/Remote
         - bullet 1
         - bullet 2
+
+    SEEK card text has a different shape — role+company+duration glued on
+    ONE line ("Senior QC Technician (Deputy Shift Lead) at Thermo Fisher
+    Scientific Aug 2022 - Present (4 years 2 months)") and the candidate
+    NAME as a bare leading line. This parser handles both: first it tries
+    the SEEK single-line pattern per line, then the LinkedIn 3-line block.
     """
     if not experience_text:
         return []
+
+    # --- Pass 1: SEEK single-line roles -----------------------------------
+    # "Title at Company Mon YYYY - Present/Mon YYYY (X years Y months)"
+    _SEEK_ROLE_RE = re.compile(
+        r"^(?P<title>.+?)\s+at\s+(?P<company>.+?)\s+"
+        r"(?P<dur>(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}\s*-\s*"
+        r"(?:Present|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4})"
+        r"(?:\s*\([^)]*\))?)",
+        re.IGNORECASE,
+    )
+    ui_junk = re.compile(
+        r"monthly|add to pool|^updated|^last inter|send (job|message)|access profile|^new$|verified credentials",
+        re.IGNORECASE,
+    )
+    seek_roles: list[RoleEntry] = []
+    for ln in [ln.strip() for ln in experience_text.splitlines() if ln.strip()]:
+        if ui_junk.search(ln):
+            continue
+        m = _SEEK_ROLE_RE.match(ln)
+        if m:
+            dur = m.group("dur")
+            seek_roles.append(
+                RoleEntry(
+                    title=m.group("title").strip(),
+                    company=m.group("company").strip(),
+                    duration_text=dur,
+                    months=_duration_to_months(dur),
+                )
+            )
+    if seek_roles:
+        return seek_roles
 
     lines = [ln.strip() for ln in experience_text.splitlines() if ln.strip()]
     # Skip the leading "Experience" heading.
@@ -296,10 +333,14 @@ def _tenure_depth(roles: list[RoleEntry]) -> tuple[float, list[str]]:
     else:
         depth = 0.3
 
-    # Penalize job-hopping.
-    if short_stints / len(months_list) > 0.4:
+    # Penalize job-hopping — but not a 2-role ladder where the CURRENT role
+    # is long (promotion pattern: 8mo Research Assistant -> 4y2m Senior QC
+    # Tech). Only flag when NO role reaches 12m (genuinely all short).
+    if all(m < SHORT_STINT_MONTHS for m in months_list):
         depth *= 0.6
-        flags.append(f"{short_stints}/{len(months_list)} roles are short stints (< {SHORT_STINT_MONTHS}m) — possible job-hopping")
+        flags.append(f"{len(months_list)}/{len(months_list)} roles are short stints (< {SHORT_STINT_MONTHS}m) — possible job-hopping")
+    elif short_stints and short_stints / len(months_list) > 0.4:
+        flags.append(f"{short_stints}/{len(months_list)} early roles are short stints (< {SHORT_STINT_MONTHS}m)")
 
     return depth, flags
 

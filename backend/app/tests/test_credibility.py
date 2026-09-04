@@ -84,3 +84,26 @@ Jan 2024 - Present · 6 mos
     })
     assert rep.title_inflation > 0.4
     assert any("only 6m" in f or "6m" in f for f in rep.flags)
+
+
+def test_seek_single_line_roles_parse():
+    """SEEK card text: name + glued 'Title at Company Mon YYYY - ...' lines.
+    Must parse into roles (no more 'No experience roles parsed' / bogus
+    job-hopping flags on a 4-year tenure)."""
+    exp = (
+        "Tang Yee Henn\n"
+        "Senior QC Technician (Deputy Shift Lead) at Thermo Fisher Scientific "
+        "Aug 2022 - Present (4 years 2 months)\n"
+        "Research Assistant at Singapore Institute of Manufacturing Technology "
+        "(A*STAR) Sep 2020 - Apr 2021 (8 months)\n"
+        "Singapore\nSGD 3,500+ monthly\nAdd to pool"
+    )
+    roles = parse_roles(exp)
+    assert len(roles) == 2
+    assert roles[0].title.startswith("Senior QC Technician")
+    assert roles[0].company.startswith("Thermo Fisher")
+    assert roles[0].months == 50  # 4y2m
+    assert roles[1].months == 8
+    rep = assess_credibility({"name": "Tang", "headline": "", "skills": [], "experience": exp})
+    assert "No experience roles parsed" not in rep.flags
+    assert not any("job-hopping" in f for f in rep.flags)
