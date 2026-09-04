@@ -619,8 +619,50 @@ def _linkedin_card_spec(flow_type: str) -> tuple[str, dict[str, str]]:
 
 
 async def _agent_discover(source: Source, req: AgentRecordRequest) -> list[dict[str, Any]]:
-    """Extension-driven discovery for non-LinkedIn sites."""
+    """Extension-driven discovery for non-LinkedIn sites.
+
+    For seek: run the known search steps and detect the result card live via
+    find_result_card (the legacy generic scorer guessed wrong here and 502'd
+    the record button). For other sites: fall back to legacy discover_flow.
+    """
     from app.services.agent_relay import agent_registry
+
+    if "seek.com" in (source.domain or ""):
+        try:
+            data = await agent_registry.dispatch(
+                "run_flow",
+                {
+                    "baseUrl": source.base_url,
+                    "query": req.query_hint or "qc",
+                    "steps": [
+                        {"action": "navigate", "url": source.base_url},
+                        {"action": "fill", "selector": "#uncoupledFreeText", "param": "query"},
+                        {"action": "press", "key": "Enter"},
+                        {"action": "wait", "seconds": 3},
+                        {"action": "find_result_card"},
+                    ],
+                },
+                timeout_s=120,
+            )
+            results = data if isinstance(data, list) else []
+            found = results[0] if results else {}
+            if found.get("found") and found.get("card"):
+                return [
+                    {"action": "navigate", "url": source.base_url},
+                    {"action": "fill", "selector": "#uncoupledFreeText", "param": "query"},
+                    {"action": "press", "key": "Enter"},
+                    {"action": "wait", "seconds": 3},
+                    {"card": found["card"], "fields": {"title": "a"}},
+                ]
+            raise HTTPException(
+                502,
+                "Seek results page returned no detectable result cards — "
+                "sign in on the site, run a search with visible results, then retry",
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(502, f"Agent discovery failed: {str(exc)[:120]}")
 
     try:
         data = await agent_registry.dispatch(
