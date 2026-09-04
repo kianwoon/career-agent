@@ -392,6 +392,11 @@ async def _run_task(
                         reason=r.match_reason or "",
                     )
                 )
+            # Final cancel race check: a cancel landing between the
+            # post-ainvoke check and this commit must win.
+            await db.refresh(task)
+            if task.status == TaskStatus.failed.value and task.error == "Cancelled by user":
+                return
             await db.commit()
         except Exception as exc:
             task.status = TaskStatus.failed.value

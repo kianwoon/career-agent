@@ -324,6 +324,10 @@ class SourceFlowView(BaseModel):
     steps: list[dict[str, Any]]
     status: str
     created_at: datetime
+    # Set when re-record verification could not confirm the extract step
+    # (e.g. login wall during the probe) — tells the caller the flow is
+    # saved but UNVERIFIED.
+    note: str | None = None
 
 
 class SourceFlowUpdate(BaseModel):

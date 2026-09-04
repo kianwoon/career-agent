@@ -90,6 +90,13 @@ class AgentRegistry:
                 raise RuntimeError(
                     f"Agent command '{action}' timed out after {timeout_s:.0f}s (is the browser open?)"
                 )
+            except BaseException:
+                # Cancellation (watchdog deadline, shutdown) must not leave
+                # the abandoned command in the queue — poll() would keep
+                # handing it to the extension, which would re-execute it on
+                # the shared tab mid-other-task.
+                self.pending = [c for c in self.pending if c.id != cmd.id]
+                raise
 
     # -- extension-side poll/result -----------------------------------------
 
@@ -98,11 +105,11 @@ class AgentRegistry:
         self.last_poll_ts = time.time()
         if not self.pending:
             return None
-        # Skip stale commands nobody will answer; return the oldest live one.
+        # Skip stale commands nobody will answer (age > COMMAND_TIMEOUT_S,
+        # done or not — an abandoned not-done command must never be handed
+        # to the extension for re-execution); return the oldest live one.
         now = time.time()
-        self.pending = [
-            c for c in self.pending if now - c.enqueued_at < COMMAND_TIMEOUT_S or not c.done
-        ]
+        self.pending = [c for c in self.pending if now - c.enqueued_at < COMMAND_TIMEOUT_S]
         if not self.pending:
             return None
         return self.pending[0]

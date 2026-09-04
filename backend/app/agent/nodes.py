@@ -711,9 +711,12 @@ async def run_search(state: AgentState) -> AgentState:
                     if result.get("human_reason"):
                         human_reason = result["human_reason"]
                 # A blocked platform must not nuke rows other platforms
-                # produced: pause only when NOTHING was found anywhere.
+                # produced: pause only when NOTHING was found anywhere. The
+                # block reason is preserved in plan_detail, not discarded.
                 if needs_human and raw:
                     needs_human = False
+                    if human_reason:
+                        plan_details.append(f"BLOCKED: {human_reason}")
                     human_reason = None
                 plan_details.append(
                     result.get("plan_detail") or f"{platform}: {len(p_raw)} results"

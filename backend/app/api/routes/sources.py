@@ -445,10 +445,11 @@ async def agent_record_manual_stop(
     # page via the extension (find_result_card) instead of saving the same
     # broken step again — re-record must be able to heal the selector.
     extract_ok = False
+    heal_note: str | None = None
     try:
         probe_url = source.base_url
         probe_q = (req.query_hint or "qc").strip() or "qc"
-        await agent_registry.dispatch(
+        probe = await agent_registry.dispatch(
             "run_flow",
             {
                 "baseUrl": probe_url,
@@ -457,6 +458,12 @@ async def agent_record_manual_stop(
             },
             timeout_s=90,
         )
+        # A login wall means the probe never reached a results page — heal
+        # must NOT run here: find_result_card on a login page can detect
+        # guest-job-card rows and save a bogus selector.
+        if isinstance(probe, dict) and probe.get("needs_human"):
+            heal_note = "login wall during verification — sign in on the site, then re-record"
+            raise RuntimeError(heal_note)
         rows = await agent_registry.dispatch(
             "extract",
             {"card": suffix[0].get("card", ""), "fields": suffix[0].get("fields", {}), "maxItems": 10},
@@ -469,9 +476,11 @@ async def agent_record_manual_stop(
             and len(r.get("raw_text") or "") > 60
         ]
         extract_ok = len(real) >= 2
-    except Exception:
+    except Exception as exc:
         extract_ok = False
+        heal_note = heal_note or str(exc)[:120]
     if not extract_ok:
+        healed = False
         try:
             found = await agent_registry.dispatch("find_result_card", {}, timeout_s=30)
             if found and found.get("found") and found.get("card"):
@@ -479,15 +488,20 @@ async def agent_record_manual_stop(
                     "card": found["card"],
                     "fields": {"title": "a"},
                 }]
+                healed = True
         except Exception:
             pass  # keep the old suffix; better than failing the whole save
+        if not healed and not heal_note:
+            heal_note = "stored card selector no longer matches — could not auto-detect a new one"
 
     steps = prefix + clicks + suffix
 
     if existing:
         existing.steps = steps
         existing.status = "active"
-        existing.last_verified_at = datetime.utcnow()
+        # Only claim verification when the probe actually extracted rows.
+        if extract_ok:
+            existing.last_verified_at = datetime.utcnow()
         flow = existing
     else:
         flow = SourceFlow(source_id=source.id, flow_type=req.flow_type, steps=steps)
@@ -501,6 +515,7 @@ async def agent_record_manual_stop(
         steps=flow.steps,
         status=flow.status,
         created_at=flow.created_at,
+        note=heal_note,
     )
 
 
