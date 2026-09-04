@@ -296,9 +296,9 @@ async def test_search_linkedin_people_compacts_overlong_queries(monkeypatch):
     OR-group variant all use the shortened form (mirrors the SEEK/flow path)."""
     from typing import Any
 
-    from app.services.agent_relay import AgentRegistry
     from app.services import linkedin as li
     from app.services import linkedin_people as lp
+    from app.services.agent_relay import AgentRegistry
     from app.services.source_flows import KEYWORD_LIMIT
 
     class FakeExtension(AgentRegistry):
