@@ -32,8 +32,16 @@ async def agent_status() -> AgentStatus:
 
 
 @router.get("/poll", dependencies=[])
-async def agent_poll(wait: int = 0) -> dict[str, Any]:
-    """Extension fetches the next command. Optional `wait` seconds long-poll."""
+async def agent_poll(wait: int = 0, boot: str | None = None) -> dict[str, Any]:
+    """Extension fetches the next command. Optional `wait` seconds long-poll.
+
+    `boot` identifies the extension worker instance: when it changes (worker
+    reloaded mid-command), all pending commands are orphaned — their caller
+    can never be answered by the new instance — so they are failed
+    immediately instead of burning their full timeout.
+    """
+    if boot is not None:
+        agent_registry.note_boot(boot)
     if wait > 0:
         deadline = asyncio.get_event_loop().time() + min(wait, 25)
         while agent_registry.poll() is None:

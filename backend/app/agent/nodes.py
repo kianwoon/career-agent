@@ -185,9 +185,7 @@ async def _search_candidates_via_flow(
                     "query": flow_query,
                     "steps": flow.steps,
                 },
-                # Flows queue behind concurrent LinkedIn plan dispatches on
-                # the same single tab — allow the full plan duration.
-                timeout_s=420,
+                timeout_s=240,
             )
             if isinstance(data, dict) and data.get("needs_human"):
                 return {

@@ -51,6 +51,7 @@ class AgentRegistry:
         self.pending: list[Command] = []
         self._seen_ids: set[str] = set()
         self.last_poll_ts: float | None = None  # liveness signal for /status
+        self.boot_id: str | None = None  # extension worker instance id
         # All commands share ONE browser tab, so concurrent dispatches
         # (e.g. LinkedIn plan + jobstreet flow in asyncio.gather) execute
         # back-to-back in the tab while each caller's timeout keeps ticking
@@ -58,6 +59,23 @@ class AgentRegistry:
         # Serialize dispatch+await so timeouts measure execution, not queue
         # wait.
         self._exec_lock = asyncio.Lock()
+
+    def note_boot(self, boot_id: str) -> None:
+        """Record the polling worker instance; fail orphaned commands.
+
+        A worker reload mid-command orphans every pending command — the new
+        instance can never answer them, so they are failed NOW (callers get
+        a fast soft-miss) instead of burning their full dispatch timeout.
+        """
+        if self.boot_id is not None and self.boot_id != boot_id and self.pending:
+            for cmd in self.pending:
+                if not cmd.done and cmd.future and not cmd.future.done():
+                    cmd.future.set_exception(
+                        RuntimeError("Agent restarted — command orphaned by extension reload")
+                    )
+                    cmd.future.exception()  # consume to avoid "never retrieved" warnings
+            self.pending = [c for c in self.pending if c.done]
+        self.boot_id = boot_id
 
     # -- API-side dispatch --------------------------------------------------
 
@@ -77,11 +95,24 @@ class AgentRegistry:
             await asyncio.sleep(0.5)
 
     async def dispatch(
-        self, action: str, params: dict[str, Any], timeout_s: float = COMMAND_TIMEOUT_S
+        self, action: str, params: dict[str, Any], timeout_s: float = COMMAND_TIMEOUT_S,
+        lock_wait_s: float = 60.0,
     ) -> Any:
-        """Enqueue a command and await the extension's result."""
+        """Enqueue a command and await the extension's result.
+
+        lock_wait_s bounds the wait for the shared-tab lock: when a previous
+        holder died (extension reload mid-command), an unbounded wait let
+        callers stack 420s timeouts serially — a 12-minute wall-clock hang.
+        """
         await self.wait_for_agent()
-        async with self._exec_lock:
+        try:
+            await asyncio.wait_for(self._exec_lock.acquire(), timeout=lock_wait_s)
+        except TimeoutError:
+            raise RuntimeError(
+                f"Agent busy — dispatch lock not released within {lock_wait_s:.0f}s "
+                "(a previous command is stuck or the extension reloaded mid-run)"
+            )
+        try:
             cmd = Command(id=f"cmd-{uuid.uuid4().hex[:12]}", action=action, params=params)
             self.pending.append(cmd)
             try:
@@ -98,6 +129,8 @@ class AgentRegistry:
                 # the shared tab mid-other-task.
                 self.pending = [c for c in self.pending if c.id != cmd.id]
                 raise
+        finally:
+            self._exec_lock.release()
 
     # -- extension-side poll/result -----------------------------------------
 

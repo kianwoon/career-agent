@@ -13,6 +13,10 @@ const ACTIVE_POLL_MS = 300; // fast polling while a flow runs
 
 let API_BASE = DEFAULT_API;
 let busy = false;
+// Identifies this service-worker instance; sent with every poll so the
+// backend can instantly fail commands orphaned by a worker reload instead
+// of letting them burn their full dispatch timeout.
+const BOOT_ID = `boot-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 let loopTimer = null;
 // The tab the agent opened for its own work — all fill/click/extract target
 // THIS tab, never whatever the user happens to have focused.
@@ -1073,7 +1077,7 @@ async function pollOnce() {
   // stale cookie blob ("Session expired" pause). Executing a command and
   // polling are independent fetches; only skip fetching a SECOND command
   // while one is running.
-  const res = await fetch(`${API_BASE}/api/v1/agent/poll`);
+  const res = await fetch(`${API_BASE}/api/v1/agent/poll?boot=${encodeURIComponent(BOOT_ID)}`);
   if (!res.ok) {
     setBadge(false);
     return;
