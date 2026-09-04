@@ -1,6 +1,7 @@
 """Tests for the guided-wizard templatizer and domain parsing."""
 
 from app.services.source_flows import (
+    KEYWORD_LIMIT,
     SEEK_KEYWORD_LIMIT,
     build_boolean_keywords,
     build_boolean_keywords_async,
@@ -9,6 +10,16 @@ from app.services.source_flows import (
     filter_excluded_results,
     templatize,
 )
+
+
+def test_keyword_limit_alias_backwards_compat():
+    """SEEK_KEYWORD_LIMIT survives as an alias of the generic platform-wide
+    KEYWORD_LIMIT (the 500-char cap applies to LinkedIn too, not just SEEK)."""
+    from app.services import source_flows
+
+    assert KEYWORD_LIMIT == 500
+    assert source_flows.SEEK_KEYWORD_LIMIT is source_flows.KEYWORD_LIMIT
+    assert SEEK_KEYWORD_LIMIT == KEYWORD_LIMIT
 
 
 def test_domain_of_strips_www():

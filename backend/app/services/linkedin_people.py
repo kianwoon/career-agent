@@ -23,6 +23,7 @@ from urllib.parse import quote
 from app.services.browser import BrowserError
 from app.services.cache import query_cache
 from app.services.pacing import pacing
+from app.services.source_flows import KEYWORD_LIMIT, compact_boolean_query
 
 logger = logging.getLogger(__name__)
 
@@ -720,6 +721,15 @@ async def search_linkedin_people(
             "needs_human": False,
             "human_reason": "No queries in plan",
         }
+
+    # Length guard shared with every other platform: candidate-search boxes
+    # cap boolean keyword strings at KEYWORD_LIMIT (500). SEEK errors out
+    # over the limit; LinkedIn silently returns junk/zero results, so compact
+    # every incoming query BEFORE anything else — the strict queries, the
+    # relaxed OR-group variants and the broad variants below all derive from
+    # this list and thus inherit the shortened forms. No-op (early return in
+    # compact_boolean_query) for already-short queries.
+    queries = [await compact_boolean_query(q, limit=KEYWORD_LIMIT) for q in queries]
 
     # --- PRIMARY: run the whole plan inside the browser extension ----------
     # The extension holds the real logged-in profile (the user's own browser),

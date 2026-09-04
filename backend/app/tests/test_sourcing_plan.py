@@ -289,6 +289,98 @@ async def test_search_linkedin_people_no_queries():
     assert result["needs_human"] is False
 
 
+@pytest.mark.asyncio
+async def test_search_linkedin_people_compacts_overlong_queries(monkeypatch):
+    """Platform-wide 500-char cap: a >500-char plan query is compacted BEFORE
+    execution, so the strict dispatch, the excluded fold-in and the relaxed
+    OR-group variant all use the shortened form (mirrors the SEEK/flow path)."""
+    from typing import Any
+
+    from app.services.agent_relay import AgentRegistry
+    from app.services import linkedin as li
+    from app.services import linkedin_people as lp
+    from app.services.source_flows import KEYWORD_LIMIT
+
+    class FakeExtension(AgentRegistry):
+        """Simulates the extension: resolves dispatched commands immediately."""
+
+        def __init__(self, handler) -> None:
+            super().__init__()
+            self._handler = handler
+            self.actions: list[tuple[str, dict[str, Any]]] = []
+            import time as _time
+
+            self.last_poll_ts = _time.time()  # mark as "connected"
+
+        async def dispatch(self, action, params, timeout_s=180):
+            self.actions.append((action, params))
+            result = self._handler(action, params)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+    long_q = " OR ".join([f'"term number {i} technician"' for i in range(40)])
+    assert len(long_q) > KEYWORD_LIMIT
+    dispatched: list[list[str]] = []
+
+    def handler(action, params):
+        assert action == "linkedin_people_plan"
+        dispatched.append(params["queries"])
+        qs = params["queries"]
+        if any(" AND " in q.upper() for q in qs):
+            # Over-constrained strict query triggers the relaxed second pass.
+            return {"raw_results": [], "needs_human": False, "human_reason": None, "plan_detail": "strict"}
+        return {
+            "raw_results": [
+                {
+                    "id": f"r{i}",
+                    "name": f"Person {i}",
+                    "location": "Singapore",
+                    "source": "linkedin_people",
+                    "source_url": f"https://www.linkedin.com/in/p{i}/",
+                    "headline": f"agency accounting specialist {i}, insurance desk",
+                    "_hit_count": 1,
+                }
+                for i in range(2)
+            ],
+            "needs_human": False,
+            "human_reason": None,
+            "plan_detail": "relaxed",
+        }
+
+    compacted_calls: list[str] = []
+
+    async def fake_compact(keywords: str, limit: int = KEYWORD_LIMIT) -> str:
+        assert len(keywords) > KEYWORD_LIMIT
+        compacted_calls.append(keywords)
+        return "compact technician OR analyst"
+
+    monkeypatch.setattr(lp, "compact_boolean_query", fake_compact)
+
+    async def fake_connect():
+        return None, None
+
+    monkeypatch.setattr(li, "_connect_with_best_session", fake_connect)
+    fake = FakeExtension(handler)
+    import app.services.agent_relay as relay
+
+    monkeypatch.setattr(relay, "agent_registry", fake)
+
+    result = await lp.search_linkedin_people(
+        queries=[long_q],
+        excludes=["recruiter"],
+        location="Singapore",
+    )
+    # Compaction ran on the overlong plan query.
+    assert compacted_calls == [long_q]
+    # Every dispatched query is the compacted one — never the 800+-char original.
+    assert dispatched, "plan should have dispatched at least one command"
+    assert all(all("compact technician" in q for q in qs) for qs in dispatched)
+    assert all(all(len(q) <= KEYWORD_LIMIT for q in qs) for qs in dispatched)
+    assert all("term number" not in q for qs in dispatched for q in qs)
+    assert result["raw_results"]
+
+
 # ---------------------------------------------------------------------------
 # Route contract (external system replay)
 # ---------------------------------------------------------------------------

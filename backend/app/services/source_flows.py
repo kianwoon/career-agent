@@ -808,9 +808,13 @@ def domain_of(url: str) -> str:
 # Boolean keyword mapping for custom-source search boxes
 # ---------------------------------------------------------------------------
 
-# seek boolean box hard limit: 500 characters (shows "500 characters or less"
-# error otherwise). Truncate longest OR-terms first so query always fits.
-SEEK_KEYWORD_LIMIT = 500
+# Hard limit for boolean keyword strings in candidate-search boxes across
+# ALL platforms (LinkedIn people search included). SEEK errors out above
+# 500 chars; LinkedIn silently returns junk/zero results for over-long
+# queries. Truncate longest OR-terms first so query always fits.
+KEYWORD_LIMIT = 500
+# Backwards-compat alias (tests + older callers import this name).
+SEEK_KEYWORD_LIMIT = KEYWORD_LIMIT
 MAX_NOT_TERMS = 4
 
 
@@ -823,9 +827,10 @@ def build_boolean_keywords(
     queries: list[str], excludes: list[str] | None, truncate: bool = True
 ) -> str:
     """Merge plan queries + excludes into ONE boolean string for a site's
-    keyword box (seek's 'Keywords in CV / Profile', etc.).
+    keyword box across all platforms (SEEK's 'Keywords in CV / Profile',
+    LinkedIn people search, etc.).
 
-    seek's box accepts `a AND b`, `a OR b`, `NOT (x OR y)` (placeholder
+    SEEK's box accepts `a AND b`, `a OR b`, `NOT (x OR y)` (placeholder
     'e.g. digital AND sales'). Multiple plan queries are OR'd; excludes
     become a single NOT group capped at MAX_NOT_TERMS (5+ NOT terms return
     zero results on several boolean engines — LinkedIn quirk, same trap).
@@ -848,15 +853,18 @@ def build_boolean_keywords(
     if terms:
         quoted = " OR ".join(_quote_term(t) for t in terms[:MAX_NOT_TERMS])
         keywords = f"{keywords} NOT ({quoted})"
-    # SEEK hard limit: 500 chars — hard truncate as deterministic safety net
-    # (unless the caller compacts via LLM instead — see async variant below).
-    if truncate and len(keywords) > SEEK_KEYWORD_LIMIT:
-        keywords = keywords[:SEEK_KEYWORD_LIMIT].rstrip()
+    # Platform hard limit: 500 chars — hard truncate as deterministic safety
+    # net (unless the caller compacts via LLM instead — see async variant
+    # below).
+    if truncate and len(keywords) > KEYWORD_LIMIT:
+        keywords = keywords[:KEYWORD_LIMIT].rstrip()
     return keywords
 
 
-async def compact_boolean_query(keywords: str, limit: int = SEEK_KEYWORD_LIMIT) -> str:
-    """Compact a boolean keyword string via LLM to fit SEEK's char limit.
+async def compact_boolean_query(keywords: str, limit: int = KEYWORD_LIMIT) -> str:
+    """Compact a boolean keyword string via LLM to fit the 500-char limit
+    enforced by candidate-search boxes across all platforms (SEEK errors
+    out; LinkedIn silently returns junk/zero results).
 
     Preserves boolean semantics (OR/AND/NOT groups, quoted phrases) instead
     of blind truncation. Falls back to hard truncate when the LLM is
@@ -871,8 +879,9 @@ async def compact_boolean_query(keywords: str, limit: int = SEEK_KEYWORD_LIMIT) 
         llm = LLMService()
         if llm.enabled:
             raw = await llm.chat(
-                "You compact job-search boolean strings for SEEK's keyword box "
-                "(max 500 characters, error otherwise). Preserve the search intent: "
+                "You compact job-search boolean strings for job/candidate "
+                "search keyword boxes (max 500 characters, accepted by all "
+                "major platforms). Preserve the search intent: "
                 "keep the most important skills/titles, keep valid boolean syntax "
                 "(OR/AND/NOT with parentheses and quoted multi-word phrases). "
                 "Drop the least important OR-terms first. "
@@ -896,9 +905,9 @@ async def compact_boolean_query(keywords: str, limit: int = SEEK_KEYWORD_LIMIT) 
 async def build_boolean_keywords_async(
     queries: list[str], excludes: list[str] | None
 ) -> str:
-    """Async variant: build keywords then LLM-compact if over SEEK's limit."""
+    """Async variant: build keywords then LLM-compact if over the limit."""
     keywords = build_boolean_keywords(queries, excludes, truncate=False)
-    if len(keywords) > SEEK_KEYWORD_LIMIT:
+    if len(keywords) > KEYWORD_LIMIT:
         keywords = await compact_boolean_query(keywords)
     return keywords
 
