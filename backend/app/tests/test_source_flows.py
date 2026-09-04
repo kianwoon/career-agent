@@ -1,7 +1,10 @@
 """Tests for the guided-wizard templatizer and domain parsing."""
 
 from app.services.source_flows import (
+    SEEK_KEYWORD_LIMIT,
     build_boolean_keywords,
+    build_boolean_keywords_async,
+    compact_boolean_query,
     domain_of,
     filter_excluded_results,
     templatize,
@@ -44,6 +47,52 @@ def test_boolean_keywords_preserves_existing_syntax():
 
 def test_boolean_keywords_empty():
     assert build_boolean_keywords([], []) == ""
+
+
+def test_boolean_keywords_truncates_over_seek_limit():
+    long_q = " OR ".join([f'"skill number {i} engineer"' for i in range(40)])
+    out = build_boolean_keywords([long_q], [])
+    assert len(out) <= SEEK_KEYWORD_LIMIT
+
+
+async def test_compact_boolean_query_llm_preserves_syntax(monkeypatch):
+    async def fake_chat(self, system, user):
+        return '"QC technician" OR "QC inspector" OR microarray'
+
+    monkeypatch.setattr("app.services.llm.LLMService.enabled", property(lambda self: True))
+    monkeypatch.setattr("app.services.llm.LLMService.chat", fake_chat)
+    long_q = " OR ".join([f'"term number {i} technician"' for i in range(40)])
+    out = await compact_boolean_query(long_q)
+    assert out == '"QC technician" OR "QC inspector" OR microarray'
+
+
+async def test_compact_boolean_query_falls_back_when_llm_disabled(monkeypatch):
+    monkeypatch.setattr("app.services.llm.LLMService.enabled", property(lambda self: False))
+    long_q = "x" * (SEEK_KEYWORD_LIMIT + 100)
+    out = await compact_boolean_query(long_q)
+    assert len(out) <= SEEK_KEYWORD_LIMIT
+
+
+async def test_build_boolean_keywords_async_uses_llm(monkeypatch):
+    from app.services import source_flows
+
+    async def fake_compact(keywords, limit=SEEK_KEYWORD_LIMIT):
+        return "compacted"
+
+    monkeypatch.setattr(source_flows, "compact_boolean_query", fake_compact)
+    out = await build_boolean_keywords_async(["skill one", "skill two"], ["x" * 600])
+    assert out == "compacted"
+
+
+async def test_build_boolean_keywords_async_short_query_no_llm(monkeypatch):
+    from app.services import source_flows
+
+    async def fail_compact(keywords, limit=SEEK_KEYWORD_LIMIT):
+        raise AssertionError("LLM should not be called for short queries")
+
+    monkeypatch.setattr(source_flows, "compact_boolean_query", fail_compact)
+    out = await build_boolean_keywords_async(["dev"], [])
+    assert out == "dev"
 
 
 def test_filter_excluded_results_drops_matches():

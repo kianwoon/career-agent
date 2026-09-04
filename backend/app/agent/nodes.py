@@ -139,7 +139,7 @@ async def _search_candidates_via_flow(
     from app.db import async_session
     from app.models.orm import Source, SourceFlow
     from app.services.source_flows import (
-        build_boolean_keywords,
+        build_boolean_keywords_async,
         execute_flow,
         filter_excluded_results,
     )
@@ -169,7 +169,7 @@ async def _search_candidates_via_flow(
             "human_reason": f"{source.name}: no active find_candidates flow — record one from the Sources panel",
         }
 
-    flow_query = build_boolean_keywords(queries, excludes) or " ".join(queries)
+    flow_query = await build_boolean_keywords_async(queries, excludes) or " ".join(queries)
 
     # Prefer the browser-extension agent (real browser, never blocked);
     # fall back to server-side Playwright.
@@ -406,14 +406,14 @@ async def _search_custom_sources(
     # merge plan queries[] + exclude[] into ONE string — e.g.
     # '"software engineer" OR developer NOT ("recruiter" OR "talent acquisition")'.
     # Without a plan this degrades to the plain query (unchanged behavior).
-    from app.services.source_flows import build_boolean_keywords, filter_excluded_results
+    from app.services.source_flows import build_boolean_keywords_async, filter_excluded_results
 
     plan = state.get("plan") or {}
     plan_queries = [q.strip() for q in (plan.get("queries") or []) if q and q.strip()] or (
         [query.strip()] if query.strip() else []
     )
     plan_excludes = [e.strip() for e in (plan.get("exclude") or []) if e and e.strip()]
-    flow_query = build_boolean_keywords(plan_queries, plan_excludes) or query
+    flow_query = await build_boolean_keywords_async(plan_queries, plan_excludes) or query
 
     raw: list[dict[str, Any]] = []
     ok: list[str] = []

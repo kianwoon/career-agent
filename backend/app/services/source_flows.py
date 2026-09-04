@@ -808,8 +808,9 @@ def domain_of(url: str) -> str:
 # Boolean keyword mapping for custom-source search boxes
 # ---------------------------------------------------------------------------
 
-# seek (and most boolean search boxes) silently return junk/zero for very
-# long keyword strings — mirror LinkedIn's MAX_NOT_TERMS conservatism.
+# seek boolean box hard limit: 500 characters (shows "500 characters or less"
+# error otherwise). Truncate longest OR-terms first so query always fits.
+SEEK_KEYWORD_LIMIT = 500
 MAX_NOT_TERMS = 4
 
 
@@ -818,7 +819,9 @@ def _quote_term(term: str) -> str:
     return f'"{term}"' if " " in term else term
 
 
-def build_boolean_keywords(queries: list[str], excludes: list[str] | None) -> str:
+def build_boolean_keywords(
+    queries: list[str], excludes: list[str] | None, truncate: bool = True
+) -> str:
     """Merge plan queries + excludes into ONE boolean string for a site's
     keyword box (seek's 'Keywords in CV / Profile', etc.).
 
@@ -845,6 +848,58 @@ def build_boolean_keywords(queries: list[str], excludes: list[str] | None) -> st
     if terms:
         quoted = " OR ".join(_quote_term(t) for t in terms[:MAX_NOT_TERMS])
         keywords = f"{keywords} NOT ({quoted})"
+    # SEEK hard limit: 500 chars — hard truncate as deterministic safety net
+    # (unless the caller compacts via LLM instead — see async variant below).
+    if truncate and len(keywords) > SEEK_KEYWORD_LIMIT:
+        keywords = keywords[:SEEK_KEYWORD_LIMIT].rstrip()
+    return keywords
+
+
+async def compact_boolean_query(keywords: str, limit: int = SEEK_KEYWORD_LIMIT) -> str:
+    """Compact a boolean keyword string via LLM to fit SEEK's char limit.
+
+    Preserves boolean semantics (OR/AND/NOT groups, quoted phrases) instead
+    of blind truncation. Falls back to hard truncate when the LLM is
+    disabled, errors, or returns something unusable.
+    """
+    keywords = (keywords or "").strip()
+    if len(keywords) <= limit:
+        return keywords
+    try:
+        from app.services.llm import LLMService
+
+        llm = LLMService()
+        if llm.enabled:
+            raw = await llm.chat(
+                "You compact job-search boolean strings for SEEK's keyword box "
+                "(max 500 characters, error otherwise). Preserve the search intent: "
+                "keep the most important skills/titles, keep valid boolean syntax "
+                "(OR/AND/NOT with parentheses and quoted multi-word phrases). "
+                "Drop the least important OR-terms first. "
+                "Reply with ONLY the compacted boolean string. No other text.",
+                f"Compact this to {limit} characters or less:\n{keywords}",
+            )
+            if raw:
+                compacted = raw.strip()
+                # strip code-fence wrapper if the model added one
+                if compacted.startswith("```"):
+                    lines = compacted.split("\n")
+                    lines = [ln for ln in lines if not ln.strip().startswith("```")]
+                    compacted = "\n".join(lines).strip()
+                if compacted and len(compacted) <= limit:
+                    return compacted
+    except Exception:
+        pass
+    return keywords[:limit].rstrip()
+
+
+async def build_boolean_keywords_async(
+    queries: list[str], excludes: list[str] | None
+) -> str:
+    """Async variant: build keywords then LLM-compact if over SEEK's limit."""
+    keywords = build_boolean_keywords(queries, excludes, truncate=False)
+    if len(keywords) > SEEK_KEYWORD_LIMIT:
+        keywords = await compact_boolean_query(keywords)
     return keywords
 
 
