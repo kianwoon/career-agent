@@ -26,9 +26,10 @@ logger = logging.getLogger(__name__)
 COMMAND_TIMEOUT_S = 180.0
 
 # MV3 Chrome can only fire alarms every >=30s, so a suspended worker that
-# wakes on its alarm polls at best every ~30s. 40s covers that cadence with
-# headroom while still expiring a genuinely-closed browser within a minute.
-CONNECTED_WINDOW_S = 40.0
+# wakes on its alarm polls at best every ~30s. 90s covers that cadence plus
+# a busy worker executing a long tab command (which used to starve /poll
+# and made the very next search leg think the agent was gone).
+CONNECTED_WINDOW_S = 90.0
 
 
 @dataclass

@@ -1066,33 +1066,35 @@ function sleep(ms) {
 }
 
 async function pollOnce() {
-  if (busy) return;
-  busy = true;
-  try {
-    const res = await fetch(`${API_BASE}/api/v1/agent/poll`);
-    if (!res.ok) {
-      setBadge(false);
-      return;
-    }
-    const data = await res.json();
-    if (data.command) {
-      const { id, action, params } = data.command;
-      setBadge(true);
-      try {
-        const result = await executeCommand({ action, params });
-        await postResult(id, true, result, null);
-      } catch (e) {
-        await postResult(id, false, null, String((e && e.message) || e));
-      }
-    } else {
-      // poll itself proves liveness server-side; badge reflects that.
-      setBadge(true);
-    }
-  } catch (e) {
-    // API unreachable — expected when backend is down.
+  // Even while a command executes (busy), KEEP POLLING: the fetch itself is
+  // the server's liveness signal, and a multi-minute LinkedIn plan used to
+  // starve /agent/poll for >40s — the backend then judged the agent
+  // offline and the NEXT queued leg fell back to server Playwright with a
+  // stale cookie blob ("Session expired" pause). Executing a command and
+  // polling are independent fetches; only skip fetching a SECOND command
+  // while one is running.
+  const res = await fetch(`${API_BASE}/api/v1/agent/poll`);
+  if (!res.ok) {
     setBadge(false);
-  } finally {
-    busy = false;
+    return;
+  }
+  const data = await res.json();
+  if (data.command && !busy) {
+    const { id, action, params } = data.command;
+    setBadge(true);
+    busy = true;
+    executeCommand({ action, params })
+      .then((result) => postResult(id, true, result, null))
+      .catch((e) => postResult(id, false, null, String((e && e.message) || e)))
+      .finally(() => {
+        busy = false;
+      });
+  } else if (data.command && busy) {
+    // One command at a time — drop the extra command, it will time out
+    // server-side; poll keeps flowing so liveness stays fresh.
+    await postResult(data.command.id, false, null, "agent busy executing another command");
+  } else {
+    setBadge(true);
   }
 }
 
