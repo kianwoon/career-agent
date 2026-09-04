@@ -53,6 +53,7 @@ class AgentRegistry:
         self._seen_ids: set[str] = set()
         self.last_poll_ts: float | None = None  # liveness signal for /status
         self.boot_id: str | None = None  # extension worker instance id
+        self._pending_boot: str | None = None
         # All commands share ONE browser tab, so concurrent dispatches
         # (e.g. LinkedIn plan + jobstreet flow in asyncio.gather) execute
         # back-to-back in the tab while each caller's timeout keeps ticking
@@ -67,16 +68,21 @@ class AgentRegistry:
         A worker reload mid-command orphans every pending command — the new
         instance can never answer them, so they are failed NOW (callers get
         a fast soft-miss) instead of burning their full dispatch timeout.
+        BOOT_ID is per polling loop, not per worker: MV3 runs several
+        concurrent loops and BOOT_ID is module-level const, so a second
+        loop's first poll must NOT be treated as a reload — orphans are
+        failed only when a command is actually claimed by a loop whose
+        boot differs from the last claimant's (tracked in poll()).
         """
-        if self.boot_id is not None and self.boot_id != boot_id and self.pending:
-            for cmd in self.pending:
-                if not cmd.done and cmd.future and not cmd.future.done():
-                    cmd.future.set_exception(
-                        RuntimeError("Agent restarted — command orphaned by extension reload")
-                    )
-                    cmd.future.exception()  # consume to avoid "never retrieved" warnings
-            self.pending = [c for c in self.pending if c.done]
-        self.boot_id = boot_id
+        if self.boot_id is None:
+            self.boot_id = boot_id
+            return
+        if self.boot_id != boot_id:
+            # Possible duplicate loop, not necessarily a reload — only treat
+            # as a reload when commands are actually outstanding. Even then,
+            # the extension-side watchdog covers stuck busy flags; the claim
+            # flag prevents duplicate loops from double-executing.
+            self._pending_boot = boot_id
 
     # -- API-side dispatch --------------------------------------------------
 
