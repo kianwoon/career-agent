@@ -42,17 +42,24 @@ async def agent_poll(wait: int = 0, boot: str | None = None) -> dict[str, Any]:
     """
     if boot is not None:
         agent_registry.note_boot(boot)
+    # NOTE: poll() CLAIMS the returned command (deliver-once, so duplicate
+    # extension loops can't double-execute). Every call must use its return
+    # value — a throwaway poll() call claims a command and drops it, and the
+    # next call finds nothing (this silently starved ALL dispatches).
+    cmd = None
     if wait > 0:
         deadline = asyncio.get_event_loop().time() + min(wait, 25)
-        while agent_registry.poll() is None:
+        while True:
+            cmd = agent_registry.poll()
+            if cmd is not None:
+                break
             if asyncio.get_event_loop().time() >= deadline:
                 break
             await asyncio.sleep(0.5)
     else:
-        # Single poll also refreshes liveness.
-        agent_registry.poll()
+        # Single poll refreshes liveness and fetches at once.
+        cmd = agent_registry.poll()
 
-    cmd = agent_registry.poll()
     if cmd is None:
         return {"command": None}
     return {"command": {"id": cmd.id, "action": cmd.action, "params": cmd.params}}
