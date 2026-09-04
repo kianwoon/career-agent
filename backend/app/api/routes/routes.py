@@ -317,72 +317,86 @@ async def _run_task(
 
             user_id = await _default_user_id(db)
             for r in result_state.get("results", []):
-                if task_type == SearchType.jobs:
-                    entity = (
-                        await db.execute(
-                            select(Job).where(Job.source_url == (r.source_url or ""))
-                        )
-                    ).scalar_one_or_none()
-                    if entity is None:
-                        entity = Job(
-                            user_id=user_id,
-                            title=r.title,
-                            company=r.subtitle or r.title,
-                            location=r.location,
-                            description=r.match_reason or "",
-                            source=r.source,
-                            source_url=r.source_url or "",
-                            posted_at=None,
-                            employment_type=None,
-                            salary_text=None,
-                        )
-                        db.add(entity)
-                        await db.flush()
-                else:
-                    # Identity = platform + URL + name. Flow-based sources
-                    # may share one landing URL across candidates, so URL
-                    # alone cannot be the dedup key here either.
-                    entity = (
-                        await db.execute(
-                            select(Candidate).where(
-                                Candidate.source == r.source,
-                                Candidate.source_url == (r.source_url or ""),
-                                Candidate.name == r.title,
-                            )
-                        )
-                    ).scalar_one_or_none()
-                    if entity is None:
-                        entity = Candidate(
-                            user_id=user_id,
-                            name=r.title,
-                            headline=r.subtitle,
-                            location=r.location,
-                            summary=getattr(r, "summary", "") or r.match_reason or "",
-                            skills=getattr(r, "skills", []) or [],
-                            experience=getattr(r, "experience", "") or "",
-                            education=getattr(r, "education", "") or "",
-                            certifications=getattr(r, "certifications", "") or "",
-                            source=r.source,
-                            source_url=r.source_url or "",
-                        )
-                        db.add(entity)
-                        await db.flush()
-                    else:
-                        # Enrich an existing row if it was created before
-                        # profile enrichment existed.
-                        enriched_summary = getattr(r, "summary", "") or ""
-                        enriched_skills = getattr(r, "skills", []) or []
-                        enriched_experience = getattr(r, "experience", "") or ""
-                        if enriched_summary and len(enriched_summary) > len(entity.summary or ""):
-                            entity.summary = enriched_summary
-                        if enriched_skills:
-                            entity.skills = enriched_skills
-                        if enriched_experience and len(enriched_experience) > len(entity.experience or ""):
-                            entity.experience = enriched_experience
-                        if getattr(r, "education", ""):
-                            entity.education = r.education
-                        if getattr(r, "certifications", ""):
-                            entity.certifications = r.certifications
+                # Defensive clamp: MatchResult strings must fit the DB
+                # varchar columns. A bad row must never poison the session
+                # and wipe out every other result (StringDataRightTruncation
+                # rolls back the whole transaction). Savepoint per row so
+                # one failure can't take the rest down either.
+                try:
+                    async with db.begin_nested():
+                        if task_type == SearchType.jobs:
+                            entity = (
+                                await db.execute(
+                                    select(Job).where(Job.source_url == (r.source_url or ""))
+                                )
+                            ).scalar_one_or_none()
+                            if entity is None:
+                                entity = Job(
+                                    user_id=user_id,
+                                    title=(r.title or "")[:500],
+                                    company=(r.subtitle or r.title or "")[:255],
+                                    location=(r.location or "")[:255] or None,
+                                    description=r.match_reason or "",
+                                    source=r.source,
+                                    source_url=r.source_url or "",
+                                    posted_at=None,
+                                    employment_type=None,
+                                    salary_text=None,
+                                )
+                                db.add(entity)
+                                await db.flush()
+                        else:
+                            # Identity = platform + URL + name. Flow-based sources
+                            # may share one landing URL across candidates, so URL
+                            # alone cannot be the dedup key here either.
+                            entity = (
+                                await db.execute(
+                                    select(Candidate).where(
+                                        Candidate.source == r.source,
+                                        Candidate.source_url == (r.source_url or ""),
+                                        Candidate.name == r.title,
+                                    )
+                                )
+                            ).scalar_one_or_none()
+                            if entity is None:
+                                entity = Candidate(
+                                    user_id=user_id,
+                                    name=(r.title or "")[:255],
+                                    headline=(r.subtitle or "")[:500] or None,
+                                    location=(r.location or "")[:255] or None,
+                                    summary=getattr(r, "summary", "") or r.match_reason or "",
+                                    skills=getattr(r, "skills", []) or [],
+                                    experience=getattr(r, "experience", "") or "",
+                                    education=getattr(r, "education", "") or "",
+                                    certifications=getattr(r, "certifications", "") or "",
+                                    source=r.source,
+                                    source_url=r.source_url or "",
+                                )
+                                db.add(entity)
+                                await db.flush()
+                except Exception as row_exc:
+                    logger.warning("Skipping unpersistable row (%s): %s", r.source, row_exc)
+                    continue
+                if entity is None:
+                    # Row was skipped but swallowed silently — don't attach
+                    # an evaluation to a phantom entity.
+                    continue
+                if task_type != SearchType.jobs:
+                    # Enrich an existing row if it was created before
+                    # profile enrichment existed.
+                    enriched_summary = getattr(r, "summary", "") or ""
+                    enriched_skills = getattr(r, "skills", []) or []
+                    enriched_experience = getattr(r, "experience", "") or ""
+                    if enriched_summary and len(enriched_summary) > len(entity.summary or ""):
+                        entity.summary = enriched_summary
+                    if enriched_skills:
+                        entity.skills = enriched_skills
+                    if enriched_experience and len(enriched_experience) > len(entity.experience or ""):
+                        entity.experience = enriched_experience
+                    if getattr(r, "education", ""):
+                        entity.education = r.education
+                    if getattr(r, "certifications", ""):
+                        entity.certifications = r.certifications
                 db.add(
                     MatchEvaluation(
                         task_id=task.id,

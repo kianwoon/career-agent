@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any, TypedDict
 
 from sqlalchemy import func, select
@@ -36,6 +37,12 @@ def _candidate_adapters() -> dict[str, Any]:
     return _CANDIDATE_PLATFORM_ADAPTERS
 
 
+# A real person name is short; anything longer is a textContent blob from a
+# drifted card selector (block elements concatenate without separators:
+# "Tang Yee HennSenior QC Technician (Deputy Shift Lead) at ...").
+_NAME_DISPLAY_MAX = 120
+
+
 def _normalize_flow_candidate(
     r: dict[str, Any], source_name: str, idx: int, base_url: str | None = None
 ) -> dict[str, Any] | None:
@@ -55,7 +62,17 @@ def _normalize_flow_candidate(
     """
     raw_text = str(r.get("raw_text") or "")
     lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
-    name = str(r.get("title") or "").strip() or (lines[0] if lines else "")
+    raw_name = str(r.get("title") or "").strip() or (lines[0] if lines else "")
+    # Card-selector drift returns the whole card (or app root) as one
+    # concatenated blob: "Tang Yee HennSenior QC Technician (Deputy Shift
+    # Lead) at ...". Split NAME from ROLE at the first INNER capital that
+    # starts a word glued to a lowercase letter (…HennSenior…, e… at…),
+    # then cut: names are short, roles go to headline/experience.
+    name = raw_name
+    tail = ""
+    m = re.search(r"(?<=[a-z])(?=[A-Z][a-z])", raw_name)
+    if m and (len(raw_name) > _NAME_DISPLAY_MAX or not str(r.get("title") or "").strip()):
+        name, tail = raw_name[: m.start()], raw_name[m.start():]
     # Page-chrome junk guard: when a recorded card selector drifts (seek
     # rotates obfuscated classes), extraction can return the whole app root
     # and the "name" becomes the page's first text line ("Skip to
@@ -86,6 +103,7 @@ def _normalize_flow_candidate(
     headline = (
         str(r.get("summary") or "").strip()
         or str(r.get("company") or "").strip()
+        or (tail.strip()[:500] if tail else "")
         or (lines[1] if len(lines) > 1 else None)
     )
     source_url = str(r.get("url") or "").strip()
@@ -108,11 +126,17 @@ def _normalize_flow_candidate(
             # Generic platform landing page — the user opens it and
             # searches the candidate name there.
             source_url = base_url
+    # Belt + suspenders: DB name is varchar(255). The split above handles
+    # concatenated blobs, but a legitimately long single-line title (no
+    # camel split point) must still never kill the whole task's commit.
+    name = name.strip()[:255] or f"{source_name} candidate {idx + 1}"
+    headline = (headline or "").strip()[:500] or None
+    location = str(r.get("location") or "").strip()[:255] or None
     return {
         "id": r.get("id") or f"flow-{abs(hash((name, headline, idx)))}",
-        "name": name or f"{source_name} candidate {idx + 1}",
-        "headline": headline or None,
-        "location": r.get("location") or None,
+        "name": name,
+        "headline": headline,
+        "location": location,
         "summary": str(r.get("summary") or "")[:500],
         "skills": [],
         "experience": raw_text[:800],
