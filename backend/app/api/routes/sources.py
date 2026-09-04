@@ -628,8 +628,13 @@ async def _agent_discover(source: Source, req: AgentRecordRequest) -> list[dict[
     from app.services.agent_relay import agent_registry
 
     if "seek.com" in (source.domain or ""):
+        logger.info("agent_record: seek discovery for %s starting", source.name)
         try:
-            data = await agent_registry.dispatch(
+            # NOTE: run_flow's step loop does NOT execute find_result_card
+            # steps (only navigate/fill/click/press/wait/card) — the card
+            # detector must be dispatched as its own top-level command
+            # (supported since extension v1.5.0).
+            await agent_registry.dispatch(
                 "run_flow",
                 {
                     "baseUrl": source.base_url,
@@ -638,22 +643,25 @@ async def _agent_discover(source: Source, req: AgentRecordRequest) -> list[dict[
                         {"action": "navigate", "url": source.base_url},
                         {"action": "fill", "selector": "#uncoupledFreeText", "param": "query"},
                         {"action": "press", "key": "Enter"},
-                        {"action": "wait", "seconds": 3},
-                        {"action": "find_result_card"},
+                        {"action": "wait", "seconds": 5},
                     ],
                 },
                 timeout_s=120,
             )
-            results = data if isinstance(data, list) else []
-            found = results[0] if results else {}
-            if found.get("found") and found.get("card"):
+            found = await agent_registry.dispatch("find_result_card", {}, timeout_s=30)
+            logger.info(
+                "agent_record: seek find_result_card → %s", json.dumps(found)[:200] if found else found
+            )
+            if isinstance(found, dict) and found.get("found") and found.get("card"):
+                logger.info("agent_record: seek card found: %s", found["card"])
                 return [
                     {"action": "navigate", "url": source.base_url},
                     {"action": "fill", "selector": "#uncoupledFreeText", "param": "query"},
                     {"action": "press", "key": "Enter"},
-                    {"action": "wait", "seconds": 3},
+                    {"action": "wait", "seconds": 5},
                     {"card": found["card"], "fields": {"title": "a"}},
                 ]
+            logger.warning("agent_record: seek no card detected: %s", found)
             raise HTTPException(
                 502,
                 "Seek results page returned no detectable result cards — "
@@ -662,6 +670,7 @@ async def _agent_discover(source: Source, req: AgentRecordRequest) -> list[dict[
         except HTTPException:
             raise
         except Exception as exc:
+            logger.exception("agent_record: seek discovery failed")
             raise HTTPException(502, f"Agent discovery failed: {str(exc)[:120]}")
 
     try:
