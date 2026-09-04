@@ -41,6 +41,7 @@ class Command:
     result: Any | None = None
     error: str | None = None
     done: bool = False
+    claimed: bool = False  # handed to the extension; never re-offer while claimed
     future: asyncio.Future = field(default_factory=lambda: asyncio.get_event_loop().create_future())
 
 
@@ -116,7 +117,6 @@ class AgentRegistry:
         try:
             cmd = Command(id=f"cmd-{uuid.uuid4().hex[:12]}", action=action, params=params)
             self.pending.append(cmd)
-            deadline = time.time() + timeout_s
             try:
                 return await asyncio.wait_for(cmd.future, timeout=timeout_s)
             except TimeoutError:
@@ -126,25 +126,18 @@ class AgentRegistry:
                 )
             except RuntimeError as exc:
                 if "agent busy" in str(exc).lower():
-                    # Extension rejected the command because it is still
-                    # executing a previous one (possible across Koyeb
-                    # instances whose locks are per-process). Brief backoff,
-                    # then re-dispatch within the remaining timeout budget.
-                    # The retry MUST run with the lock RELEASED — asyncio.Lock
-                    # is not reentrant, so a recursive dispatch while holding
-                    # it waits 60s for its own lock and dies (live 2026-09-04).
+                    # Extension rejected the command because a STALE busy flag
+                    # (leaked promise — cleared by the extension-side watchdog
+                    # within ~4 min) or a duplicate poll loop is holding the
+                    # tab. Do NOT stack retries: each one leaves an orphan in
+                    # pending that poll() would hand to the extension again —
+                    # the previous retry chain shrank 120s→5s and 504'd the
+                    # request (live 2026-09-04). Fail fast so the UI reports
+                    # "agent busy — wait and press Record again" immediately.
                     self.pending = [c for c in self.pending if c.id != cmd.id]
-                    self._exec_lock.release()
-                    locked = False
-                    await asyncio.sleep(3)
-                    if time.time() < deadline:
-                        return await self.dispatch(
-                            action, params,
-                            timeout_s=max(5.0, deadline - time.time()),
-                            lock_wait_s=lock_wait_s,
-                        )
                     raise RuntimeError(
-                        f"Agent busy for entire {timeout_s:.0f}s budget — command '{action}' not sent"
+                        "Agent is busy finishing a previous command — "
+                        "wait ~10s and press Record again"
                     )
                 raise
             except BaseException:
@@ -170,9 +163,11 @@ class AgentRegistry:
         # to the extension for re-execution); return the oldest live one.
         now = time.time()
         self.pending = [c for c in self.pending if now - c.enqueued_at < COMMAND_TIMEOUT_S]
-        if not self.pending:
-            return None
-        return self.pending[0]
+        for c in self.pending:
+            if not c.done and not c.claimed:
+                c.claimed = True  # deliver ONCE — a duplicate loop must
+                return c          # never get the same command twice
+        return None
 
     def resolve(self, cmd_id: str, ok: bool, data: Any = None, error: str | None = None) -> bool:
         for i, cmd in enumerate(self.pending):
