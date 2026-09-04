@@ -867,9 +867,39 @@ async function cmdLinkedinJobsSearch(params) {
 // Events live on window.__caRecord in the page itself, so soft navigations
 // within an SPA (seek's filter panel re-renders in place) don't lose them.
 
-async function cmdStartRecord() {
-  // Ensure we have an agent tab (about:blank is fine — the user will navigate
-  // it or it's already on the site from a previous discover).
+async function cmdStartRecord(baseUrl) {
+  // The recorder must live in the tab the USER will click filters in.
+  // After a worker reload agentTabId is null — creating about:blank here
+  // (the old behavior) installed the recorder on a hidden empty tab, so
+  // every click on the real site was lost ("No clicks were recorded").
+  // Instead: reuse the agent tab if it's on the source site, else attach to
+  // the user's existing tab on that site, else open a NEW ACTIVE tab there
+  // (active — the user must see it to click filters).
+  if (agentTabId !== null) {
+    try {
+      const t = await chrome.tabs.get(agentTabId);
+      if (!t || t.url === undefined || !t.url.includes("http")) {
+        agentTabId = null;
+      }
+    } catch {
+      agentTabId = null;
+    }
+  }
+  if (agentTabId === null && baseUrl) {
+    const host = new URL(baseUrl).hostname;
+    const tabs = await chrome.tabs.query({ url: `*://*.${host}/*` });
+    if (tabs.length > 0) {
+      agentTabId = tabs[0].id;
+      await chrome.tabs.update(agentTabId, { active: true });
+    } else {
+      const tab = await chrome.tabs.create({ active: true, url: baseUrl });
+      agentTabId = tab.id;
+      await waitForComplete(agentTabId);
+    }
+  }
+  if (agentTabId === null) {
+    await ensureTab(baseUrl || "about:blank");
+  }
   await execOnTab(() => {
     if (window.__caRecord) return { already: true };
     window.__caRecord = { events: [], capture: null };
@@ -1053,7 +1083,7 @@ async function executeCommand(cmd) {
     case "run_flow": return cmdRunFlow(params.baseUrl, params.query, params.steps);
     case "discover_flow": return cmdDiscoverFlow(params.baseUrl, params.query, params.flowType);
     case "get_cookies": return cmdGetCookies(params.url);
-    case "start_record": return cmdStartRecord();
+    case "start_record": return cmdStartRecord(params.baseUrl);
     case "stop_record": return cmdStopRecord();
     case "find_result_card": return cmdFindResultCard();
     case "linkedin_people_plan": return cmdLinkedinPeoplePlan(params);

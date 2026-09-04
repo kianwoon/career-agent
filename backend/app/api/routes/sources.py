@@ -367,11 +367,16 @@ async def agent_record_manual_start(
     click is captured in the page; /agent_record/stop collects them and merges
     them into the flow after the search steps.
     """
-    await _get_source(source_id, db)  # 404 if unknown source
+    source = await _get_source(source_id, db)  # 404 if unknown source
     from app.services.agent_relay import agent_registry
 
     try:
-        await agent_registry.dispatch("start_record", {}, timeout_s=30)
+        # Pass the source base_url so the recorder attaches to a tab the
+        # user can actually see/click (worker reload loses agentTabId —
+        # creating about:blank silently captured zero clicks).
+        await agent_registry.dispatch(
+            "start_record", {"baseUrl": source.base_url}, timeout_s=30
+        )
     except RuntimeError as exc:
         raise HTTPException(502, str(exc))
     return {"ok": True, "recording": True}
