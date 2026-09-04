@@ -112,6 +112,7 @@ class AgentRegistry:
                 f"Agent busy — dispatch lock not released within {lock_wait_s:.0f}s "
                 "(a previous command is stuck or the extension reloaded mid-run)"
             )
+        locked = True
         try:
             cmd = Command(id=f"cmd-{uuid.uuid4().hex[:12]}", action=action, params=params)
             self.pending.append(cmd)
@@ -129,10 +130,22 @@ class AgentRegistry:
                     # executing a previous one (possible across Koyeb
                     # instances whose locks are per-process). Brief backoff,
                     # then re-dispatch within the remaining timeout budget.
+                    # The retry MUST run with the lock RELEASED — asyncio.Lock
+                    # is not reentrant, so a recursive dispatch while holding
+                    # it waits 60s for its own lock and dies (live 2026-09-04).
                     self.pending = [c for c in self.pending if c.id != cmd.id]
+                    self._exec_lock.release()
+                    locked = False
                     await asyncio.sleep(3)
                     if time.time() < deadline:
-                        return await self.dispatch(action, params, timeout_s=max(5.0, deadline - time.time()), lock_wait_s=lock_wait_s)
+                        return await self.dispatch(
+                            action, params,
+                            timeout_s=max(5.0, deadline - time.time()),
+                            lock_wait_s=lock_wait_s,
+                        )
+                    raise RuntimeError(
+                        f"Agent busy for entire {timeout_s:.0f}s budget — command '{action}' not sent"
+                    )
                 raise
             except BaseException:
                 # Cancellation (watchdog deadline, shutdown) must not leave
@@ -142,7 +155,8 @@ class AgentRegistry:
                 self.pending = [c for c in self.pending if c.id != cmd.id]
                 raise
         finally:
-            self._exec_lock.release()
+            if locked:
+                self._exec_lock.release()
 
     # -- extension-side poll/result -----------------------------------------
 
