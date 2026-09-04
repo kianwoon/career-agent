@@ -115,6 +115,7 @@ class AgentRegistry:
         try:
             cmd = Command(id=f"cmd-{uuid.uuid4().hex[:12]}", action=action, params=params)
             self.pending.append(cmd)
+            deadline = time.time() + timeout_s
             try:
                 return await asyncio.wait_for(cmd.future, timeout=timeout_s)
             except TimeoutError:
@@ -122,6 +123,17 @@ class AgentRegistry:
                 raise RuntimeError(
                     f"Agent command '{action}' timed out after {timeout_s:.0f}s (is the browser open?)"
                 )
+            except RuntimeError as exc:
+                if "agent busy" in str(exc).lower():
+                    # Extension rejected the command because it is still
+                    # executing a previous one (possible across Koyeb
+                    # instances whose locks are per-process). Brief backoff,
+                    # then re-dispatch within the remaining timeout budget.
+                    self.pending = [c for c in self.pending if c.id != cmd.id]
+                    await asyncio.sleep(3)
+                    if time.time() < deadline:
+                        return await self.dispatch(action, params, timeout_s=max(5.0, deadline - time.time()), lock_wait_s=lock_wait_s)
+                raise
             except BaseException:
                 # Cancellation (watchdog deadline, shutdown) must not leave
                 # the abandoned command in the queue — poll() would keep
