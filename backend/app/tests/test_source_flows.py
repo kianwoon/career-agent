@@ -44,11 +44,10 @@ def test_boolean_keywords_with_excludes():
 
 
 def test_boolean_keywords_cap_not_terms():
-    # 5 excludes -> only first 4 in the NOT clause (boolean-engine quirk:
-    # 5+ silently returns zero results).
+    # NOT clause widened to 12 terms (flow platforms run one query per leg;
+    # filter_excluded_results still enforces the full list post-hoc).
     out = build_boolean_keywords(["dev"], ["a", "b", "c", "d", "e"])
-    assert 'NOT (a OR b OR c OR d)' in out
-    assert ' e' not in out
+    assert 'NOT (a OR b OR c OR d OR e)' in out
 
 
 def test_boolean_keywords_preserves_existing_syntax():
@@ -210,3 +209,46 @@ def test_record_stop_rejects_empty_clicks():
 
     req = AgentRecordRequest(flow_type="find_candidates")
     assert req.query_hint is None
+
+
+def test_max_not_terms_widened_to_12():
+    """Flow platforms run one query per navigation leg, so the NOT clause can
+    carry up to 12 exclude terms (post-filter still enforces the full list)."""
+    from app.services.source_flows import MAX_NOT_TERMS
+
+    assert MAX_NOT_TERMS == 12
+    excludes = [f"x{i}" for i in range(12)]
+    out = build_boolean_keywords(["dev"], excludes)
+    for t in excludes:
+        assert t in out
+
+
+async def test_build_boolean_keywords_async_limit_900_no_compaction(monkeypatch):
+    from app.services import source_flows
+
+    async def fail_compact(keywords, limit=KEYWORD_LIMIT):
+        raise AssertionError("LLM compaction must not run under limit=900")
+
+    monkeypatch.setattr(source_flows, "compact_boolean_query", fail_compact)
+    queries = [" OR ".join([f'"long skill phrase {i} engineer"' for i in range(20)])]
+    assert len(" OR ".join(queries)) > KEYWORD_LIMIT
+    assert len(" OR ".join(queries)) <= source_flows.KEYWORD_LIMIT_FLOW
+    out = await build_boolean_keywords_async(queries, [], limit=source_flows.KEYWORD_LIMIT_FLOW)
+    assert len(out) <= source_flows.KEYWORD_LIMIT_FLOW
+    assert len(out) > KEYWORD_LIMIT  # kept more than the 500-char cap allows
+
+
+async def test_build_boolean_keywords_async_default_limit_compacts(monkeypatch):
+    from app.services import source_flows
+
+    calls: list[int] = []
+
+    async def fake_compact(keywords, limit=KEYWORD_LIMIT):
+        calls.append(limit)
+        return keywords[:limit]
+
+    monkeypatch.setattr(source_flows, "compact_boolean_query", fake_compact)
+    queries = [" OR ".join([f'"long skill phrase {i} engineer"' for i in range(30)])]
+    out = await build_boolean_keywords_async(queries, [])
+    assert calls == [KEYWORD_LIMIT]
+    assert len(out) <= KEYWORD_LIMIT

@@ -29,6 +29,7 @@
 | Treating `404` during polling as retryable | Wasted poll loops | The task row is committed before `201` returns — a `404` means the id is wrong, not "not yet visible". Fix the id; don't retry. |
 | Assuming instant results | "0 results" complaints | Plan searches (several boolean queries × platforms) legitimately run minutes. Poll until `status != "pending"/"running"`. |
 | Assuming a source with a broken flow is searched normally (or skipped silently) | That platform contributes 0 rows with a "BLOCKED: ... no active find_candidates flow" entry in the plan detail | Sources with a broken flow are still attempted and reported in `source_issues` (re-record needed), never silently dropped and never a `422`. |
+| Expecting flow platforms to OR-merge all plan queries into one keyword box | Undercounted results / LLM compaction dropping query terms | Flow platforms (e.g. `jobstreet - candidate`) run **each plan query as a separate search navigation** (parity with LinkedIn) and merge results; up to **12 exclude terms** go into the per-leg `NOT (...)` clause, and the per-leg keyword cap is 900 chars so LLM compaction rarely triggers. |
 
 ### Integration flow
 
@@ -77,7 +78,7 @@ Either **simple mode** (single `query`) or **plan mode** (`queries` + plan field
 |-------|------|----------|-------------|-------------|
 | `query` | string\|null | one of `query`/`queries` | — | Simple candidate criteria; treated as a one-query plan when `queries` absent |
 | `queries` | string[]\|null | one of `query`/`queries` | soft cap **5** | Boolean search queries, run in sequence and merged. **More than 5 is accepted** and truncated to the first 5 |
-| `exclude` | string[]\|null | no | soft cap **10** | Terms excluded via `NOT (...)` and post-filter. **More than 10 is accepted** and truncated to the first 10 |
+| `exclude` | string[]\|null | no | soft cap **10** | Terms excluded via `NOT (...)` (first **12** enter the clause on flow platforms) and post-filter. **More than 10 is accepted** and truncated to the first 10 |
 | `platforms` | string[]\|null | no | soft cap **5** | Search platforms run **in sequence and merged** (e.g. `["linkedin", "jobstreet - candidate"]`); results are combined, ranked, and the **top 10** returned. More than 5 is accepted and truncated. Unknown platform **names** are rejected with `422` |
 | `platform` | string\|null | no | — | Legacy single platform (same as one-element `platforms[]`); prefer `platforms` |
 | `location` | string\|null | no | — | Location filter, e.g. `"Singapore"` |

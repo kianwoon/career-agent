@@ -186,3 +186,145 @@ def test_normalize_flow_candidate_recovers_name_from_short_title():
     )
     assert out is not None
     assert out["name"] == "Mak Choy Yin"
+
+
+# ---------------------------------------------------------------------------
+# _search_candidates_via_flow: per-query navigations (LinkedIn parity)
+# ---------------------------------------------------------------------------
+
+class _MultiQueryFakeRegistry:
+    """Records run_flow dispatches; returns canned results per query."""
+
+    def __init__(self, rows_per_query: dict[str, list[dict]]):
+        self.calls: list[tuple[str, dict]] = []
+        self.rows_per_query = rows_per_query
+
+    @property
+    def connected(self):
+        return True
+
+    async def dispatch(self, cmd, params, timeout_s=30):
+        self.calls.append((cmd, params))
+        assert cmd == "run_flow"
+        for key, rows in self.rows_per_query.items():
+            if params["query"].startswith(key):
+                return {"results": rows}
+        return {"results": []}
+
+
+class _FakeFlowSource:
+    name = "jobstreet - candidate"
+    base_url = "https://sg.employer.seek.com/talentsearch"
+    session_state = None
+    id = 1
+
+
+class _FakeFlow:
+    id = 7
+    steps = [{"action": "fill", "selector": "#kw", "param": "query"}]
+    status = "active"
+    flow_type = "find_candidates"
+
+
+async def test_flow_search_runs_per_query_legs(monkeypatch):
+    """Each plan query gets its OWN run_flow dispatch (parity with LinkedIn's
+    per-query navigations); results merge across legs and plan_detail shows
+    per-query counts."""
+    import app.agent.nodes as nodes_mod
+
+    queries = ["python developer", "data engineer", "devops"]
+    registry = _MultiQueryFakeRegistry({
+        f'"{q}" NOT (recruiter)' if ' ' in q else f'{q} NOT (recruiter)': [{"title": f"cand-{q[:4]}"}] for q in queries
+    })
+
+    async def fake_db():
+        raise AssertionError("real DB should not be touched in this test")
+
+    async def fake_get_source_and_flow():
+        return _FakeFlowSource(), _FakeFlow()
+
+    class _FakeCtx:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def execute(self, *a, **k):
+            raise AssertionError("DB not expected")
+
+    async def fake_async_session():
+        return _FakeCtx()
+
+    # Stub the two DB lookups by faking async_session + select results.
+    async def fake_resolve():
+        return _FakeFlowSource(), _FakeFlow()
+
+    async def fake_build(qs, excludes, limit=500):
+        from app.services.source_flows import build_boolean_keywords
+        return build_boolean_keywords(qs, excludes, truncate=False) or (qs[0] if qs else "")
+
+    monkeypatch.setattr(nodes_mod, "_resolve_flow_source_and_flow", fake_resolve, raising=False)
+
+    # Instead of stubbing internals not extracted, patch db + registry via
+    # the modules _search_candidates_via_flow imports lazily.
+    import app.db as db_mod
+    import app.services.agent_relay as relay_mod
+
+    async def patched_async_session():
+        return _FakeDbCtx()
+
+    class _FakeDbCtx:
+        pass
+
+    # Simpler: craft fake db returning scalars for the two queries.
+    class _FakeResult:
+        def scalar_one_or_none(self):
+            return _FakeFlowSource()
+
+        def scalars(self):
+            return _FakeScalars()
+
+    class _FakeScalars:
+        def first(self):
+            return _FakeFlow()
+
+    class _FakeDb:
+        async def execute(self, *a, **k):
+            return _FakeResult()
+
+        async def get(self, *a, **k):
+            return None
+
+    class _FakeSessionCtx:
+        async def __aenter__(self):
+            return _FakeDb()
+
+        async def __aexit__(self, *a):
+            return False
+
+    def fake_session():
+        return _FakeSessionCtx()
+
+    monkeypatch.setattr(db_mod, "async_session", fake_session)
+    monkeypatch.setattr(relay_mod, "agent_registry", registry)
+
+    result = await nodes_mod._search_candidates_via_flow(
+        "jobstreet - candidate", queries, excludes=["recruiter"]
+    )
+
+    run_flow_calls = [p for c, p in registry.calls if c == "run_flow"]
+    assert len(run_flow_calls) == 3
+    sent_queries = [p["query"] for p in run_flow_calls]
+    assert len(set(sent_queries)) == 3  # one distinct query per leg
+    for q in queries:
+        assert any(q in sq for sq in sent_queries)
+    assert all("NOT (recruiter)" in sq for sq in sent_queries)  # excludes attached per leg
+
+    names = [r["name"] for r in result["raw_results"]]
+    assert len(names) == 3
+    assert result["needs_human"] is False
+    assert "candidate:" in result["plan_detail"]
+    for q in queries:
+        assert q[:7] in result["plan_detail"]
+    assert ": 1" in result["plan_detail"]

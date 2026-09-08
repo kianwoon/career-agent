@@ -873,7 +873,12 @@ def domain_of(url: str) -> str:
 KEYWORD_LIMIT = 500
 # Backwards-compat alias (tests + older callers import this name).
 SEEK_KEYWORD_LIMIT = KEYWORD_LIMIT
-MAX_NOT_TERMS = 4
+# Flow platforms run each plan query as a SEPARATE search (parity with the
+# LinkedIn adapter's per-query navigations), so a single leg never carries
+# more than one OR-merged query — a wider limit is safe there (SEEK's
+# uncoupledFreeText honors quotes/OR/AND/NOT well past 500 chars).
+KEYWORD_LIMIT_FLOW = 900
+MAX_NOT_TERMS = 12
 
 
 def _quote_term(term: str) -> str:
@@ -961,12 +966,16 @@ async def compact_boolean_query(keywords: str, limit: int = KEYWORD_LIMIT) -> st
 
 
 async def build_boolean_keywords_async(
-    queries: list[str], excludes: list[str] | None
+    queries: list[str], excludes: list[str] | None, limit: int = KEYWORD_LIMIT
 ) -> str:
-    """Async variant: build keywords then LLM-compact if over the limit."""
+    """Async variant: build keywords then LLM-compact if over the limit.
+
+    `limit` lets flow platforms (one query per navigation leg) raise the
+    cap — see KEYWORD_LIMIT_FLOW.
+    """
     keywords = build_boolean_keywords(queries, excludes, truncate=False)
-    if len(keywords) > KEYWORD_LIMIT:
-        keywords = await compact_boolean_query(keywords)
+    if len(keywords) > limit:
+        keywords = await compact_boolean_query(keywords, limit=limit)
     return keywords
 
 

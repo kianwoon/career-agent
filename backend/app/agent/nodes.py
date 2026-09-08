@@ -209,6 +209,7 @@ async def _search_candidates_via_flow(
     from app.db import async_session
     from app.models.orm import Source, SourceFlow
     from app.services.source_flows import (
+        KEYWORD_LIMIT_FLOW,
         build_boolean_keywords_async,
         execute_flow,
         filter_excluded_results,
@@ -239,46 +240,66 @@ async def _search_candidates_via_flow(
             "human_reason": f"{source.name}: no active find_candidates flow — record one from the Sources panel",
         }
 
-    flow_query = await build_boolean_keywords_async(queries, excludes) or " ".join(queries)
+    flow_queries: list[str] = []
+    for q in queries:
+        fq = await build_boolean_keywords_async([q], excludes, limit=KEYWORD_LIMIT_FLOW)
+        flow_queries.append(fq or q)
 
     # Prefer the browser-extension agent (real browser, never blocked);
-    # fall back to server-side Playwright.
+    # fall back to server-side Playwright. Each plan query runs as its OWN
+    # navigation (parity with the LinkedIn adapter) so wide OR-merged
+    # booleans can't starve any intent; results merge across legs.
     from app.services.agent_relay import agent_registry
 
-    results: list[dict[str, Any]] | None = None
+    results: list[dict[str, Any]] = []
     if agent_registry.connected:
-        try:
-            data = await agent_registry.dispatch(
-                "run_flow",
-                {
-                    "baseUrl": source.base_url,
-                    "query": flow_query,
-                    "steps": flow.steps,
-                },
-                timeout_s=240,
-            )
+        leg_counts: list[str] = []
+        needs_human_leg: str | None = None
+        for q in flow_queries:
+            try:
+                data = await agent_registry.dispatch(
+                    "run_flow",
+                    {
+                        "baseUrl": source.base_url,
+                        "query": q,
+                        "steps": flow.steps,
+                    },
+                    timeout_s=240,
+                )
+            except Exception as exc:
+                # Do NOT fall back to server-side Playwright for flow
+                # sources: the stored cookie blob is stale by definition
+                # (the extension browser is the live session) and seek's
+                # rotated markup makes the fallback useless. Per-leg soft
+                # miss: record and continue with remaining legs.
+                logger.warning("Agent run_flow failed for %s: %s", source.name, exc)
+                leg_counts.append(f"{q[:8]}…: dispatch failed")
+                continue
             if isinstance(data, dict) and data.get("needs_human"):
-                return {
-                    "raw_results": [],
-                    "needs_human": True,
-                    "human_reason": f"{source.name}: {data.get('error') or 'site showing a login page'}",
-                }
-            results = (data.get("results") if isinstance(data, dict) else data) or []
-        except Exception as exc:
-            # Do NOT fall back to server-side Playwright for flow sources:
-            # the stored cookie blob is stale by definition (the extension
-            # browser is the live session) and seek's rotated markup makes
-            # the fallback useless — it only produces misleading "session
-            # expired" pauses. Report the dispatch failure as a soft miss.
-            logger.warning("Agent run_flow failed for %s: %s", source.name, exc)
+                needs_human_leg = f"{source.name}: {data.get('error') or 'site showing a login page'}"
+                leg_counts.append(f"{q[:8]}…: needs human")
+                continue
+            leg_results = (data.get("results") if isinstance(data, dict) else data) or []
+            results.extend(leg_results)
+            leg_counts.append(f"{q[:8]}…: {len(leg_results)}")
+        detail = "; ".join(leg_counts)
+        if needs_human_leg and not results:
             return {
                 "raw_results": [],
-                "needs_human": False,
-                "human_reason": None,
-                "plan_detail": f"{source.name}: agent dispatch failed ({str(exc)[:80]})",
+                "needs_human": True,
+                "human_reason": needs_human_leg,
             }
+        detail = f"{source.name} - candidate: {detail}"
+        plan_detail = detail if len(detail) <= 200 else detail[:197] + "…"
+        if not results and all(c.endswith(("failed", "human")) for c in leg_counts) and leg_counts:
+            return {"raw_results": [], "needs_human": False, "human_reason": None, "plan_detail": plan_detail}
+        agent_results: list[dict[str, Any]] | None = results or None
+    else:
+        agent_results = None
+        plan_detail = None
 
-    if results is None:
+    if agent_results is None:
+        flow_query = " ".join(flow_queries)
         result = await execute_flow(
             base_url=source.base_url,
             steps=flow.steps,
@@ -305,17 +326,18 @@ async def _search_candidates_via_flow(
             }
         results = result["results"]
 
-    results = filter_excluded_results(results or [], excludes or None)
+    results = filter_excluded_results(agent_results or [], excludes or None)
     results = [
         normalized
         for i, r in enumerate(results)
         if (normalized := _normalize_flow_candidate(r, source.name, i, source.base_url))
     ]
+    final_detail = plan_detail if plan_detail else f"{source.name} flow: {len(results)} results"
     return {
         "raw_results": results,
         "needs_human": False,
         "human_reason": None,
-        "plan_detail": f"{source.name} flow: {len(results)} results",
+        "plan_detail": final_detail,
     }
 
 
