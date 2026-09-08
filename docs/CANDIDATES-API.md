@@ -220,6 +220,18 @@ Response `200`:
 | `evidence_ratio` | float 0–1 | Fraction of claimed skills evidenced in experience |
 | `flags` | array | Warnings (resume padding, job-hopping, inflated titles...) |
 
+### Compatibility
+
+External callers may also fetch results via a compatibility path:
+
+```
+GET /api/opportunities/{opportunity_id}/external-candidates/search/{task_id}
+```
+
+`opportunity_id` is the caller's own opportunity id and is **ignored** — only
+`task_id` matters. The response payload is identical to
+`GET /api/v1/tasks/{task_id}/results`.
+
 ---
 
 ## 5. Error Envelope (all endpoints)

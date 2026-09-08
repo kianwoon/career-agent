@@ -506,10 +506,7 @@ async def get_task(task_id: str, db: AsyncSession = Depends(get_db)) -> TaskStat
     )
 
 
-@router.get("/tasks/{task_id}/results", response_model=SearchTaskResult)
-async def get_task_results(
-    task_id: str, db: AsyncSession = Depends(get_db)
-) -> SearchTaskResult:
+async def _task_results_payload(task_id: str, db: AsyncSession) -> SearchTaskResult:
     task = await db.get(SearchTask, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -636,6 +633,31 @@ async def get_task_results(
         plan_detail=plan_detail,
         source_issues=source_issues,
     )
+
+
+@router.get("/tasks/{task_id}/results", response_model=SearchTaskResult)
+async def get_task_results(
+    task_id: str, db: AsyncSession = Depends(get_db)
+) -> SearchTaskResult:
+    """Canonical task results endpoint."""
+    return await _task_results_payload(task_id, db)
+
+
+@router.get(
+    "/opportunities/{opportunity_id}/external-candidates/search/{task_id}",
+    response_model=SearchTaskResult,
+)
+async def get_task_results_compat(
+    opportunity_id: str,
+    task_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> SearchTaskResult:
+    """Compat shim for an external system's path convention.
+
+    `opportunity_id` is the caller's own opportunity id and is ignored; only
+    `task_id` matters. Returns the same payload as /tasks/{task_id}/results.
+    """
+    return await _task_results_payload(task_id, db)
 
 
 # ---------------------------------------------------------------------------

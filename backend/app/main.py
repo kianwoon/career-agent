@@ -117,3 +117,36 @@ async def _restore_stripped_api_prefix(request: Request, call_next: Any) -> Any:
 @app.get("/")
 async def root() -> dict:
     return {"service": settings.app_name, "docs": "/docs", "api": "/api/v1"}
+
+
+# Koyeb strips the leading /api, so an external caller polling
+# /opportunities/{oid}/external-candidates/search/{task_id} arrives here
+# without any /api/v1 prefix — register the compat shim directly on the app
+# (with the same API-key dependency as the router) for both spellings.
+from fastapi import Depends
+
+from app.api.security import require_api_key
+
+
+def _register_external_compat(path: str) -> None:
+    from app.api.routes.routes import _task_results_payload
+    from app.db import get_db
+    from app.models.schemas import SearchTaskResult
+
+    async def _compat(
+        opportunity_id: str,
+        task_id: str,
+        db: Any = Depends(get_db),
+    ) -> SearchTaskResult:
+        """Compat shim for external system path convention; opportunity_id ignored."""
+        return await _task_results_payload(task_id, db)
+
+    # Give the two registrations distinct function names for OpenAPI clarity.
+    _compat.__name__ = path.strip("/").replace("/", "_")
+    app.get(path, response_model=SearchTaskResult, dependencies=[Depends(require_api_key)])(
+        _compat
+    )
+
+
+_register_external_compat("/opportunities/{opportunity_id}/external-candidates/search/{task_id}")
+_register_external_compat("/api/opportunities/{opportunity_id}/external-candidates/search/{task_id}")
