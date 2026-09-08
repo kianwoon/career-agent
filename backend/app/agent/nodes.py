@@ -856,10 +856,9 @@ def normalize(state: AgentState) -> AgentState:
         title = str(item.get("title") or "").strip()
         url = str(item.get("source_url") or item.get("url") or "").strip()
         company = str(item.get("company") or "").strip()
-        if not title or title.lower() == "unknown":
-            if not url and not company:
-                dropped += 1
-                continue
+        if (not title or title.lower() == "unknown") and not url and not company:
+            dropped += 1
+            continue
         item.setdefault("title", title)
         item["title"] = title
         item["source_url"] = url
