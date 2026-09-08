@@ -30,9 +30,9 @@ def test_parse_posted_at_cases():
     assert parse_posted_at("Posted by recruiter") is None
     assert parse_posted_at(None) is None  # type: ignore[arg-type]
     assert parse_posted_at("") is None
-    from datetime import datetime, timedelta, timezone
+    from datetime import UTC, datetime, timedelta
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     assert parse_posted_at("yesterday") == (now - timedelta(days=1)).date().isoformat()
     assert parse_posted_at("14 days ago") == (now - timedelta(days=14)).date().isoformat()
 

@@ -16,7 +16,7 @@ import logging
 import os
 import random
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote
 
@@ -48,7 +48,7 @@ MAX_JOBS = 25
 # stay within reasonable usage; each open is a page view).
 MAX_DETAIL_EXTRACTS = 5
 
-_SALARY_RE = re.compile(r"\$|SGD|RM|MYR|\b\d[\d,]*\s*(k\b|/mo|/yr|per month|per year)", re.I)
+_SALARY_RE = re.compile(r"\$|SGD|RM|MYR|\b\d[\d,]*\s*(k\b|/mo|/yr|per month|per year)", re.IGNORECASE)
 
 
 def parse_posted_at(text: str | None) -> str | None:
@@ -60,7 +60,7 @@ def parse_posted_at(text: str | None) -> str | None:
     if not text:
         return None
     t = text.strip().lower()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if "today" in t or "just now" in t:
         return now.date().isoformat()
     if "yesterday" in t:
