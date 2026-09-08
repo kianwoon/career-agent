@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 
 import httpx
@@ -265,12 +266,74 @@ class LLMService:
             text = text.split("```", 2)[1]
             text = text.removeprefix("json")
         text = text.strip().strip("`")
-        data = json.loads(text)
+        try:
+            data = json.loads(text)
+            return self._unwrap_rerank(data)
+        except (json.JSONDecodeError, ValueError):
+            pass
+        # Truncated output (llm_max_tokens cut mid-record): progressively
+        # repair the array instead of discarding the whole LLM call.
+        salvaged = self._salvage_truncated(text)
+        if salvaged:
+            return salvaged
+        raise ValueError("Unparseable rerank JSON, no records salvageable")
+
+    @staticmethod
+    def _unwrap_rerank(data: object) -> list[dict]:
         if isinstance(data, list):
             return data
         if isinstance(data, dict) and "results" in data:
             return data["results"]
         raise ValueError(f"Unexpected JSON shape: {str(data)[:100]}")
+
+    def _salvage_truncated(self, text: str) -> list[dict]:
+        """Recover complete records from a JSON array cut mid-record."""
+        # (a) Trim the trailing partial record at the LAST complete "}"
+        # (tracked via brace depth) and close the array.
+        depth = 0
+        last_safe = -1
+        in_str = False
+        esc = False
+        for i, ch in enumerate(text):
+            if esc:
+                esc = False
+                continue
+            if ch == "\\":
+                esc = True
+                continue
+            if ch == '"':
+                in_str = not in_str
+                continue
+            if in_str:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    last_safe = i
+        if last_safe >= 0:
+            try:
+                data = json.loads(text[: last_safe + 1] + "]")
+                return self._unwrap_rerank(data)
+            except (json.JSONDecodeError, ValueError):
+                pass
+        # (b) Salvage individual complete flat records.
+        records = []
+        for m in re.findall(r"\{[^{}]*\}", text):
+            try:
+                rec = json.loads(m)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(rec, dict) and "id" in rec:
+                records.append(rec)
+        if records:
+            logger.info(
+                "salvaged %d of %d rerank records from truncated output",
+                len(records),
+                max(text.count('"id"'), len(records)),
+            )
+        return records
 
 
 # Process-global LLM service.

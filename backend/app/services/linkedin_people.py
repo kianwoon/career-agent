@@ -760,6 +760,16 @@ async def search_linkedin_people(
             # crashes with an opaque Page.goto error — surface the real
             # cause instead.
             logger.warning("Agent linkedin_people_plan dispatch failed: %s", exc)
+            if "busy" in str(exc).lower():
+                # Transient dispatch-lock contention ("Agent busy — dispatch
+                # lock not released within 60s") is not an outage; skipping
+                # the LinkedIn leg lets the rest of the plan continue.
+                return {
+                    "raw_results": [],
+                    "needs_human": False,
+                    "human_reason": None,
+                    "plan_detail": "linkedin: agent busy, leg skipped",
+                }
             raise BrowserError(
                 "Extension agent went offline mid-search — re-open the app "
                 "so the agent reconnects, then re-run"
