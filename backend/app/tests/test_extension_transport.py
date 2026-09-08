@@ -7,6 +7,7 @@ only as fallback when no extension is connected.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -286,3 +287,76 @@ async def test_fallback_to_cdp_when_no_extension(monkeypatch):
 
     result = await lp.search_linkedin_people(queries=["q"], excludes=[], location=None)
     assert result["raw_results"] == [{"name": "cdp"}]
+
+
+# -- orphan purge vs long-running claimed commands ----------------------------
+
+def _registry_with(cmd):
+    """Fresh AgentRegistry with one command pre-staged in pending."""
+    import app.services.agent_relay as relay
+
+    reg = relay.AgentRegistry()
+    reg.last_poll_ts = None
+    reg.pending = [cmd]
+    return reg
+
+
+@pytest.mark.asyncio
+async def test_long_claimed_command_not_purged_before_timeout():
+    """A claimed 450s command still pending at age 300s must NOT be purged
+    (the extension is still executing it — purging it made postResult hit an
+    unknown id and killed task 3ce3caba)."""
+    import app.services.agent_relay as relay
+
+    cmd = relay.Command(id="cmd-long", action="linkedin_people_plan", params={}, timeout_s=450.0)
+    cmd.claimed = True
+    cmd.enqueued_at -= 300.0
+    reg = _registry_with(cmd)
+
+    assert reg.poll() is None  # claimed, so nothing to hand out...
+    assert any(c.id == "cmd-long" for c in reg.pending)  # ...but NOT purged
+
+    # After 460s (> its 450s timeout) it IS purged.
+    cmd.enqueued_at -= 160.0
+    assert reg.poll() is None
+    assert not any(c.id == "cmd-long" for c in reg.pending)
+
+
+@pytest.mark.asyncio
+async def test_default_command_purged_after_180s():
+    """Default 180s commands keep the existing purge behavior."""
+    import app.services.agent_relay as relay
+
+    cmd = relay.Command(id="cmd-short", action="open_tab", params={})
+    cmd.claimed = True
+    cmd.enqueued_at -= 179.0
+    reg = _registry_with(cmd)
+    assert reg.poll() is None
+    assert any(c.id == "cmd-short" for c in reg.pending)
+
+    cmd.enqueued_at -= 2.0
+    reg.poll()
+    assert not any(c.id == "cmd-short" for c in reg.pending)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_records_per_command_timeout():
+    """dispatch() stamps the caller's timeout_s onto the queued Command."""
+    import app.services.agent_relay as relay
+
+    reg = relay.AgentRegistry()
+
+    async def fake_wait(self, timeout_s=20.0):
+        return None
+
+    real_wait = relay.AgentRegistry.wait_for_agent
+    relay.AgentRegistry.wait_for_agent = fake_wait
+    try:
+        task = asyncio.create_task(reg.dispatch("linkedin_people_plan", {}, timeout_s=450.0))
+        await asyncio.sleep(0.01)
+        assert len(reg.pending) == 1
+        assert reg.pending[0].timeout_s == 450.0
+        reg.resolve(reg.pending[0].id, ok=True, data={"ok": True})
+        assert await task == {"ok": True}
+    finally:
+        relay.AgentRegistry.wait_for_agent = real_wait

@@ -18,7 +18,9 @@ let busy = false;
 // runs, and busy would stay true forever — every later command instantly
 // rejected "agent busy" (seen live 2026-09-04). The longest legit command is
 // a 5-query LinkedIn plan (~2-3 min); 4 min clears any real straggler.
-const COMMAND_WATCHDOG_MS = 4 * 60 * 1000;
+// MUST exceed the longest server dispatch timeout (linkedin_people_plan
+// 450s) or the watchdog kills a legitimately-running command (3ce3caba).
+const COMMAND_WATCHDOG_MS = 8 * 60 * 1000;
 let currentCmdStartedAt = 0;
 let currentCmdAction = "";
 // Identifies this service-worker instance; sent with every poll so the

@@ -42,6 +42,10 @@ class Command:
     error: str | None = None
     done: bool = False
     claimed: bool = False  # handed to the extension; never re-offer while claimed
+    # Per-command dispatch timeout — the poll() orphan purge must not drop a
+    # claimed-but-in-flight long command (e.g. linkedin_people_plan 450s)
+    # before the extension answers, or postResult hits an unknown id.
+    timeout_s: float = COMMAND_TIMEOUT_S
     future: asyncio.Future = field(default_factory=lambda: asyncio.get_event_loop().create_future())
 
 
@@ -121,7 +125,9 @@ class AgentRegistry:
             )
         locked = True
         try:
-            cmd = Command(id=f"cmd-{uuid.uuid4().hex[:12]}", action=action, params=params)
+            cmd = Command(
+                id=f"cmd-{uuid.uuid4().hex[:12]}", action=action, params=params, timeout_s=timeout_s
+            )
             self.pending.append(cmd)
             try:
                 return await asyncio.wait_for(cmd.future, timeout=timeout_s)
@@ -164,11 +170,13 @@ class AgentRegistry:
         self.last_poll_ts = time.time()
         if not self.pending:
             return None
-        # Skip stale commands nobody will answer (age > COMMAND_TIMEOUT_S,
-        # done or not — an abandoned not-done command must never be handed
-        # to the extension for re-execution); return the oldest live one.
+        # Skip stale commands nobody will answer (age > their own dispatch
+        # timeout — done or not, an abandoned not-done command must never be
+        # handed to the extension for re-execution); return the oldest live
+        # one. Purge threshold is per-command so a claimed 450s plan command
+        # is not dropped while still executing (live 2026-09 kill).
         now = time.time()
-        self.pending = [c for c in self.pending if now - c.enqueued_at < COMMAND_TIMEOUT_S]
+        self.pending = [c for c in self.pending if now - c.enqueued_at < c.timeout_s]
         for c in self.pending:
             if not c.done and not c.claimed:
                 c.claimed = True  # deliver ONCE — a duplicate loop must
