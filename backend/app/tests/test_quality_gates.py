@@ -112,7 +112,7 @@ def test_min_score_cutoff_filters():
         ],
         "timeline": [],
     }
-    out = asyncio.get_event_loop().run_until_complete(match_rank(state))
+    out = asyncio.run(match_rank(state))
     titles = [r.title for r in out["results"]]
     assert "Chef" not in titles
     assert out["status"].value == "completed" or out["status"] == "completed"
