@@ -154,3 +154,35 @@ def test_normalize_accepts_name_and_sets_title():
     assert len(out["normalized"]) == 1
     assert out["normalized"][0]["title"] == "Jane Doe"
     assert out["normalized"][0].get("source_url") == ""
+
+
+def test_normalize_flow_candidate_rejects_wrapper_source_url():
+    """A search/listing wrapper href (SEEK /talentsearch/keyword?...searchQuery=)
+    must not pass through as source_url — it becomes the synthesized
+    profile-search deep link instead."""
+    wrapper = (
+        "https://sg.employer.seek.com/talentsearch/keyword?pageNumber=1"
+        "&salaryType=MONTHLY&searchQuery=M&searchId=112aa"
+    )
+    out = _normalize_flow_candidate(
+        {"title": "Mak Choy Yin", "url": wrapper, "raw_text": "Mak Choy Yin"},
+        "seek - candidate",
+        0,
+        "https://sg.employer.seek.com/talentsearch/keyword",
+    )
+    assert out is not None
+    su = out["source_url"] or ""
+    assert "/keyword" not in su and "searchQuery=" not in su
+    assert "uncoupledFreeText=" in su and "Mak%20Choy%20Yin" in su
+
+
+def test_normalize_flow_candidate_recovers_name_from_short_title():
+    """A 1-char title (avatar initial badge) with a real first line in
+    raw_text must yield the real line as the name."""
+    out = _normalize_flow_candidate(
+        {"title": "M", "raw_text": "Mak Choy Yin\nRecruitment Consultant at SEEK"},
+        "seek - candidate",
+        0,
+    )
+    assert out is not None
+    assert out["name"] == "Mak Choy Yin"

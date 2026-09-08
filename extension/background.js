@@ -206,14 +206,36 @@ async function cmdExtract(cardSelector, fields, maxItems) {
           const el = c.querySelector(sel);
           return el ? (el.textContent || "").trim().slice(0, 300) : "";
         };
+        // URL pick: prefer deep links (profiles/candidates/jobs/<id>) over
+        // search/listing wrapper hrefs (e.g. SEEK /talentsearch/keyword?...searchQuery=).
+        const isWrapperHref = (h) =>
+          /\/keyword\b/.test(h) || /searchQuery=/.test(h) || /searchId=/.test(h);
+        const isDeepHref = (h) => /\/(profiles?|candidates?|jobs?)\/[0-9a-f-]{8,}/i.test(h);
+        const hrefs = Array.from(c.querySelectorAll("a"))
+          .map((a) => a.href)
+          .filter(Boolean);
+        const deepHref = hrefs.find(isDeepHref);
+        const plainHref = hrefs.find((h) => !isWrapperHref(h));
+        const url =
+          deepHref || plainHref || hrefs[0] || c.href || "";
+        // Title pick: fall back to the card's first substantial text line
+        // (skip 1-2 char nodes like avatar initials / truncated badges).
+        let title = pick(fieldMap && fieldMap.title);
+        if (!title) {
+          const lines = (c.innerText || "")
+            .split("\n")
+            .map((s) => s.trim())
+            .filter(Boolean);
+          title = (lines.find((l) => l.length >= 3) || "").slice(0, 300);
+        }
         out.push({
-          title: pick(fieldMap && fieldMap.title),
+          title,
           company: pick(fieldMap && fieldMap.company),
           location: pick(fieldMap && fieldMap.location),
           summary: pick(fieldMap && fieldMap.summary),
           // Prefer a child link; fall back to the card itself being one
           // (e.g. <a class="result-card">…</a> — querySelector misses that).
-          url: (c.querySelector("a") && c.querySelector("a").href) || c.href || "",
+          url,
           raw_text: (c.innerText || "").slice(0, 500),
         });
       }

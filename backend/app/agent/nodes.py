@@ -63,6 +63,13 @@ def _normalize_flow_candidate(
     raw_text = str(r.get("raw_text") or "")
     lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
     raw_name = str(r.get("title") or "").strip() or (lines[0] if lines else "")
+    # Extractors can fall back to a 1-2 char node (avatar initial badge,
+    # truncated text). If the title is that short but raw_text has a real
+    # line, prefer the first substantial line as the name.
+    if len(raw_name) < 3:
+        longer = next((ln for ln in lines if len(ln) >= 3), "")
+        if longer:
+            raw_name = longer
     # SEEK cards glue role text to the name with no separator when the
     # recorded card selector drifts ("...HennSenior QC Technician…" /
     # "...ChowQC Manager II…" / "...TayQA Supervisor…"). Split NAME from
@@ -141,6 +148,11 @@ def _normalize_flow_candidate(
         or (lines[1] if len(lines) > 1 else None)
     )
     source_url = str(r.get("url") or "").strip()
+    # Search/listing wrapper hrefs (SEEK /talentsearch/keyword?...searchQuery=)
+    # are not candidate deep links — treat them as absent so the fallback
+    # below synthesizes the openable per-candidate profile search link.
+    if re.search(r"/keyword\b|searchQuery=|searchId=", source_url):
+        source_url = ""
     if not source_url and base_url:
         # SEEK talent search: cards carry no hrefs, and the bare base_url is
         # a blank results page. The openable deep link is a profile SEARCH
