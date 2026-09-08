@@ -102,3 +102,55 @@ def test_deduplicate_collapses_seek_search_and_profile_rows():
     out = deduplicate(state)
     assert len(out["normalized"]) == 1
     assert "/profile/" in out["normalized"][0]["source_url"]
+
+
+def _cand(n: int) -> dict:
+    return {
+        "name": f"Candidate {n}",
+        "headline": f"Engineer {n}",
+        "source": "linkedin_people",
+        "source_url": f"https://linkedin.com/in/c{n}",
+    }
+
+
+def test_deduplicate_keeps_distinct_candidates():
+    """Regression: candidate rows have no title/company keys, so the fuzzy
+    pass keyed everything on ("", "") and collapsed all candidates to one."""
+    from app.agent.nodes import deduplicate
+
+    state = {"normalized": [_cand(i) for i in range(5)], "timeline": []}
+    out = deduplicate(state)
+    assert len(out["normalized"]) == 5
+    assert {c["name"] for c in out["normalized"]} == {f"Candidate {i}" for i in range(5)}
+
+
+def test_deduplicate_collapses_exact_name_dupes_preferring_deep_link():
+    from app.agent.nodes import deduplicate
+
+    state = {
+        "normalized": [
+            _cand(1),
+            {**_cand(1),
+             "source_url": "https://x.com/search/profiles?uncoupledFreeText=Candidate%201"},
+        ],
+        "timeline": [],
+    }
+    out = deduplicate(state)
+    assert len(out["normalized"]) == 1
+    assert out["normalized"][0]["source_url"] == "https://linkedin.com/in/c1"
+
+
+def test_normalize_accepts_name_and_sets_title():
+    from app.agent.nodes import normalize
+
+    state = {
+        "raw_results": [
+            {"name": "Jane Doe", "headline": "Java Dev", "source": "linkedin_people"},
+            {"name": "", "headline": "", "source": "linkedin_people"},  # junk
+        ],
+        "timeline": [],
+    }
+    out = normalize(state)
+    assert len(out["normalized"]) == 1
+    assert out["normalized"][0]["title"] == "Jane Doe"
+    assert out["normalized"][0].get("source_url") == ""

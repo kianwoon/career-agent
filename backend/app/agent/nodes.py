@@ -854,12 +854,20 @@ def normalize(state: AgentState) -> AgentState:
             for k, v in (raw.items() if isinstance(raw, dict) else [])
         }
         title = str(item.get("title") or "").strip()
+        name = str(item.get("name") or "").strip()
         url = str(item.get("source_url") or item.get("url") or "").strip()
         company = str(item.get("company") or "").strip()
-        if (not title or title.lower() == "unknown") and not url and not company:
+        if (
+            (not title or title.lower() == "unknown")
+            and (not name or name.lower() == "unknown")
+            and not url
+            and not company
+        ):
             dropped += 1
             continue
-        item.setdefault("title", title)
+        if not title and name:
+            title = name  # candidates carry name, not title
+            item["title"] = title
         item["title"] = title
         item["source_url"] = url
         if not item.get("company"):
@@ -883,7 +891,9 @@ def _norm_text(s: Any) -> str:
 
 def deduplicate(state: AgentState) -> AgentState:
     """DEDUPLICATE: drop duplicates on (source, name), preferring deep links,
-    then a cross-source fuzzy pass on (normalized title, normalized company).
+    then a cross-source fuzzy pass on the type-aware identity:
+    (name-or-title, company-or-headline) — jobs key on (title, company),
+    candidates on (name, headline).
 
     Flow extractions may share one URL per platform (the landing/search
     page used as the openable link when a site exposes no per-candidate
@@ -916,7 +926,14 @@ def deduplicate(state: AgentState) -> AgentState:
 
     fuzzy: dict[tuple[str, str], dict[str, Any]] = {}
     for item in best.values():
-        key = (_norm_text(item.get("title")), _norm_text(item.get("company")))
+        # Type-aware identity: candidates (with `name`) key on
+        # (name, headline); jobs (no `name`) fall back to (title, company).
+        key = (
+            _norm_text(item.get("name") or item.get("title")),
+            _norm_text(
+                item.get("company") or item.get("headline") or item.get("subtitle")
+            ),
+        )
         prev = fuzzy.get(key)
         fuzzy[key] = _richer(prev, item) if prev is not None else item
 
