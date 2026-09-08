@@ -10,11 +10,24 @@
 | Item | Value |
 |------|-------|
 | **Endpoint** | `POST /api/v1/search/candidates` |
+| **Base URL (production)** | `https://career-agent-kianwoon-88223cd5.koyeb.app` |
 | **Base URL (dev)** | `http://localhost:8000` |
 | **Auth** | `X-API-Key` header (required) |
-| **Model** | **Async**: start task → poll status → fetch results (30–120s) |
+| **Model** | **Async**: start task → poll → fetch results. Simple searches 30–120s; multi-query plan searches 2–8 min (hard cap 12 min). |
 | **Platforms** | `linkedin` + any enabled source with an active `find_candidates` flow (currently also `jobstreet - candidate`) |
 | **Rate limit** | Per API key, default 30 req/min (`429` + `Retry-After` on breach) |
+
+> All paths below are relative to the base URL and work verbatim in both environments (e.g. `POST https://career-agent-kianwoon-88223cd5.koyeb.app/api/v1/search/candidates`). Do NOT invent alternate path shapes — only the paths in this document exist.
+
+### Common pitfalls (read before integrating)
+
+| Mistake | Symptom | Fix |
+|---------|---------|-----|
+| POSTing to your own path convention, e.g. `POST /api/opportunities/{oid}/external-candidates/search` | Your wrapper may return `202`, but **no search exists on this service** — that path has no POST handler (`404` server-side) | Create searches only via `POST /api/v1/search/candidates` (returns `201`) |
+| Polling with your own internal record id | Eternal `404 not_found` on every status/results call | Poll using the `task_id` from **our** `201` response body — it is the only valid id. Ids from your own database will never resolve. |
+| Expecting `202 Accepted` from this service | — | This service never returns `202` on these endpoints. Create = `201`; everything else = `200`, `4xx`, or `429`. |
+| Treating `404` during polling as retryable | Wasted poll loops | The task row is committed before `201` returns — a `404` means the id is wrong, not "not yet visible". Fix the id; don't retry. |
+| Assuming instant results | "0 results" complaints | Plan searches (several boolean queries × platforms) legitimately run minutes. Poll until `status != "pending"/"running"`. |
 
 ### Integration flow
 
@@ -99,9 +112,9 @@ Platform names are case-insensitive.
   "created_at": "2026-08-22T09:00:00Z",
   "started_at": null,
   "completed_at": null,
-  "error": null
-}
 ```
+
+> Save `task_id` immediately — it is the only key for polling and results (see Common pitfalls).
 
 ---
 
@@ -134,6 +147,18 @@ Response `200`:
 | `failed` | Error | Read `error` field |
 
 Poll interval: **5s recommended** — do not hammer.
+
+> A `404` from this endpoint means the `task_id` is wrong (see Common pitfalls) — the task row is committed before the create call returns `201`.
+
+#### Reading the `error` field
+
+`status: "completed"` tasks can still have per-source issues: `error` holds JSON like
+
+```json
+{"source_issues": ["FastJobs: no find_candidates flow recorded"], "plan_detail": "Extension plan v2: 5 queries [...] → 5 unique | jobstreet - candidate flow: 20 results"}
+```
+
+`source_issues` lists platforms that contributed nothing (no flow recorded, session expired); `plan_detail` shows what actually ran (per-query counts). Surface both to users. `status: "paused"` puts the human-readable blocker reason directly in `error` (plain string).
 
 ---
 
@@ -220,17 +245,15 @@ Response `200`:
 | `evidence_ratio` | float 0–1 | Fraction of claimed skills evidenced in experience |
 | `flags` | array | Warnings (resume padding, job-hopping, inflated titles...) |
 
-### Compatibility
-
-External callers may also fetch results via a compatibility path:
+### Compatibility (GET-only shim)
 
 ```
 GET /api/opportunities/{opportunity_id}/external-candidates/search/{task_id}
 ```
 
-`opportunity_id` is the caller's own opportunity id and is **ignored** — only
-`task_id` matters. The response payload is identical to
-`GET /api/v1/tasks/{task_id}/results`.
+- `opportunity_id` (the caller's own id) is **ignored**; `task_id` **must be the id this service returned in the `201`** — caller-side ids resolve to `404` forever.
+- Response payload is identical to `GET /api/v1/tasks/{task_id}/results`, including while `status` is `running` (returns `results: []`).
+- **GET only.** `POST` on this path is `404` — creation is exclusively `POST /api/v1/search/candidates`.
 
 ---
 
@@ -341,5 +364,7 @@ with httpx.Client(base_url=BASE, headers=HEADERS, timeout=60) as client:
 | GET | `/api/v1/health` | Liveness (public, no key) |
 | GET | `/api/v1/tasks/{task_id}` | Task status |
 | GET | `/api/v1/tasks/{task_id}/results` | Ranked results |
+| GET | `/api/v1/search/platforms` | Valid platform ids right now |
+| GET | `/api/v1/search/history` | Recent tasks (most recent first) |
 | POST | `/api/v1/approvals/{approval_id}` | Approve/reject pending external action |
 | GET | `/openapi.json` | Full machine-readable spec |
