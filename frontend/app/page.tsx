@@ -750,6 +750,31 @@ export default function Home() {
         addEvent(prev, "info", `Task created: ${task.task_id} (${task.status}).`)
       );
 
+      // Optimistically surface the new task in Past Searches so the
+      // latest request is visible immediately (server state confirms via
+      // the fire-and-forget loadHistory() below).
+      setHistory((prev) =>
+        prev.some((i) => i.task_id === task.task_id)
+          ? prev
+          : [
+              {
+                task_id: task.task_id,
+                type: mode,
+                query:
+                  mode === "candidates" && queries.length > 0
+                    ? queries.join(" | ")
+                    : query.trim() || queries[0] || "",
+                status: "pending",
+                result_count: 0,
+                created_at: new Date().toISOString(),
+                completed_at: null,
+              },
+              ...prev,
+            ]
+      );
+      setHistoryPage(1);
+      loadHistory();
+
       // Poll for results. Searches can take 1.5-3 min normally, but plan
       // searches with enrichment can run up to the backend's hard timeout
       // (TASK_HARD_TIMEOUT_S = 720s), after which the backend fails the
@@ -784,6 +809,7 @@ export default function Home() {
             "Search paused — a source session expired and needs re-login (password or QR scan)."
           )
         );
+        loadHistory();
         return;
       }
 
@@ -818,6 +844,7 @@ export default function Home() {
       );
     }
     // Refresh history after any search attempt.
+    setHistoryPage(1);
     loadHistory();
   }
 
@@ -829,7 +856,15 @@ export default function Home() {
         setHistoryPageSize(saved);
       }
       const resp = await fetchSearchHistory();
-      setHistory(resp.items ?? []);
+      // Dedupe by task_id (keep first occurrence) in case an optimistic
+      // entry hasn't been reconciled with server state yet.
+      const seen = new Set<string>();
+      const items = (resp.items ?? []).filter((i) => {
+        if (seen.has(i.task_id)) return false;
+        seen.add(i.task_id);
+        return true;
+      });
+      setHistory(items);
     } catch {
       // Non-fatal — history is a convenience, not core.
     } finally {
