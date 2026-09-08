@@ -17,6 +17,15 @@ class _FakeRegistry:
             if self.card_found:
                 return {"found": True, "card": "div[data-card]"}
             return {"found": False, "card": None}
+        if cmd == "extract":
+            card = params.get("card", "")
+            if card == "[data-testid*='card']":
+                return [
+                    {"raw_text": "x" * 100},
+                    {"raw_text": "y" * 90},
+                    {"raw_text": "z" * 85},
+                ]
+            return []
         return {}
 
 
@@ -55,3 +64,29 @@ async def test_seek_discover_searches_via_url_param(monkeypatch):
     )
     assert steps[-1] == {"card": "div[data-card]", "fields": {"title": "a"}}
     assert run_flow["query"] == "Tang Yee Henn"
+    # First try found the card — no extra wait-only run_flow, no extract probe.
+    assert not any(c == "extract" for c, _ in fake.calls)
+
+
+async def test_seek_discover_falls_back_to_extract_probe(monkeypatch):
+    """find_result_card misses twice → probe extract selectors; first with
+    3+ text-rich rows wins as the replay card."""
+    fake = _FakeRegistry(card_found=False)
+    monkeypatch.setattr(
+        "app.services.agent_relay.agent_registry", fake, raising=False
+    )
+
+    steps = await _agent_discover(_FakeSource(), _FakeReq())
+
+    assert any(c == "extract" for c, _ in fake.calls)
+    assert steps[-1] == {
+        "card": "[data-testid*='card']",
+        "fields": {"title": "a"},
+    }
+    # Extra wait-only run_flow happened before the retry.
+    waits = [
+        p
+        for c, p in fake.calls
+        if c == "run_flow" and [s["action"] for s in p["steps"]] == ["wait"]
+    ]
+    assert waits, "expected a wait-only retry run_flow"

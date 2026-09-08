@@ -656,7 +656,7 @@ async def _agent_discover(source: Source, req: AgentRecordRequest) -> list[dict[
                     "query": req.query_hint or "qc",
                     "steps": [
                         {"action": "navigate", "url": search_url},
-                        {"action": "wait", "seconds": 5},
+                        {"action": "wait", "seconds": 8},
                     ],
                 },
                 timeout_s=120,
@@ -665,6 +665,15 @@ async def _agent_discover(source: Source, req: AgentRecordRequest) -> list[dict[
             logger.info(
                 "agent_record: seek find_result_card → %s", json.dumps(found)[:200] if found else found
             )
+            if not (isinstance(found, dict) and found.get("found") and found.get("card")):
+                # SEEK SPA can render slowly — wait longer and retry once.
+                await agent_registry.dispatch(
+                    "run_flow",
+                    {"baseUrl": source.base_url, "steps": [{"action": "wait", "seconds": 10}]},
+                    timeout_s=60,
+                )
+                found = await agent_registry.dispatch("find_result_card", {}, timeout_s=30)
+                logger.info("agent_record: seek find_result_card retry → %s", found)
             if isinstance(found, dict) and found.get("found") and found.get("card"):
                 logger.info("agent_record: seek card found: %s", found["card"])
                 return [
@@ -672,11 +681,37 @@ async def _agent_discover(source: Source, req: AgentRecordRequest) -> list[dict[
                     {"action": "wait", "seconds": 5},
                     {"card": found["card"], "fields": {"title": "a"}},
                 ]
+            # Last resort: probe candidate card selectors via extract and
+            # pick the first with 3+ text-rich rows.
+            for cand in (
+                "[data-testid*='card']",
+                "[data-testid*='result']",
+                "div[class*='Card']",
+            ):
+                try:
+                    rows = await agent_registry.dispatch(
+                        "extract", {"card": cand, "fields": {}, "maxItems": 10}, timeout_s=60
+                    )
+                except Exception as exc:
+                    logger.debug("agent_record: seek extract probe failed: %s", exc)
+                    continue
+                real = [
+                    r for r in rows or [] if len(r.get("raw_text") or "") > 80
+                ]
+                if len(real) >= 3:
+                    logger.info("agent_record: seek fallback extract card: %s", cand)
+                    return [
+                        {"action": "navigate", "url": search_url},
+                        {"action": "wait", "seconds": 5},
+                        {"card": cand, "fields": {"title": "a"}},
+                    ]
             logger.warning("agent_record: seek no card detected: %s", found)
             raise HTTPException(
                 502,
                 "Seek results page returned no detectable result cards — "
-                "sign in on the site, run a search with visible results, then retry",
+                "if you can see candidate results, reload the extension to "
+                "v1.7.3 and retry; otherwise sign in and run a search with "
+                "visible results first",
             )
         except HTTPException:
             raise

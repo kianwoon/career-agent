@@ -1026,14 +1026,27 @@ async function cmdFindResultCard() {
     for (const [sig, els] of groups) {
       if (els.length < 3 || els.length > 60) continue;
       let good = 0;
+      let linked = 0;
       for (const el of els) {
         const text = (el.innerText || "").trim();
         if (text.length < 80 || !text.includes("\n")) continue;
-        if (!el.querySelector("a[href]")) continue;
+        // Text-rich multi-line row. Good if it has a link OR looks like a
+        // result card: card-ish signature, data-testid, or very long text.
+        // SEEK talent-search candidate cards have NO links (name is plain
+        // text), so requiring a[href] here made detection always fail.
+        const hasLink = !!el.querySelector("a[href]");
+        if (hasLink) linked += 1;
+        const cardish =
+          /card|result|profile|candidate/i.test(sig) ||
+          el.hasAttribute("data-testid") ||
+          text.length > 200;
+        if (!hasLink && !cardish) continue;
         good += 1;
       }
       if (good < 3 || good < els.length * 0.5) continue;
-      if (!best || good > best.good) best = { sig, good, sample: els[0] };
+      const score = good + linked * 0.1 + (/card/i.test(sig) ? 0.5 : 0);
+      if (!best || score > best.score)
+        best = { sig, good, score, sample: els[0] };
     }
     if (!best) return { found: false };
     // Build a selector for the sample row: parent-id/#app prefix + signature.
