@@ -634,15 +634,28 @@ async def _agent_discover(source: Source, req: AgentRecordRequest) -> list[dict[
             # steps (only navigate/fill/click/press/wait/card) — the card
             # detector must be dispatched as its own top-level command
             # (supported since extension v1.5.0).
+            #
+            # Search via URL param, not DOM fill: the `#uncoupledFreeText`
+            # input is often absent when the talent-search page first loads
+            # (rendered lazily / behind feature flags), which made run_flow
+            # fail with "Element not found: #uncoupledFreeText". The results
+            # page itself accepts the search term as a query-string param
+            # (same param the candidate deep-links use in agent/nodes.py),
+            # and run_flow substitutes {query} in navigate URLs.
+            search_url = (
+                "https://sg.employer.seek.com/talentsearch/search/profiles"
+                "?locationList=24553&nation=24553&pageNumber=1"
+                "&salaryNation=24553&salaryType=MONTHLY&searchId=112aa"
+                "&searchType=new_search&sortBy=relevance"
+                "&uncoupledFreeText={query}&willingToRelocate=false"
+            )
             await agent_registry.dispatch(
                 "run_flow",
                 {
                     "baseUrl": source.base_url,
                     "query": req.query_hint or "qc",
                     "steps": [
-                        {"action": "navigate", "url": source.base_url},
-                        {"action": "fill", "selector": "#uncoupledFreeText", "param": "query"},
-                        {"action": "press", "key": "Enter"},
+                        {"action": "navigate", "url": search_url},
                         {"action": "wait", "seconds": 5},
                     ],
                 },
@@ -655,9 +668,7 @@ async def _agent_discover(source: Source, req: AgentRecordRequest) -> list[dict[
             if isinstance(found, dict) and found.get("found") and found.get("card"):
                 logger.info("agent_record: seek card found: %s", found["card"])
                 return [
-                    {"action": "navigate", "url": source.base_url},
-                    {"action": "fill", "selector": "#uncoupledFreeText", "param": "query"},
-                    {"action": "press", "key": "Enter"},
+                    {"action": "navigate", "url": search_url},
                     {"action": "wait", "seconds": 5},
                     {"card": found["card"], "fields": {"title": "a"}},
                 ]

@@ -1,0 +1,57 @@
+"""Tests for _agent_discover SEEK record path (URL-param search, no DOM fill)."""
+
+
+from app.api.routes.sources import _agent_discover
+
+
+class _FakeRegistry:
+    """Records dispatch calls; returns canned find_result_card payloads."""
+
+    def __init__(self, card_found: bool = True):
+        self.calls: list[tuple[str, dict]] = []
+        self.card_found = card_found
+
+    async def dispatch(self, cmd: str, params: dict, timeout_s: int = 30):
+        self.calls.append((cmd, params))
+        if cmd == "find_result_card":
+            if self.card_found:
+                return {"found": True, "card": "div[data-card]"}
+            return {"found": False, "card": None}
+        return {}
+
+
+class _FakeSource:
+    domain = "seek.com"
+    name = "jobstreet - candidate"
+    base_url = "https://sg.employer.seek.com/talentsearch"
+
+
+class _FakeReq:
+    query_hint = "Tang Yee Henn"
+    flow_type = "find_candidates"
+
+
+async def test_seek_discover_searches_via_url_param(monkeypatch):
+    """Regression: '#uncoupledFreeText' DOM fill fails when the input is not
+    rendered — discovery must search via the URL param instead."""
+    fake = _FakeRegistry()
+    monkeypatch.setattr(
+        "app.services.agent_relay.agent_registry", fake, raising=False
+    )
+
+    steps = await _agent_discover(_FakeSource(), _FakeReq())
+
+    run_flow = next(p for c, p in fake.calls if c == "run_flow")
+    actions = [s["action"] for s in run_flow["steps"]]
+    assert "fill" not in actions, "SEEK discovery must not depend on DOM fill"
+    assert any(
+        s["action"] == "navigate" and "uncoupledFreeText={query}" in s["url"]
+        for s in run_flow["steps"]
+    )
+    # Replay steps must also be URL-param based and carry the detected card.
+    assert any(
+        s.get("action") == "navigate" and "uncoupledFreeText={query}" in s["url"]
+        for s in steps
+    )
+    assert steps[-1] == {"card": "div[data-card]", "fields": {"title": "a"}}
+    assert run_flow["query"] == "Tang Yee Henn"
