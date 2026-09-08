@@ -750,10 +750,13 @@ export default function Home() {
         addEvent(prev, "info", `Task created: ${task.task_id} (${task.status}).`)
       );
 
-      // Poll for results. Searches can take 1.5-3 min (LinkedIn navigation +
-      // profile extraction + LLM rerank), so poll up to ~4 minutes.
+      // Poll for results. Searches can take 1.5-3 min normally, but plan
+      // searches with enrichment can run up to the backend's hard timeout
+      // (TASK_HARD_TIMEOUT_S = 720s), after which the backend fails the
+      // task. Poll slightly past that so we always see the terminal state
+      // instead of timing out client-side while the backend still runs.
       let response;
-      for (let attempt = 0; attempt < 100; attempt++) {
+      for (let attempt = 0; attempt < 300; attempt++) {
         await new Promise((r) => setTimeout(r, 2500));
         response = await fetchTaskResults(task.task_id);
         if (response.status === "completed") break;
@@ -765,7 +768,11 @@ export default function Home() {
         throw new Error("Timed out waiting for the task to complete.");
       }
       if (response.status === "failed") {
-        throw new Error("Backend task failed.");
+        throw new Error(
+          response.summary
+            ? `Backend task failed: ${response.summary}`
+            : "Backend task failed.",
+        );
       }
       if (response.status === "paused") {
         setPhase("error");
