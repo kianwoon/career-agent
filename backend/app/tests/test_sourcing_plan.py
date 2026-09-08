@@ -634,6 +634,13 @@ def test_run_search_broken_flow_reports_source_issue(monkeypatch):
     monkeypatch.setattr(nodes_mod, "_candidate_source_platforms", fake_all_sources)
     monkeypatch.setattr(nodes_mod, "_search_candidates_via_flow", fake_via_flow)
 
+    # Avoid the real DB pool (asyncpg binds to the creating event loop —
+    # cross-loop reuse in CI raises "attached to a different loop").
+    async def fake_custom_sources(state):
+        return [], [], [], []
+
+    monkeypatch.setattr(nodes_mod, "_search_custom_sources", fake_custom_sources)
+
     state = {
         "type": nodes_mod.SearchType.candidates,
         "query": "engineer",
