@@ -24,11 +24,13 @@ class QueryCache:
         self._maxsize = maxsize
         self._ttl = ttl
 
-    def _key(self, query: str, location: str | None) -> str:
-        return f"{query}||{location or ''}"
+    def _key(self, query: str, location: str | None, source: str = "all") -> str:
+        return f"{query}||{location or ''}||{source}"
 
-    def get(self, query: str, location: str | None) -> list[dict[str, Any]] | None:
-        key = self._key(query, location)
+    def get(
+        self, query: str, location: str | None, source: str = "all"
+    ) -> list[dict[str, Any]] | None:
+        key = self._key(query, location, source)
         entry = self._data.get(key)
         if entry is None:
             return None
@@ -40,8 +42,16 @@ class QueryCache:
         self._data.move_to_end(key)
         return results
 
-    def put(self, query: str, location: str | None, results: list[dict[str, Any]]) -> None:
-        key = self._key(query, location)
+    def put(
+        self,
+        query: str,
+        location: str | None,
+        results: list[dict[str, Any]],
+        source: str = "all",
+    ) -> None:
+        if not results:
+            return  # never cache empty lists
+        key = self._key(query, location, source)
         self._data[key] = (time.monotonic(), results)
         while len(self._data) > self._maxsize:
             self._data.popitem(last=False)

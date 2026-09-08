@@ -528,8 +528,19 @@ def templatize(
     def _looks_like_pagination(ev: dict[str, Any]) -> bool:
         text = (ev.get("text") or "").strip().lower()
         sel = (ev.get("selector") or "").lower()
-        keywords = ("next", "»", "›", ">", "more", "load")
-        return any(k in text for k in keywords) or "next" in sel or "pagination" in sel
+        keywords = (
+            "next", "»", "›", ">", "more", "load",
+            "next page", "show more", "load more", "page ",
+        )
+        import re as _re
+
+        if _re.search(r"\bpage\s*\d+\b", text):
+            return True
+        return (
+            any(k in text for k in keywords)
+            or "next" in sel
+            or "pagination" in sel
+        )
 
     for ev in events:
         action = ev.get("action")
@@ -584,6 +595,18 @@ def templatize(
 # ---------------------------------------------------------------------------
 
 MAX_PAGES = 5
+
+# Default card selectors for JobStreet/SEEK when the wizard only captured the
+# outer card (fields missing/empty).Guessed from the live DOM structure.
+JOBSTREET_DEFAULT_SELECTORS = {
+    "card": 'article[data-testid*="job"], div[data-testid*="job-card"], .job-card, article',
+    "fields": {
+        "title": '[data-testid*="job-title"], h1, h2, h3, a span',
+        "company": '[data-testid*="company"], [class*="company" i]',
+        "location": '[data-testid*="location"], [class*="location" i]',
+        "url": 'a[data-testid*="job-link"], a[href*="/job/"], a',
+    },
+}
 
 # Common login-page signals. If the flow lands on one of these, the saved
 # session has expired and a human must re-login via the wizard.
@@ -640,6 +663,28 @@ async def _looks_logged_out(page: Any, base_domain: str) -> str | None:
             return f"Session expired: {base_domain} is showing a sign-in prompt"
     except Exception as exc:
         logger.debug("login-probe failed: %s", exc)
+    return None
+
+
+# Anti-bot wall signals (perimeterx, captcha, etc).
+_BOT_TEXT_PATTERNS = (
+    "perimeterx",
+    "captcha",
+    "verify you are human",
+    "unusual traffic",
+    "are you a robot",
+    "press & hold",
+)
+
+
+async def _looks_blocked(page: Any) -> str | None:
+    """Return a human_reason if the page is an anti-bot challenge, else None."""
+    try:
+        text = (await page.evaluate("(document.body?.innerText || '').toLowerCase()") or "")[:4000]
+    except Exception:
+        return None
+    if any(p in text for p in _BOT_TEXT_PATTERNS):
+        return "anti-bot challenge: the site presented a bot-detection / verification wall"
     return None
 
 
@@ -708,6 +753,9 @@ async def execute_flow(
         logged_out = await _looks_logged_out(page, base_domain)
         if logged_out:
             return {"results": [], "needs_human": True, "human_reason": logged_out}
+        blocked = await _looks_blocked(page)
+        if blocked:
+            return {"results": [], "needs_human": True, "human_reason": blocked}
 
         error: str | None = None
         from app.services.pacing import pacing
@@ -738,7 +786,17 @@ async def execute_flow(
             bounced = await _looks_logged_out(page, base_domain)
             if bounced:
                 return {"results": [], "needs_human": True, "human_reason": bounced}
+            blocked = await _looks_blocked(page)
+            if blocked:
+                return {"results": [], "needs_human": True, "human_reason": blocked}
             page_results = await _extract_page(page, card_selectors)
+            # JobStreet/SEEK: fall back to default card selectors when the
+            # captured ones yield nothing usable.
+            if not page_results and base_domain and (
+                "jobstreet" in base_domain or "seek" in base_domain
+            ):
+                page_results = await _extract_page(page, JOBSTREET_DEFAULT_SELECTORS)
+            page_results = [r for r in page_results if str(r.get("title") or "").strip().lower() != "unknown"]
             new = [r for r in page_results if r.get("url") and r["url"] not in seen_urls]
             if not new:
                 break

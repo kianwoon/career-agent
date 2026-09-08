@@ -835,17 +835,56 @@ def extract(state: AgentState) -> AgentState:
     }
 
 
+def _clean(v: Any) -> Any:
+    """Strip whitespace on strings; leave other types alone."""
+    return v.strip() if isinstance(v, str) else v
+
+
 def normalize(state: AgentState) -> AgentState:
-    """NORMALIZE: map raw results to the canonical job/candidate schema."""
+    """NORMALIZE: map raw results to the canonical job/candidate schema.
+
+    Drops junk rows (no title, and no url AND no company) so downstream
+    matching never scores empty shells.
+    """
+    cleaned: list[dict[str, Any]] = []
+    dropped = 0
+    for raw in state.get("raw_results", []):
+        item = {
+            k: _clean(v)
+            for k, v in (raw.items() if isinstance(raw, dict) else [])
+        }
+        title = str(item.get("title") or "").strip()
+        url = str(item.get("source_url") or item.get("url") or "").strip()
+        company = str(item.get("company") or "").strip()
+        if not title or title.lower() == "unknown":
+            if not url and not company:
+                dropped += 1
+                continue
+        item.setdefault("title", title)
+        item["title"] = title
+        item["source_url"] = url
+        if not item.get("company"):
+            item["company"] = company
+        cleaned.append(item)
+    msg = f"Normalized {len(cleaned)} records"
+    if dropped:
+        msg += f"; dropped {dropped} junk record(s)"
     return {
         **state,
-        "normalized": state.get("raw_results", []),
-        "timeline": _log(state, "NORMALIZE", f"Normalized {len(state.get('raw_results', []))} records"),
+        "normalized": cleaned,
+        "timeline": _log(state, "NORMALIZE", msg),
     }
 
 
+def _norm_text(s: Any) -> str:
+    """Normalize text for fuzzy dedup: lower, strip punctuation, collapse spaces."""
+    t = re.sub(r"[^\w\s]", " ", str(s or "").lower())
+    return " ".join(t.split())
+
+
 def deduplicate(state: AgentState) -> AgentState:
-    """DEDUPLICATE: drop duplicates on (source, name), preferring deep links.
+    """DEDUPLICATE: drop duplicates on (source, name), preferring deep links,
+    then a cross-source fuzzy pass on (normalized title, normalized company).
 
     Flow extractions may share one URL per platform (the landing/search
     page used as the openable link when a site exposes no per-candidate
@@ -865,7 +904,24 @@ def deduplicate(state: AgentState) -> AgentState:
             best[key] = item
         elif "uncoupledFreeText=" in str(prev.get("source_url", "") or "") and "uncoupledFreeText=" not in url:
             best[key] = item  # prefer the deep link over the search page
-    unique = list(best.values())
+
+    # Cross-source fuzzy pass: same (title, company) on different platforms
+    # is the same job. Prefer the row with a description, then a url.
+    def _richer(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
+        for field in ("description", "source_url"):
+            if str(a.get(field) or "").strip() and not str(b.get(field) or "").strip():
+                return a
+            if str(b.get(field) or "").strip() and not str(a.get(field) or "").strip():
+                return b
+        return a
+
+    fuzzy: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in best.values():
+        key = (_norm_text(item.get("title")), _norm_text(item.get("company")))
+        prev = fuzzy.get(key)
+        fuzzy[key] = _richer(prev, item) if prev is not None else item
+
+    unique = list(fuzzy.values())
     # Preserve first-seen order.
     order = {id(v): i for i, v in enumerate(state.get("normalized", []))}
     unique.sort(key=lambda v: order.get(id(v), 0))
@@ -940,15 +996,32 @@ async def match_rank(state: AgentState) -> AgentState:
     MAX_TOP_RESULTS = 10
     scored = scored[:MAX_TOP_RESULTS]
 
+    # Quality gate: drop jobs scoring below the minimum threshold.
+    MIN_JOB_SCORE = 25.0
+    note = None
+    is_jobs = state.get("type") == SearchType.jobs
+    if is_jobs:
+        below = [r for r in scored if r.match_score < MIN_JOB_SCORE]
+        if below and len(below) == len(scored):
+            # Everything is below the bar: return top-3 with a quality note
+            # rather than an empty result set.
+            note = (
+                f"All {len(scored)} result(s) scored below the quality "
+                f"threshold ({MIN_JOB_SCORE:.0f}); returning best {min(3, len(scored))}"
+            )
+            scored = scored[:3]
+        else:
+            note = None
+            scored = [r for r in scored if r.match_score >= MIN_JOB_SCORE]
+
+    msg = f"Ranked {len(state.get('normalized', []))} results; returning top {len(scored)}"
+    if note:
+        msg += f" — {note}"
     return {
         **state,
         "results": scored,
         "status": TaskStatus.completed,
-        "timeline": _log(
-            state,
-            "MATCH / RANK",
-            f"Ranked {len(state.get('normalized', []))} results; returning top {len(scored)}",
-        ),
+        "timeline": _log(state, "MATCH / RANK", msg),
     }
 
 

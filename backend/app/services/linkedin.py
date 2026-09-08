@@ -11,9 +11,12 @@ Safety:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import random
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
 
@@ -44,6 +47,33 @@ MAX_JOBS = 25
 # How many jobs to open for full detail extraction per search (keep it low to
 # stay within reasonable usage; each open is a page view).
 MAX_DETAIL_EXTRACTS = 5
+
+_SALARY_RE = re.compile(r"\$|SGD|RM|MYR|\b\d[\d,]*\s*(k\b|/mo|/yr|per month|per year)", re.I)
+
+
+def parse_posted_at(text: str | None) -> str | None:
+    """Parse a relative posted-at string ("3 weeks ago") into an ISO date.
+
+    Handles "X minutes/hours/days/weeks/months ago", "today", "yesterday",
+    and "just now". Returns None when nothing parseable is present.
+    """
+    if not text:
+        return None
+    t = text.strip().lower()
+    now = datetime.now(timezone.utc)
+    if "today" in t or "just now" in t:
+        return now.date().isoformat()
+    if "yesterday" in t:
+        return (now - timedelta(days=1)).date().isoformat()
+    m = re.search(r"(\d+)\s+(minute|hour|day|week|month)s?\s+ago", t)
+    if not m:
+        return None
+    n = int(m.group(1))
+    unit = m.group(2)
+    # timedelta has no months; approximate one month as 30 days.
+    days = 30 * n if unit == "month" else n
+    kwargs = {"days": days} if unit in ("day", "month") else {f"{unit}s": n}
+    return (now - timedelta(**kwargs)).date().isoformat()
 
 
 def _build_search_url(query: str, location: str | None = None) -> str:
@@ -227,11 +257,13 @@ async def _extract_jobs(page: Any) -> list[dict[str, Any]]:
             # Parse location from metadata (usually first line).
             lines = [ln.strip() for ln in metadata.splitlines() if ln.strip()]
             location = lines[0] if lines else None
-            salary = next((ln for ln in lines if "SGD" in ln or "$" in ln or "K" in ln), None)
+            salary = next((ln for ln in lines if _SALARY_RE.search(ln)), None)
+            posted_raw = footer.splitlines()[0].strip() if footer else None
 
+            stable = hashlib.sha256(f"{title}|{company}|{href}".encode()).hexdigest()[:16]
             jobs.append(
                 {
-                    "id": f"li-{abs(hash((title, company, href)))}",
+                    "id": f"li-{stable}",
                     "title": title,
                     "company": company,
                     "location": location,
@@ -239,7 +271,9 @@ async def _extract_jobs(page: Any) -> list[dict[str, Any]]:
                     "description": "",  # filled when detail page is opened
                     "source": "linkedin",
                     "source_url": href or "",
-                    "posted_at": footer.splitlines()[0] if footer else None,
+                    "posted_at": posted_raw,
+                    "posted_at_raw": posted_raw,
+                    "posted_at_iso": parse_posted_at(posted_raw),
                     "metadata_footer": footer,
                 }
             )
@@ -304,6 +338,8 @@ async def _extract_job_detail(page: Any, job: dict[str, Any], href: str) -> dict
                 (ln for ln in lines if "ago" in ln or "day" in ln or "week" in ln or "month" in ln),
                 None,
             )
+            job["posted_at_raw"] = job.get("posted_at")
+            job["posted_at_iso"] = parse_posted_at(job.get("posted_at")) or job.get("posted_at_iso")
         logger.info("Extracted detail for %r (%d chars)", job.get("title"), len(description))
     except Exception as exc:
         logger.warning("Failed to open detail for %s: %s", href, exc)
@@ -346,7 +382,7 @@ async def search_linkedin_jobs(query: str, location: str | None = None) -> dict[
     from app.services.agent_relay import agent_registry
 
     if agent_registry.connected:
-        cached = query_cache.get(query, location)
+        cached = query_cache.get(query, location, source="linkedin")
         if cached is not None:
             logger.info("Cache hit for %r (location=%r) — %d jobs", query, location, len(cached))
             return {"raw_results": cached, "needs_human": False, "human_reason": None, "cached": True}
@@ -360,8 +396,18 @@ async def search_linkedin_jobs(query: str, location: str | None = None) -> dict[
             },
             timeout_s=300,
         )
+        # Validate extension payloads: only well-formed rows survive.
+        raw = data.get("raw_results", [])
+        valid: list[dict[str, Any]] = []
+        for row in raw if isinstance(raw, list) else []:
+            if isinstance(row, dict) and isinstance(row.get("title"), str) and row["title"].strip():
+                valid.append(row)
+            else:
+                logger.warning("Dropping malformed extension result row: %r", row)
+        if valid:
+            query_cache.put(query, location, valid, source="linkedin")
         return {
-            "raw_results": data.get("raw_results", []),
+            "raw_results": valid,
             "needs_human": bool(data.get("needs_human", False)),
             "human_reason": data.get("human_reason"),
         }
@@ -376,7 +422,7 @@ async def search_linkedin_jobs(query: str, location: str | None = None) -> dict[
         }
     try:
         # Result cache: avoid re-hitting LinkedIn for the same query.
-        cached = query_cache.get(query, location)
+        cached = query_cache.get(query, location, source="linkedin")
         if cached is not None:
             logger.info("Cache hit for %r (location=%r) — %d jobs", query, location, len(cached))
             return {"raw_results": cached, "needs_human": False, "human_reason": None, "cached": True}
@@ -401,9 +447,23 @@ async def search_linkedin_jobs(query: str, location: str | None = None) -> dict[
             return {"raw_results": [], "needs_human": True, "human_reason": blocker}
 
         jobs = await _extract_jobs(page)
+        if not jobs:
+            # Zero cards: could be a soft block on the list page itself.
+            body = ""
+            try:
+                body = await page.evaluate("(document.body?.innerText || '').slice(0, 4000)")
+            except Exception:
+                pass
+            blocker = (
+                _check_blocker(page.url, await page.title())
+                or _check_blocker(page.url, body)
+            )
+            if blocker:
+                pacing.trip_circuit_breaker(blocker)
+                return {"raw_results": [], "needs_human": True, "human_reason": blocker}
         # Open the top N jobs for full descriptions (paced per page view).
         jobs = await _extract_jobs_with_details(page, jobs)
-        query_cache.put(query, location, jobs)
+        query_cache.put(query, location, jobs, source="linkedin")
         return {"raw_results": jobs, "needs_human": False, "human_reason": None}
     finally:
         try:
