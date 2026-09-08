@@ -649,7 +649,7 @@ async def _agent_discover(source: Source, req: AgentRecordRequest) -> list[dict[
                 "&searchType=new_search&sortBy=relevance"
                 "&uncoupledFreeText={query}&willingToRelocate=false"
             )
-            await agent_registry.dispatch(
+            flow_res = await agent_registry.dispatch(
                 "run_flow",
                 {
                     "baseUrl": source.base_url,
@@ -661,6 +661,13 @@ async def _agent_discover(source: Source, req: AgentRecordRequest) -> list[dict[
                 },
                 timeout_s=120,
             )
+            if isinstance(flow_res, dict) and flow_res.get("needs_human"):
+                raise HTTPException(
+                    502,
+                    "Seek session expired — "
+                    + (flow_res.get("error") or "login page")
+                    + "; re-login then retry",
+                )
             found = await agent_registry.dispatch("find_result_card", {}, timeout_s=30)
             logger.info(
                 "agent_record: seek find_result_card → %s", json.dumps(found)[:200] if found else found
@@ -706,12 +713,51 @@ async def _agent_discover(source: Source, req: AgentRecordRequest) -> list[dict[
                         {"card": cand, "fields": {"title": "a"}},
                     ]
             logger.warning("agent_record: seek no card detected: %s", found)
+            try:
+                state = await agent_registry.dispatch(
+                    "page_state",
+                    {
+                        "selectors": [
+                            "[data-testid*='card']",
+                            "[data-testid*='result']",
+                            "div[class*='Card']",
+                            "article",
+                            "input[type='password']",
+                        ]
+                    },
+                    timeout_s=30,
+                )
+            except Exception as exc:
+                logger.debug("agent_record: seek page_state failed: %s", exc)
+                state = {}
+            logger.warning(
+                "agent_record: seek page_state → %s",
+                json.dumps(state)[:500] if isinstance(state, dict) else state,
+            )
+            if isinstance(state, dict) and (
+                state.get("loginHint")
+                or (state.get("counts") or {}).get("input[type='password']", 0) > 0
+            ):
+                raise HTTPException(
+                    502,
+                    "Seek results page is showing a login wall — "
+                    "re-login via the wizard, then retry recording",
+                )
+            body_chars = state.get("bodyChars", 0) if isinstance(state, dict) else 0
+            if body_chars < 500:
+                raise HTTPException(
+                    502,
+                    "Seek page barely rendered "
+                    f"({body_chars} chars) — SSO/app may still be loading; "
+                    "open the site, run a search manually, then retry",
+                )
+            title = state.get("title", "?") if isinstance(state, dict) else "?"
             raise HTTPException(
                 502,
-                "Seek results page returned no detectable result cards — "
-                "if you can see candidate results, reload the extension to "
-                "v1.7.3 and retry; otherwise sign in and run a search with "
-                "visible results first",
+                f"Seek page loaded (title '{title}', {body_chars} chars) but no "
+                "candidate rows — run a search returning visible candidates "
+                f"first (query '{req.query_hint}' may match nothing; try "
+                "broader), extension v1.7.4+ required",
             )
         except HTTPException:
             raise

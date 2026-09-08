@@ -999,6 +999,30 @@ async function cmdStartRecord(baseUrl) {
   return { ok: true, recording: true };
 }
 
+// page_state — diagnostic snapshot of the current tab so a failed
+// detection can be explained (login wall vs. empty results vs. not loaded).
+async function cmdPageState(selectors) {
+  return execOnTab(() => {
+    const text = (document.body?.innerText || "").slice(0, 2000);
+    const counts = {};
+    for (const sel of (selectors || []).slice(0, 8)) {
+      try {
+        counts[sel] = document.querySelectorAll(sel).length;
+      } catch {
+        counts[sel] = -1;
+      }
+    }
+    return {
+      url: location.href.slice(0, 200),
+      title: document.title.slice(0, 100),
+      bodyChars: (document.body?.innerText || "").length,
+      bodyHead: text.slice(0, 300),
+      loginHint: /sign in|log in|password|authwall|verify/i.test(text),
+      counts,
+    };
+  });
+}
+
 // find_result_card — detect the repeating result-row container on the
 // CURRENT page so a rotten extract selector can be re-synthesized during
 // re-record (seek rotates obfuscated classes; a stored card selector dies
@@ -1106,6 +1130,7 @@ async function executeCommand(cmd) {
     case "get_cookies": return cmdGetCookies(params.url);
     case "start_record": return cmdStartRecord(params.baseUrl);
     case "stop_record": return cmdStopRecord();
+    case "page_state": return cmdPageState(params.selectors);
     case "find_result_card": return cmdFindResultCard();
     case "linkedin_people_plan": return cmdLinkedinPeoplePlan(params);
     case "linkedin_people_enrich": return cmdLinkedinPeopleEnrich(params);

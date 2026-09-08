@@ -1,5 +1,6 @@
 """Tests for _agent_discover SEEK record path (URL-param search, no DOM fill)."""
 
+import pytest
 
 from app.api.routes.sources import _agent_discover
 
@@ -7,17 +8,32 @@ from app.api.routes.sources import _agent_discover
 class _FakeRegistry:
     """Records dispatch calls; returns canned find_result_card payloads."""
 
-    def __init__(self, card_found: bool = True):
+    def __init__(
+        self,
+        card_found: bool = True,
+        needs_human: bool = False,
+        page_state: dict | None = None,
+        extract_rows: list | None = None,
+    ):
         self.calls: list[tuple[str, dict]] = []
         self.card_found = card_found
+        self.needs_human = needs_human
+        self.page_state = page_state or {}
+        self.extract_rows = extract_rows
 
     async def dispatch(self, cmd: str, params: dict, timeout_s: int = 30):
         self.calls.append((cmd, params))
+        if cmd == "run_flow" and self.needs_human:
+            return {"needs_human": True, "error": "login page detected"}
+        if cmd == "page_state":
+            return self.page_state
         if cmd == "find_result_card":
             if self.card_found:
                 return {"found": True, "card": "div[data-card]"}
             return {"found": False, "card": None}
         if cmd == "extract":
+            if self.extract_rows is not None:
+                return self.extract_rows
             card = params.get("card", "")
             if card == "[data-testid*='card']":
                 return [
@@ -90,3 +106,45 @@ async def test_seek_discover_falls_back_to_extract_probe(monkeypatch):
         if c == "run_flow" and [s["action"] for s in p["steps"]] == ["wait"]
     ]
     assert waits, "expected a wait-only retry run_flow"
+
+
+async def test_run_flow_wall_short_circuits(monkeypatch):
+    """run_flow reports needs_human → 502 mentions re-login; no card detection."""
+    fake = _FakeRegistry(needs_human=True)
+    monkeypatch.setattr(
+        "app.services.agent_relay.agent_registry", fake, raising=False
+    )
+
+    with pytest.raises(Exception) as ei:
+        await _agent_discover(_FakeSource(), _FakeReq())
+
+    assert "re-login" in str(ei.value)
+    assert not any(c == "find_result_card" for c, _ in fake.calls)
+
+
+async def test_no_cards_reports_page_state(monkeypatch):
+    """All probes miss → 502 message includes page title/bodyChars from
+    page_state so the failure is diagnosable."""
+    fake = _FakeRegistry(
+        card_found=False,
+        extract_rows=[],
+        page_state={
+            "url": "https://sg.employer.seek.com/...",
+            "title": "Talent Search",
+            "bodyChars": 4200,
+            "bodyHead": "Search profiles",
+            "loginHint": False,
+            "counts": {"[data-testid*='card']": 0},
+        },
+    )
+    monkeypatch.setattr(
+        "app.services.agent_relay.agent_registry", fake, raising=False
+    )
+
+    with pytest.raises(Exception) as ei:
+        await _agent_discover(_FakeSource(), _FakeReq())
+
+    msg = str(ei.value)
+    assert "Talent Search" in msg
+    assert "4200" in msg
+    assert any(c == "page_state" for c, _ in fake.calls)
