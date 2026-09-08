@@ -83,7 +83,20 @@ def test_supervisor_pipeline_runs():
         ):
             return await supervisor_graph.ainvoke(initial)
 
-    result = asyncio.run(run())
+    # The graph persists via app.db, whose pooled asyncpg connections may be
+    # bound to a different (already-closed) event loop from an earlier test
+    # module. Run with a NullPool engine so each asyncio.run gets fresh
+    # connections and no pooled Future crosses loops.
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import NullPool
+
+    from app import db
+
+    engine = create_async_engine(db.settings.database_url, poolclass=NullPool)
+    test_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    with patch.object(db, "engine", engine), patch.object(db, "async_session", test_session):
+        result = asyncio.run(run())
+    asyncio.run(engine.dispose())
     assert result["status"] == TaskStatus.completed
     # The low-relevance FastJobs row ("Software Engineer" vs an AI-leadership
     # profile) legitimately scores below the min-score quality gate and is

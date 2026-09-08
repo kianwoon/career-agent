@@ -12,14 +12,34 @@ from app.main import app
 
 @pytest.fixture(scope="module")
 def client():
+    # Other test modules (notably test_security) set API_KEYS at import time
+    # and rely on it still being set later. Save and restore so module order
+    # doesn't leak our key config into them.
+    saved = {k: os.environ.get(k) for k in ("API_KEYS", "API_RATE_LIMIT_PER_MIN")}
     os.environ["API_KEYS"] = "test-compat-key:1000"
     os.environ["API_RATE_LIMIT_PER_MIN"] = "1000"
     from app.api import security
+    from app.db import engine
 
     get_settings.cache_clear()
     security._key_store = None
     with TestClient(app) as c:
         yield c
+    for k, v in saved.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    security._key_store = None
+    get_settings.cache_clear()
+    # The TestClient's lifespan exited its event loop; pooled asyncpg
+    # connections are bound to that loop. Drop them so later modules that
+    # run their own loops (e.g. test_graph via asyncio.run) get fresh ones.
+    import asyncio
+
+    loop = asyncio.new_event_loop()
+    loop.run_until_complete(engine.dispose())
+    loop.close()
 
 
 def _headers():
