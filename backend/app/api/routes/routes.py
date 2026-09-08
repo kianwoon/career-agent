@@ -76,12 +76,17 @@ async def start_candidate_search(
     # explicitly. This makes the documented "search all candidate sources"
     # behavior the default instead of requiring every caller to enumerate
     # platform names.
-    # Valid platforms = built-in adapters + enabled sources with an active
-    # find_candidates flow (any such source can act as a platform).
-    from app.agent.nodes import _flow_platforms
+    # Valid platforms = built-in adapters + enabled sources with a
+    # find_candidates flow of any status (active or broken — broken ones
+    # are attempted and reported in source_issues, never silently dropped).
+    from app.agent.nodes import _candidate_source_platforms, _flow_platforms
 
     flow_platforms = await _flow_platforms()
-    default_platforms = ["LinkedIn", *sorted(flow_platforms)]
+    candidate_source_platforms = await _candidate_source_platforms()
+    default_platforms = [
+        "LinkedIn",
+        *sorted(flow_platforms | candidate_source_platforms),
+    ]
     platforms = req.plan_platforms() or default_platforms
     # Legacy-default shape: callers that hardcoded the old default
     # (["LinkedIn"] / platform:"LinkedIn") actually want every candidate
@@ -89,13 +94,14 @@ async def start_candidate_search(
     # respected as a deliberate narrowing.
     if [p.lower() for p in platforms] == ["linkedin"]:
         platforms = default_platforms
-    unknown = [
-        p for p in platforms
-        if p.lower() not in _SUPPORTED_CANDIDATE_PLATFORMS
-        and p.lower() not in flow_platforms
-    ]
+    known = (
+        _SUPPORTED_CANDIDATE_PLATFORMS
+        | flow_platforms
+        | candidate_source_platforms
+    )
+    unknown = [p for p in platforms if p.lower() not in known]
     if unknown:
-        supported = sorted(_SUPPORTED_CANDIDATE_PLATFORMS | flow_platforms)
+        supported = sorted(known)
         raise HTTPException(
             status_code=422,
             detail=f"Unsupported platform(s) {unknown!r}; supported: {supported}",

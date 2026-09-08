@@ -14,7 +14,7 @@
 | **Base URL (dev)** | `http://localhost:8000` |
 | **Auth** | `X-API-Key` header (required) |
 | **Model** | **Async**: start task → poll → fetch results. Simple searches 30–120s; multi-query plan searches 2–8 min (hard cap 12 min). |
-| **Platforms** | `linkedin` + any enabled source with an active `find_candidates` flow (currently also `jobstreet - candidate`) |
+| **Platforms** | `linkedin` + any enabled source with a `find_candidates` flow of any status (currently also `jobstreet - candidate`) — sources with a broken flow are still attempted and reported in `source_issues` (re-record needed), never silently dropped |
 | **Rate limit** | Per API key, default 30 req/min (`429` + `Retry-After` on breach) |
 
 > All paths below are relative to the base URL and work verbatim in both environments (e.g. `POST https://career-agent-kianwoon-88223cd5.koyeb.app/api/v1/search/candidates`). Do NOT invent alternate path shapes — only the paths in this document exist.
@@ -28,6 +28,7 @@
 | Expecting `202 Accepted` from this service | — | This service never returns `202` on these endpoints. Create = `201`; everything else = `200`, `4xx`, or `429`. |
 | Treating `404` during polling as retryable | Wasted poll loops | The task row is committed before `201` returns — a `404` means the id is wrong, not "not yet visible". Fix the id; don't retry. |
 | Assuming instant results | "0 results" complaints | Plan searches (several boolean queries × platforms) legitimately run minutes. Poll until `status != "pending"/"running"`. |
+| Assuming a source with a broken flow is searched normally (or skipped silently) | That platform contributes 0 rows with a "BLOCKED: ... no active find_candidates flow" entry in the plan detail | Sources with a broken flow are still attempted and reported in `source_issues` (re-record needed), never silently dropped and never a `422`. |
 
 ### Integration flow
 

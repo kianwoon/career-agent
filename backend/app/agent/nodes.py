@@ -344,6 +344,32 @@ async def _flow_platforms() -> set[str]:
     return {r.lower() for r in rows}
 
 
+async def _candidate_source_platforms() -> set[str]:
+    """Names of enabled sources with a find_candidates flow of ANY status.
+
+    Unlike _flow_platforms (active only), this includes sources whose flow
+    is broken/paused — they remain valid candidate-search platforms so the
+    attempt happens and the failure is surfaced as a per-source issue
+    ("no active find_candidates flow") instead of being silently dropped.
+    """
+
+    from app.db import async_session
+    from app.models.orm import Source, SourceFlow
+
+    async with async_session() as db:
+        rows = (
+            await db.execute(
+                select(Source.name)
+                .join(SourceFlow, SourceFlow.source_id == Source.id)
+                .where(
+                    Source.enabled.is_(True),
+                    SourceFlow.flow_type == "find_candidates",
+                )
+            )
+        ).scalars().all()
+    return {r.lower() for r in rows}
+
+
 class AgentState(TypedDict, total=False):
     task_id: str
     type: SearchType
@@ -730,18 +756,20 @@ async def run_search(state: AgentState) -> AgentState:
         needs_human = False
         human_reason: str | None = None
         plan_details: list[str] = []
-        # Valid platforms = built-in adapters + any enabled source with an
-        # active find_candidates flow (Option B: sources become platforms).
+        # Valid platforms = built-in adapters + any enabled source with a
+        # find_candidates flow (active OR broken — Option B: sources become
+        # platforms; broken flows are attempted and reported, not dropped).
         flow_platforms = await _flow_platforms()
+        all_source_platforms = flow_platforms | await _candidate_source_platforms()
 
         def _resolve(p: str) -> Any:
             return _candidate_adapters().get(p) or (
-                _search_candidates_via_flow if p in flow_platforms else None
+                _search_candidates_via_flow if p in all_source_platforms else None
             )
 
         unsupported = [p for p in platforms if _resolve(p) is None]
         if unsupported:
-            supported = sorted(set(_candidate_adapters()) | flow_platforms)
+            supported = sorted(set(_candidate_adapters()) | all_source_platforms)
             human_reason = (
                 f"Unsupported platform(s): {', '.join(unsupported)}; "
                 f"supported: {supported}"
@@ -781,11 +809,17 @@ async def run_search(state: AgentState) -> AgentState:
                 # A blocked platform must not nuke rows other platforms
                 # produced: pause only when NOTHING was found anywhere. The
                 # block reason is preserved in plan_detail, not discarded.
-                if needs_human and raw:
-                    needs_human = False
+                if needs_human:
+                    # Preserve the block reason (e.g. a broken-flow source's
+                    # "no active find_candidates flow") in plan_detail either
+                    # way: if other platforms produced rows the pause is
+                    # suppressed; otherwise needs_human stays set and the
+                    # reason is in human_reason — never silently dropped.
                     if human_reason:
                         plan_details.append(f"BLOCKED: {human_reason}")
-                    human_reason = None
+                    if raw:
+                        needs_human = False
+                        human_reason = None
                 plan_details.append(
                     result.get("plan_detail") or f"{platform}: {len(p_raw)} results"
                 )

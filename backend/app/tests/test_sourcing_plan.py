@@ -4,6 +4,9 @@ Covers the end-to-end contract with the external system's analysis panel
 (platform, boolean queries, excludes, salary, employment type, location).
 """
 
+import asyncio
+from datetime import UTC, datetime
+
 import pytest
 
 from app.models.schemas import (
@@ -530,3 +533,113 @@ def test_apply_excludes_drops_not_clause_on_long_queries():
     assert "NOT" not in _apply_excludes(long_q, ex)
     assert "NOT (marketing" in _apply_excludes(short_q, ex)
     assert _apply_excludes(short_q, None) == short_q
+
+
+# ---------------------------------------------------------------------------
+# Broken-flow sources: default platforms widen, attempted, reported not dropped
+# ---------------------------------------------------------------------------
+
+def test_default_platforms_include_broken_flow_source(monkeypatch):
+    """A source with a find_candidates flow of ANY status (even broken) is a
+    valid platform: included in the default/widened set, never 422'd."""
+    from app.agent import nodes
+    from app.models.schemas import CandidateSearchRequest
+
+    async def fake_flow_platforms():
+        return set()  # no active flows
+
+    async def fake_all_sources():
+        return {"jobstreet - candidate"}  # flow exists but broken
+
+    monkeypatch.setattr(nodes, "_flow_platforms", fake_flow_platforms)
+    monkeypatch.setattr(nodes, "_candidate_source_platforms", fake_all_sources)
+
+    # Legacy default shape widens to the full set including the broken source.
+    req = CandidateSearchRequest(query="engineer", platforms=["LinkedIn"])
+    assert [p.lower() for p in (req.plan_platforms() or [])] == ["linkedin"]
+
+    # Route-level: simulate start_candidate_search's known-set logic.
+    import asyncio
+
+    from app.api.routes import routes as routes_mod
+
+    captured = {}
+
+    async def fake_start_task(db, task_type, **kwargs):
+        captured["plan"] = kwargs.get("plan")
+        now = datetime.now(UTC)
+        return routes_mod.TaskStatusResponse(
+            task_id="t1", type=task_type,
+            status=routes_mod.TaskStatus.pending,
+            workflow_state=None, created_at=now, started_at=None,
+            completed_at=None, error=None,
+        )
+
+    monkeypatch.setattr(routes_mod, "_start_task", fake_start_task)
+
+    resp = asyncio.run(routes_mod.start_candidate_search(
+        req=CandidateSearchRequest(query="engineer", platforms=["LinkedIn"]),
+        db=None,
+    ))
+    assert resp.task_id == "t1"
+    platforms = captured["plan"]["platforms"]
+    assert "linkedin" in platforms
+    assert "jobstreet - candidate" in platforms  # widened, not dropped
+
+
+def test_unknown_junk_platform_still_422(monkeypatch):
+    from app.agent import nodes
+    from app.api.routes import routes as routes_mod
+    from app.models.schemas import CandidateSearchRequest
+
+    async def fake_flow_platforms():
+        return set()
+
+    async def fake_all_sources():
+        return set()
+
+    monkeypatch.setattr(nodes, "_flow_platforms", fake_flow_platforms)
+    monkeypatch.setattr(nodes, "_candidate_source_platforms", fake_all_sources)
+
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(routes_mod.start_candidate_search(
+            req=CandidateSearchRequest(query="x", platforms=["not-a-real-platform"]),
+            db=None,
+        ))
+    assert exc.value.status_code == 422
+
+
+def test_run_search_broken_flow_reports_source_issue(monkeypatch):
+    """run_search resolves a broken-flow source via _search_candidates_via_flow
+    (never "unsupported"); the leg reports "no active find_candidates flow"."""
+    import app.agent.nodes as nodes_mod
+
+    async def fake_flow_platforms():
+        return set()
+
+    async def fake_all_sources():
+        return {"brokenboard"}
+
+    async def fake_via_flow(source_name, queries, excludes=None, location=None):
+        assert source_name == "brokenboard"
+        return {
+            "raw_results": [],
+            "needs_human": True,
+            "human_reason": f"{source_name}: no active find_candidates flow — re-record",
+        }
+
+    monkeypatch.setattr(nodes_mod, "_flow_platforms", fake_flow_platforms)
+    monkeypatch.setattr(nodes_mod, "_candidate_source_platforms", fake_all_sources)
+    monkeypatch.setattr(nodes_mod, "_search_candidates_via_flow", fake_via_flow)
+
+    state = {
+        "type": nodes_mod.SearchType.candidates,
+        "query": "engineer",
+        "plan": {"platforms": ["linkedin", "brokenboard"], "queries": ["engineer"]},
+    }
+    result = asyncio.run(nodes_mod.run_search(state))
+    detail = result.get("plan_detail") or ""
+    assert "unsupported" not in detail.lower()
+    assert "no active find_candidates flow" in detail
