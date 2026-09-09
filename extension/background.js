@@ -290,6 +290,7 @@ async function cmdRunFlow(baseUrl, query, steps) {
         return hasPw || /sign in|log in|authwall|join linkedin|sign up/.test(t);
       });
       if (wall) {
+        try { if (agentTabId !== null) { await chrome.tabs.update(agentTabId, { active: true }); const t = await chrome.tabs.get(agentTabId); if (t && t.windowId !== undefined) await chrome.windows.update(t.windowId, { focused: true }); } } catch (e) { /* never fail the run on focus error */ }
         return { results: [], needs_human: true, error: "Session expired — the site is showing a login page" };
       }
       // Results render asynchronously — wait for the card selector to exist
@@ -360,16 +361,31 @@ async function cmdDiscoverFlow(baseUrl, query) {
   await sleep(3500);
 
   const cardCandidates = (await execOnTab(() => {
+    // Group siblings by signature (tag + first-2-classes) instead of counting
+    // same-tagName only — real card lists often mix tags/classes.
+    const signature = (el) => {
+      const cls =
+        el.className && typeof el.className === "string"
+          ? el.className.trim().split(/\s+/).slice(0, 2).join(".")
+          : "";
+      return el.tagName.toLowerCase() + (cls ? "." + cls : "");
+    };
     const scored = [];
-    for (const el of document.querySelectorAll("article, li, div, section")) {
-      if (!el.querySelector("a")) continue;
+    for (const el of document.querySelectorAll("article, li, div, section, tr, [role='listitem'], a")) {
+      if (!el.querySelector("a") && el.tagName !== "A") continue;
       const textLen = (el.innerText || "").length;
       if (textLen < 60) continue;
       const rect = el.getBoundingClientRect();
       if (rect.width < 150 || rect.height < 40) continue;
-      const siblings = el.parentElement
-        ? Array.from(el.parentElement.children).filter((c) => c.tagName === el.tagName).length
-        : 1;
+      let siblings = 1;
+      if (el.parentElement) {
+        const groups = new Map();
+        for (const c of el.parentElement.children) {
+          const sig = signature(c);
+          groups.set(sig, (groups.get(sig) || 0) + 1);
+        }
+        siblings = Math.max(...groups.values());
+      }
       if (siblings >= 2) {
         let sel = el.tagName.toLowerCase();
         if (el.id && document.querySelectorAll("#" + CSS.escape(el.id)).length === 1) {

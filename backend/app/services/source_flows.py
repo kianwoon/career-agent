@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 from playwright.async_api import async_playwright
@@ -789,6 +789,16 @@ async def execute_flow(
             blocked = await _looks_blocked(page)
             if blocked:
                 return {"results": [], "needs_human": True, "human_reason": blocked}
+            # Scroll-to-bottom before extract: lazy-load sites render cards
+            # only when they enter the viewport. Never fail the run on scroll.
+            for _ in range(3):
+                try:
+                    await page.evaluate(
+                        "() => window.scrollTo(0, document.body.scrollHeight)"
+                    )
+                    await asyncio.sleep(0.8)
+                except Exception:
+                    break
             page_results = await _extract_page(page, card_selectors)
             # JobStreet/SEEK: fall back to default card selectors when the
             # captured ones yield nothing usable.
@@ -796,6 +806,34 @@ async def execute_flow(
                 "jobstreet" in base_domain or "seek" in base_domain
             ):
                 page_results = await _extract_page(page, JOBSTREET_DEFAULT_SELECTORS)
+            # Self-heal (generic, all domains): if extraction still yields
+            # nothing, re-discover a fresh card selector in-page and retry once.
+            if not page_results:
+                try:
+                    discovered = await page.evaluate(_CARD_DISCOVERY_JS)
+                    heal_sel = None
+                    for c in discovered or []:
+                        sel = c.get("tag", "div")
+                        if c.get("id"):
+                            heal_sel = f"#{c['id']}"
+                        elif c.get("cls"):
+                            heal_sel = f"{sel}.{c['cls'].split()[0]}"
+                        else:
+                            continue
+                        healed = await _extract_page(
+                            page,
+                            cast(dict, {"card": heal_sel, "fields": {"title": ""}}),
+                        )
+                        if healed:
+                            page_results = healed
+                            logger.warning(
+                                "Self-heal: re-discovered card selector '%s' on %s",
+                                heal_sel,
+                                base_url,
+                            )
+                            break
+                except Exception as exc:
+                    logger.warning("Self-heal card discovery failed: %s", exc)
             page_results = [r for r in page_results if str(r.get("title") or "").strip().lower() != "unknown"]
             new = [r for r in page_results if r.get("url") and r["url"] not in seen_urls]
             if not new:
@@ -837,16 +875,31 @@ async def _extract_page(page: Any, card_selectors: dict[str, str] | None) -> lis
                 const get = (sel) => sel ? (el.querySelector(sel)?.innerText || '').trim() : '';
                 const out = {};
                 for (const [key, sel] of Object.entries(fields)) out[key] = get(sel);
-                const link = el.matches('a') ? el : el.querySelector('a');
-                out.url = link ? link.href : '';
+                // URL pick: prefer deep links (profiles/candidates/jobs/<id>)
+                // over search/listing wrapper hrefs (mirrors extension
+                // cmdExtract deep-href preference).
+                const isWrapperHref = (h) =>
+                  /\/keyword\b/.test(h) || /searchQuery=/.test(h) || /searchId=/.test(h)
+                  || /\/(search|filter|sort|login|signup)\b/i.test(h) || h === '#';
+                const isDeepHref = (h) =>
+                  /\/(profiles?|candidates?|talent|jobs?|person|in\/)/i.test(h)
+                  || /\/(profiles?|candidates?|jobs?)\/[0-9a-f-]{8,}/i.test(h);
+                const hrefs = Array.from(el.matches('a') ? [el] : [el, ...el.querySelectorAll('a')])
+                  .map((n) => n.href).filter(Boolean);
+                const deepHref = hrefs.find(isDeepHref);
+                const plainHref = hrefs.find((h) => !isWrapperHref(h));
+                out.url = deepHref || plainHref || hrefs[0] || '';
                 // Fallbacks when field selectors are missing/empty (LLM only
                 // discovered the card, not inner fields): derive a title from
-                // the first heading or the card's leading text.
+                // the first heading, then title/name-ish class, then the
+                // card's first substantial text line.
                 if (!out.title) {
-                  const h = el.querySelector('h1,h2,h3,h4,[class*="title" i],[class*="job" i] ');
-                  out.title = (h?.innerText || el.innerText || '').trim().split('\\n')[0].slice(0, 200);
+                  const h = el.querySelector('h1,h2,h3,h4,[class*="title" i],[class*="name" i]');
+                  out.title = (h?.innerText || el.innerText || '').trim().split('\n')[0].slice(0, 200);
                 }
                 out.title = out.title || '';
+                if (!out.company) out.company = '';
+                if (!out.headline) out.headline = '';
                 return out;
               });
             }""",
@@ -1008,19 +1061,39 @@ def filter_excluded_results(
 # reasonably sized, contains links, and is a REPEATED sibling of the same tag
 # (>=2 — strict >=3 missed LinkedIn's job cards whose parent mixes tags).
 _CARD_DISCOVERY_JS = """() => {
+  // Group an element's children by "signature" (tag + first 2 classes) and
+  // pick the biggest repeated group — same-tagName counting missed cards
+  // whose siblings mix tags or carry slightly different class sets.
+  const signature = (el) => {
+    const cls = (el.className && typeof el.className === 'string')
+      ? el.className.trim().split(/\\s+/).slice(0, 2).join('.') : '';
+    return el.tagName.toLowerCase() + (cls ? '.' + cls : '');
+  };
   const scored = [];
-  for (const el of document.querySelectorAll('article, li, div, section')) {
+  for (const el of document.querySelectorAll('article, li, div, section, tr, [role="listitem"]')) {
     const links = el.querySelectorAll('a');
-    if (links.length === 0) continue;
+    // Allow linkless cards (e.g. SEEK talent-search rows whose name is plain
+    // text) when they look cardish, mirroring the extension's cmdFindResultCard.
+    if (links.length === 0) {
+      const text = (el.innerText || '');
+      const cardish = /card|result|profile|candidate|job|talent/i.test(signature(el))
+        || el.hasAttribute('data-testid')
+        || text.length > 200;
+      if (!cardish) continue;
+    }
     const textLen = (el.innerText || '').length;
     if (textLen < 40) continue;  // too empty to be a listing card
     const rect = el.getBoundingClientRect();
     if (rect.width < 150 || rect.height < 40) continue;
-    const siblings = el.parentElement
-      ? Array.from(el.parentElement.children).filter(
-          c => c.tagName === el.tagName
-        ).length
-      : 1;
+    let siblings = 1;
+    if (el.parentElement) {
+      const groups = new Map();
+      for (const c of el.parentElement.children) {
+        const sig = signature(c);
+        groups.set(sig, (groups.get(sig) || 0) + 1);
+      }
+      siblings = Math.max(...groups.values());
+    }
     if (siblings >= 2) {
       scored.push({
         tag: el.tagName.toLowerCase(),
