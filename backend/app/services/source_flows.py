@@ -879,11 +879,11 @@ async def _extract_page(page: Any, card_selectors: dict[str, str] | None) -> lis
                 // over search/listing wrapper hrefs (mirrors extension
                 // cmdExtract deep-href preference).
                 const isWrapperHref = (h) =>
-                  /\/keyword\b/.test(h) || /searchQuery=/.test(h) || /searchId=/.test(h)
-                  || /\/(search|filter|sort|login|signup)\b/i.test(h) || h === '#';
+                  /\\/keyword\b/.test(h) || /searchQuery=/.test(h) || /searchId=/.test(h)
+                  || /\\/(search|filter|sort|login|signup)\b/i.test(h) || h === '#';
                 const isDeepHref = (h) =>
-                  /\/(profiles?|candidates?|talent|jobs?|person|in\/)/i.test(h)
-                  || /\/(profiles?|candidates?|jobs?)\/[0-9a-f-]{8,}/i.test(h);
+                  /\\/(profiles?|candidates?|talent|jobs?|person|in\\/)/i.test(h)
+                  || /\\/(profiles?|candidates?|jobs?)\\/[0-9a-f-]{8,}/i.test(h);
                 const hrefs = Array.from(el.matches('a') ? [el] : [el, ...el.querySelectorAll('a')])
                   .map((n) => n.href).filter(Boolean);
                 const deepHref = hrefs.find(isDeepHref);
