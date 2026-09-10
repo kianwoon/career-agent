@@ -341,12 +341,24 @@ async def _search_candidates_via_flow(
     }
 
 
+_CACHE_TTL_S = 30.0
+_flow_platforms_cache: tuple[float, set[str]] | None = None
+_candidate_source_platforms_cache: tuple[float, set[str]] | None = None
+
+
 async def _flow_platforms() -> set[str]:
     """Names of enabled sources that have an active find_candidates flow.
 
     These are valid candidate-search platforms in addition to the
-    built-in adapter registry.
+    built-in adapter registry. Cached briefly so the synchronous POST
+    /search/candidates path never pays repeated DB round-trips per call.
     """
+
+    global _flow_platforms_cache
+    import time
+
+    if _flow_platforms_cache and time.monotonic() - _flow_platforms_cache[0] < _CACHE_TTL_S:
+        return _flow_platforms_cache[1]
 
     from app.db import async_session
     from app.models.orm import Source, SourceFlow
@@ -363,7 +375,9 @@ async def _flow_platforms() -> set[str]:
                 )
             )
         ).scalars().all()
-    return {r.lower() for r in rows}
+    platforms = {r.lower() for r in rows}
+    _flow_platforms_cache = (time.monotonic(), platforms)
+    return platforms
 
 
 async def _candidate_source_platforms() -> set[str]:
@@ -373,7 +387,18 @@ async def _candidate_source_platforms() -> set[str]:
     is broken/paused — they remain valid candidate-search platforms so the
     attempt happens and the failure is surfaced as a per-source issue
     ("no active find_candidates flow") instead of being silently dropped.
+    Cached briefly; derived from the same rows as the full lookup so no
+    extra query is needed when both are called back-to-back by the POST
+    path.
     """
+
+    global _candidate_source_platforms_cache
+    import time
+
+    if _candidate_source_platforms_cache and (
+        time.monotonic() - _candidate_source_platforms_cache[0] < _CACHE_TTL_S
+    ):
+        return _candidate_source_platforms_cache[1]
 
     from app.db import async_session
     from app.models.orm import Source, SourceFlow
@@ -389,7 +414,9 @@ async def _candidate_source_platforms() -> set[str]:
                 )
             )
         ).scalars().all()
-    return {r.lower() for r in rows}
+    platforms = {r.lower() for r in rows}
+    _candidate_source_platforms_cache = (time.monotonic(), platforms)
+    return platforms
 
 
 class AgentState(TypedDict, total=False):

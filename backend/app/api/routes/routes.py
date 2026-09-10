@@ -42,6 +42,11 @@ router = APIRouter(
     dependencies=[Depends(require_api_key)],
 )
 
+# Cap results payload size so polling callers (GET /tasks/{id}/results and
+# the external compat shim) stay under proxy/gateway timeouts even for
+# very large candidate batches.
+RESULTS_LIMIT = 100
+
 
 # ---------------------------------------------------------------------------
 # Search tasks
@@ -532,6 +537,7 @@ async def _task_results_payload(task_id: str, db: AsyncSession) -> SearchTaskRes
                 select(MatchEvaluation)
                 .where(MatchEvaluation.task_id == task_id)
                 .order_by(MatchEvaluation.score.desc())
+                .limit(RESULTS_LIMIT)
             )
         )
         .scalars()
@@ -541,12 +547,20 @@ async def _task_results_payload(task_id: str, db: AsyncSession) -> SearchTaskRes
     # Determine entity type from the first eval.
     entity_type = evals[0].entity_type if evals else "job"
 
+    # Batch-load all entities in ONE query (avoids the per-eval db.get N+1
+    # that made large result sets timeout the polling caller).
+    entity_ids = [ev.entity_id for ev in evals]
+    entity_map: dict[str, Candidate | Job] = {}
+    if entity_ids:
+        model = Candidate if entity_type == "candidate" else Job
+        rows = (
+            await db.execute(select(model).where(model.id.in_(entity_ids)))
+        ).scalars().all()
+        entity_map = {r.id: r for r in rows}
+
     results: list[MatchResult] = []
     for ev in evals:
-        if entity_type == "candidate":
-            entity = await db.get(Candidate, ev.entity_id)
-        else:
-            entity = await db.get(Job, ev.entity_id)
+        entity = entity_map.get(ev.entity_id)
         if entity is None:
             continue
         if entity_type == "candidate":
