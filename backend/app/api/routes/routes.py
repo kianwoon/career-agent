@@ -88,6 +88,11 @@ async def start_candidate_search(
         *sorted(flow_platforms | candidate_source_platforms),
     ]
     platforms = req.plan_platforms() or default_platforms
+    # Defensive re-check: rewrite MyCareersFuture variants to "linkedin" even
+    # if the schema normalization was bypassed. MCF candidate search is not
+    # ready; without this, MCF inputs would 422 as unknown platforms.
+    _MCF_VARIANTS = {"mycareersfuture", "my-careers-future", "my_careers_future", "my careers future", "mcf"}
+    platforms = ["linkedin" if p.strip().lower() in _MCF_VARIANTS else p for p in platforms]
     # Legacy-default shape: callers that hardcoded the old default
     # (["LinkedIn"] / platform:"LinkedIn") actually want every candidate
     # source — widen it to the full set. Any other explicit list is

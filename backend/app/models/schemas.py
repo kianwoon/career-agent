@@ -129,9 +129,19 @@ class CandidateSearchRequest(BaseModel):
         return [self.query.strip()] if self.query and self.query.strip() else []
 
     def plan_platforms(self) -> list[str]:
-        """Normalized platform list (platforms[] or the legacy single platform), capped at MAX_PLAN_PLATFORMS."""
+        """Normalized platform list (platforms[] or the legacy single platform), capped at MAX_PLAN_PLATFORMS.
+
+        MyCareersFuture (and its common variants, e.g. "mcf") is rewritten to
+        "linkedin": MCF candidate search is not ready yet, so requests naming
+        it fall back to the built-in LinkedIn adapter instead of 422-ing.
+        """
+        _MCF_VARIANTS = {"mycareersfuture", "my-careers-future", "my_careers_future", "my careers future", "mcf"}
         raw = self.platforms or ([self.platform] if self.platform else [])
-        return [p.strip() for p in raw if p and p.strip()][:MAX_PLAN_PLATFORMS]
+        return [
+            "linkedin" if p.strip().lower() in _MCF_VARIANTS else p.strip()
+            for p in raw
+            if p and p.strip()
+        ][:MAX_PLAN_PLATFORMS]
 
 
 class TaskStatusResponse(BaseModel):
