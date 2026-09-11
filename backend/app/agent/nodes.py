@@ -903,6 +903,11 @@ async def run_search(state: AgentState) -> AgentState:
         needs_human = False
         human_reason: str | None = None
         plan_details: list[str] = []
+        # Per-platform fatal errors (e.g. BrowserError "extension went
+        # offline mid-search" raised by an adapter). Recorded so the run can
+        # still return partial results from earlier legs instead of dropping
+        # everything via the outer except.
+        offline_issues: list[dict[str, str]] = []
         # Global time budget: the task watchdog kills the whole task at
         # TASK_HARD_TIMEOUT_S (720s); match/rank + persist still need to run
         # after this node. Give the sequential candidate pipeline
@@ -948,21 +953,40 @@ async def run_search(state: AgentState) -> AgentState:
                 # custom source — so they take the platform name to resolve
                 # which source's flow to run. Built-in adapters are
                 # platform-specific and don't.
-                if adapter is _search_candidates_via_flow:
-                    result = await adapter(
-                        source_name=platform,
-                        queries=queries,
-                        excludes=excludes or None,
-                        location=location,
-                        deadline=deadline,
+                # A platform adapter that raises (e.g. BrowserError
+                # "extension went offline mid-search") must not discard the
+                # results earlier platforms produced — mirror the budget and
+                # "busy" handling: record the issue, keep partial results,
+                # continue with the remaining platforms.
+                from app.services.browser import BrowserError
+
+                try:
+                    if adapter is _search_candidates_via_flow:
+                        result = await adapter(
+                            source_name=platform,
+                            queries=queries,
+                            excludes=excludes or None,
+                            location=location,
+                            deadline=deadline,
+                        )
+                    else:
+                        result = await adapter(
+                            queries=queries,
+                            excludes=excludes or None,
+                            location=location,
+                            deadline=deadline,
+                        )
+                except BrowserError as exc:
+                    offline_issues.append({"source": platform, "reason": str(exc)})
+                    plan_details.append(
+                        f"{platform}: OFFLINE — {exc} (results so far kept)"
                     )
-                else:
-                    result = await adapter(
-                        queries=queries,
-                        excludes=excludes or None,
-                        location=location,
-                        deadline=deadline,
+                    logger.warning(
+                        "Candidate platform %s failed with BrowserError: %s",
+                        platform,
+                        exc,
                     )
+                    continue
                 p_raw = result.get("raw_results", [])
                 raw.extend(p_raw)
                 if result.get("needs_human"):
@@ -994,7 +1018,27 @@ async def run_search(state: AgentState) -> AgentState:
             )
             # Budget exhaustion is NOT a failure: return partial results and
             # surface the truncation so the user knows more was planned.
-            source_issues = list(state.get("source_issues") or [])
+            source_issues = list(state.get("source_issues") or []) + offline_issues
+            if offline_issues:
+                # Offline errors are transient (extension sleep/websocket
+                # blip) — treat like budget exhaustion: partial results
+                # complete, message tells the user to reconnect + re-run.
+                if raw:
+                    needs_human = False
+                    human_reason = None
+                else:
+                    needs_human = True
+                    human_reason = (
+                        "Extension agent went offline mid-search before any "
+                        "results were collected — re-open the app so the "
+                        "agent reconnects, then re-run"
+                    )
+                offline_note = offline_issues[0]["reason"]
+                plan_detail = (
+                    f"{plan_detail} | PARTIAL: {offline_note}"
+                    if plan_detail
+                    else f"PARTIAL: {offline_note}"
+                )
             if budget_exhausted:
                 partial_note = "time budget exhausted, returning partial results"
                 source_issues = source_issues + [{"source": "budget", "reason": partial_note}]

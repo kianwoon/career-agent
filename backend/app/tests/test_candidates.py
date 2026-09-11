@@ -1,5 +1,7 @@
 """Tests for candidate search helpers and scoring."""
 
+import pytest
+
 from app.agent.nodes import _extract_skills, _normalize_flow_candidate
 from app.services.matching import score_candidate
 
@@ -378,3 +380,102 @@ async def test_budget_exhaustion_returns_partial_results(monkeypatch):
     assert len(budget_issues) == 1
     assert "time budget exhausted" in budget_issues[0]["reason"]
     assert "PARTIAL" in result["plan_detail"]
+
+
+async def test_midloop_browsererror_keeps_partial_results(monkeypatch):
+    """A platform raising BrowserError mid-loop (extension agent offline)
+    must not discard results earlier platforms already produced — the run
+    completes with the partial results + PARTIAL note, not a pause."""
+    pytest.importorskip("sqlalchemy")
+    import app.agent.nodes as nodes_mod
+    from app.services.browser import BrowserError
+
+    async def fake_no_browser():
+        return False
+
+    async def fake_flow_platforms():
+        return set()
+
+    async def fake_candidate_sources():
+        return set()
+
+    monkeypatch.setattr(nodes_mod, "_no_browser_session_available", fake_no_browser)
+    monkeypatch.setattr(nodes_mod, "_flow_platforms", fake_flow_platforms)
+    monkeypatch.setattr(nodes_mod, "_candidate_source_platforms", fake_candidate_sources)
+
+    async def fake_custom_sources(state):
+        return [], [], [], []
+
+    monkeypatch.setattr(nodes_mod, "_search_custom_sources", fake_custom_sources)
+
+    async def good_adapter(*a, **k):
+        return {
+            "raw_results": [{"name": "Kept Candidate", "source": "seek"}],
+            "needs_human": False,
+        }
+
+    async def offline_adapter(*a, **k):
+        raise BrowserError(
+            "Extension agent went offline mid-search — re-open the app "
+            "so the agent reconnects, then re-run"
+        )
+
+    monkeypatch.setitem(nodes_mod._candidate_adapters(), "seek", good_adapter)
+    monkeypatch.setitem(nodes_mod._candidate_adapters(), "linkedin", offline_adapter)
+
+    state = {
+        "type": nodes_mod.SearchType.candidates,
+        "query": "python developer",
+        "plan": {"platforms": ["seek", "linkedin"], "queries": ["python developer"]},
+    }
+    result = await nodes_mod.run_search(state)
+
+    assert [r["name"] for r in result["raw_results"]] == ["Kept Candidate"]
+    assert result["needs_human"] is False
+    assert result["human_reason"] is None
+    assert "PARTIAL" in result["plan_detail"]
+    issues = result.get("source_issues", [])
+    assert any(i.get("source") == "linkedin" for i in issues)
+
+
+async def test_offline_only_still_pauses_with_actionable_message(monkeypatch):
+    """When the only platform goes offline and nothing was collected, the
+    run still pauses with an actionable message (no partials to keep)."""
+    pytest.importorskip("sqlalchemy")
+    import app.agent.nodes as nodes_mod
+    from app.services.browser import BrowserError
+
+    async def fake_no_browser():
+        return False
+
+    async def fake_flow_platforms():
+        return set()
+
+    async def fake_candidate_sources():
+        return set()
+
+    monkeypatch.setattr(nodes_mod, "_no_browser_session_available", fake_no_browser)
+    monkeypatch.setattr(nodes_mod, "_flow_platforms", fake_flow_platforms)
+    monkeypatch.setattr(nodes_mod, "_candidate_source_platforms", fake_candidate_sources)
+
+    async def fake_custom_sources(state):
+        return [], [], [], []
+
+    monkeypatch.setattr(nodes_mod, "_search_custom_sources", fake_custom_sources)
+
+    async def offline_adapter(*a, **k):
+        raise BrowserError("Extension agent went offline mid-search")
+
+    monkeypatch.setitem(nodes_mod._candidate_adapters(), "linkedin", offline_adapter)
+
+    state = {
+        "type": nodes_mod.SearchType.candidates,
+        "query": "python developer",
+        "plan": {"platforms": ["linkedin"], "queries": ["python developer"]},
+    }
+    result = await nodes_mod.run_search(state)
+
+    assert result["raw_results"] == []
+    assert result["needs_human"] is True
+    assert "re-open the app" in result["human_reason"]
+    assert result["source_issues"][0]["source"] == "linkedin"
