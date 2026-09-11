@@ -904,8 +904,21 @@ export default function Home() {
           )
         );
       } else {
+        let reason = "";
+        if (item.error) {
+          try {
+            const parsed = JSON.parse(item.error) as { reason?: string; source_issues?: string[] };
+            reason = parsed.reason ?? (parsed.source_issues?.length ? parsed.source_issues.join("; ") : "");
+          } catch {
+            reason = item.error;
+          }
+        }
         setTimeline((prev) =>
-          addEvent(prev, "warn", `Past search ${item.task_id} is ${item.status} — no results to show.`)
+          addEvent(
+            prev,
+            "warn",
+            `Past search ${item.task_id} is ${item.status} — no results to show.${reason ? ` Reason: ${reason}` : ""}`
+          )
         );
       }
     } catch (e) {

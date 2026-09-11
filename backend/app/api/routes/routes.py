@@ -323,7 +323,16 @@ async def _run_task(
             if plan_detail:
                 import json as _json
 
-                meta = _json.loads(task.error) if task.error else {}
+                meta: dict = {}
+                if task.error:
+                    try:
+                        meta = _json.loads(task.error)
+                        if not isinstance(meta, dict):
+                            meta = {"reason": task.error}
+                    except (ValueError, TypeError):
+                        # Plain-string error (e.g. raw exception text) — don't
+                        # crash persistence; carry it through as the reason.
+                        meta = {"reason": task.error}
                 meta["plan_detail"] = plan_detail
                 task.error = _json.dumps(meta)
             task.completed_at = datetime.utcnow()
@@ -470,6 +479,7 @@ async def search_history(db: AsyncSession = Depends(get_db)) -> SearchHistoryRes
                 result_count=count or 0,
                 created_at=t.created_at,
                 completed_at=t.completed_at,
+                error=t.error,
             )
         )
     return SearchHistoryResponse(items=items)

@@ -469,6 +469,7 @@ export interface SearchHistoryItem {
   result_count: number;
   created_at: string;
   completed_at?: string | null;
+  error?: string | null;
 }
 
 export interface SearchHistoryResponse {

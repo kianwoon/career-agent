@@ -254,6 +254,7 @@ class SearchHistoryItem(BaseModel):
     result_count: int = 0
     created_at: datetime
     completed_at: datetime | None = None
+    error: str | None = None
 
 
 class SearchHistoryResponse(BaseModel):
