@@ -657,6 +657,49 @@ async def _search_custom_sources(
     return raw, ok, failed, issues
 
 
+async def _no_browser_session_available() -> bool:
+    """Preflight: would any candidate adapter have a browser to work with?
+
+    Fast-fail check for candidate searches: when there is no connected
+    extension agent, no reachable Brave CDP, and no stored browser session,
+    every adapter can only end in "No authenticated browser session" — so
+    the caller can complete the task in seconds instead of grinding through
+    a multi-minute pipeline whose per-source timeouts sum up.
+    """
+    import httpx
+
+    from app.services.agent_relay import agent_registry
+    from app.services.linkedin import BRAVE_CDP_URL
+
+    if agent_registry.connected:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            await client.get(f"{BRAVE_CDP_URL}/json/version")
+        return False  # CDP reachable — a browser session exists
+    except Exception:
+        pass
+    try:
+        from sqlalchemy import select
+
+        from app.db import async_session
+        from app.models.orm import BrowserSession
+
+        async with async_session() as db:
+            row = (
+                await db.execute(
+                    select(BrowserSession.id)
+                    .where(BrowserSession.session_state.isnot(None))
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+        if row is not None:
+            return False  # stored session exists — let the adapter try it
+    except Exception:
+        pass
+    return True
+
+
 async def run_search(state: AgentState) -> AgentState:
     """RUN SEARCH: invoke all job-search adapters and merge the results.
 
@@ -793,6 +836,35 @@ async def run_search(state: AgentState) -> AgentState:
     # every platform are merged; dedup happens downstream.
     # -------------------------------------------------------
     if task_type == SearchType.candidates:
+        # Preflight fail-fast: with no extension agent, no reachable CDP and
+        # no stored session, every adapter can only report "no authenticated
+        # browser session". Complete immediately with an actionable message
+        # instead of burning the multi-minute pipeline (TASK_HARD_TIMEOUT_S
+        # remains the backstop for genuinely slow-but-working runs).
+        if await _no_browser_session_available():
+            return {
+                **state,
+                "raw_results": [],
+                "needs_human": False,
+                "human_reason": None,
+                "source_issues": [
+                    {
+                        "source": "preflight",
+                        "reason": (
+                            "No browser session available: connect Brave with "
+                            "--remote-debugging-port=9222 (CDP), start the "
+                            "browser extension, or capture a session from the "
+                            "Sources panel, then retry."
+                        ),
+                    }
+                ],
+                "plan_detail": "Preflight: no browser session (no CDP, no extension, no stored session) — search not attempted",
+                "timeline": _log(
+                    state,
+                    "RUN SEARCH",
+                    "Preflight: no browser session available — skipped candidate search (fast-fail)",
+                ),
+            }
         plan = state.get("plan") or {}
         queries = list(plan.get("queries") or []) or ([query] if query else [])
         excludes = list(plan.get("exclude") or [])

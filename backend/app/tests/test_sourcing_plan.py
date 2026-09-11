@@ -639,7 +639,13 @@ def test_run_search_broken_flow_reports_source_issue(monkeypatch):
     async def fake_custom_sources(state):
         return [], [], [], []
 
+    async def _async_false():
+        return False
+
     monkeypatch.setattr(nodes_mod, "_search_custom_sources", fake_custom_sources)
+    monkeypatch.setattr(
+        nodes_mod, "_no_browser_session_available", lambda: _async_false()
+    )
 
     state = {
         "type": nodes_mod.SearchType.candidates,
