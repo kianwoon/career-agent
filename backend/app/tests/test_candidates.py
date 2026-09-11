@@ -328,3 +328,53 @@ async def test_flow_search_runs_per_query_legs(monkeypatch):
     for q in queries:
         assert q[:7] in result["plan_detail"]
     assert ": 1" in result["plan_detail"]
+
+
+async def test_budget_exhaustion_returns_partial_results(monkeypatch):
+    """When the candidate-search time budget is already expired, run_search
+    completes normally with partial (empty) results and a budget source_issue
+    — it never raises and never relies on the watchdog to bail out."""
+    import pytest
+
+    pytest.importorskip("sqlalchemy")
+    import app.agent.nodes as nodes_mod
+
+    monkeypatch.setattr(nodes_mod, "SEARCH_BUDGET_S", 0.0)
+
+    async def fake_no_browser():
+        return False
+
+    async def fake_flow_platforms():
+        return set()
+
+    async def fake_candidate_sources():
+        return set()
+
+    monkeypatch.setattr(nodes_mod, "_no_browser_session_available", fake_no_browser)
+    monkeypatch.setattr(nodes_mod, "_flow_platforms", fake_flow_platforms)
+    monkeypatch.setattr(nodes_mod, "_candidate_source_platforms", fake_candidate_sources)
+    async def fake_custom_sources(state):
+        return [], [], [], []
+
+    monkeypatch.setattr(nodes_mod, "_search_custom_sources", fake_custom_sources)
+
+    async def fail_adapter(*a, **k):
+        raise AssertionError("adapter must not run once the budget is exhausted")
+
+    monkeypatch.setitem(
+        nodes_mod._candidate_adapters(), "linkedin", fail_adapter
+    )
+
+    state = {
+        "type": nodes_mod.SearchType.candidates,
+        "query": "python developer",
+        "plan": {"platforms": ["linkedin", "linkedin"], "queries": ["python developer"]},
+    }
+    result = await nodes_mod.run_search(state)
+
+    assert result["needs_human"] is False
+    assert result["raw_results"] == []
+    budget_issues = [i for i in result.get("source_issues", []) if i.get("source") == "budget"]
+    assert len(budget_issues) == 1
+    assert "time budget exhausted" in budget_issues[0]["reason"]
+    assert "PARTIAL" in result["plan_detail"]

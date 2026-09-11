@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
+from time import monotonic
 from typing import Any, TypedDict
 
 from sqlalchemy import func, select
@@ -26,6 +28,19 @@ logger = logging.getLogger(__name__)
 # Platform -> candidate search adapter. Add new platforms here as their
 # adapters become available; unsupported entries are rejected at RUN SEARCH.
 _CANDIDATE_PLATFORM_ADAPTERS: dict[str, Any] = {}
+
+# Global wall-clock budget for the candidates branch of run_search. The task
+# watchdog is TASK_HARD_TIMEOUT_S = 720s; downstream stages (match/rank,
+# persist) need headroom, so the sequential pipeline (flow dispatch legs x
+# queries + per-platform loops + LinkedIn multi-pass) must finish within this
+# budget. On exhaustion the search returns results gathered so far as a
+# PARTIAL result — the task completes; it never watchdog-fails.
+SEARCH_BUDGET_S = 480.0
+# Minimum remaining budget below which starting another dispatch leg/platform
+# is pointless (a leg needs real time to navigate + extract).
+_SEARCH_MIN_REMAINING_S = 15.0
+# Per-dispatch timeout cap (was a flat 240s per leg).
+_SEARCH_LEG_TIMEOUT_CAP_S = 240.0
 
 
 def _candidate_adapters() -> dict[str, Any]:
@@ -196,6 +211,7 @@ async def _search_candidates_via_flow(
     queries: list[str],
     excludes: list[str] | None = None,
     location: str | None = None,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     """Run a candidate search on a custom source via its recorded flow.
 
@@ -256,6 +272,16 @@ async def _search_candidates_via_flow(
         leg_counts: list[str] = []
         needs_human_leg: str | None = None
         for q in flow_queries:
+            # Global budget: cap each leg's timeout to the remaining budget
+            # and stop before starting a leg that cannot finish in time.
+            if deadline is not None:
+                remaining = deadline - monotonic()
+                if remaining < _SEARCH_MIN_REMAINING_S:
+                    leg_counts.append("skipped: time budget exhausted")
+                    continue
+                leg_timeout = min(_SEARCH_LEG_TIMEOUT_CAP_S, remaining)
+            else:
+                leg_timeout = _SEARCH_LEG_TIMEOUT_CAP_S
             try:
                 data = await agent_registry.dispatch(
                     "run_flow",
@@ -264,7 +290,7 @@ async def _search_candidates_via_flow(
                         "query": q,
                         "steps": flow.steps,
                     },
-                    timeout_s=240,
+                    timeout_s=leg_timeout,
                 )
             except Exception as exc:
                 # Do NOT fall back to server-side Playwright for flow
@@ -877,6 +903,15 @@ async def run_search(state: AgentState) -> AgentState:
         needs_human = False
         human_reason: str | None = None
         plan_details: list[str] = []
+        # Global time budget: the task watchdog kills the whole task at
+        # TASK_HARD_TIMEOUT_S (720s); match/rank + persist still need to run
+        # after this node. Give the sequential candidate pipeline
+        # (flow legs x queries + per-platform multi-pass) a hard deadline so
+        # worst-case wall time stays provably under the watchdog. On
+        # exhaustion the search returns partial results instead of failing.
+        budget_s = float(os.getenv("SEARCH_BUDGET_S", "") or SEARCH_BUDGET_S)
+        deadline = monotonic() + budget_s
+        budget_exhausted = False
         # Valid platforms = built-in adapters + any enabled source with a
         # find_candidates flow (active OR broken — Option B: sources become
         # platforms; broken flows are attempted and reported, not dropped).
@@ -898,6 +933,11 @@ async def run_search(state: AgentState) -> AgentState:
             needs_human = True
         try:
             for platform in platforms:
+                remaining = deadline - monotonic()
+                if remaining < _SEARCH_MIN_REMAINING_S:
+                    budget_exhausted = True
+                    plan_details.append(f"{platform}: skipped — time budget exhausted")
+                    continue
                 adapter = _resolve(platform)
                 if adapter is None:
                     continue
@@ -914,12 +954,14 @@ async def run_search(state: AgentState) -> AgentState:
                         queries=queries,
                         excludes=excludes or None,
                         location=location,
+                        deadline=deadline,
                     )
                 else:
                     result = await adapter(
                         queries=queries,
                         excludes=excludes or None,
                         location=location,
+                        deadline=deadline,
                     )
                 p_raw = result.get("raw_results", [])
                 raw.extend(p_raw)
@@ -950,6 +992,23 @@ async def run_search(state: AgentState) -> AgentState:
                 if not needs_human
                 else f"Blocked: {human_reason}"
             )
+            # Budget exhaustion is NOT a failure: return partial results and
+            # surface the truncation so the user knows more was planned.
+            source_issues = list(state.get("source_issues") or [])
+            if budget_exhausted:
+                partial_note = "time budget exhausted, returning partial results"
+                source_issues = source_issues + [{"source": "budget", "reason": partial_note}]
+                plan_detail = (
+                    f"{plan_detail} | PARTIAL: {partial_note}"
+                    if plan_detail
+                    else f"PARTIAL: {partial_note}"
+                )
+                detail += " | budget exhausted — partial results"
+                logger.warning(
+                    "Candidate search budget (%.0fs) exhausted after %d results",
+                    budget_s,
+                    len(raw),
+                )
             if custom_raw:
                 raw = raw + custom_raw
                 needs_human = False
@@ -962,6 +1021,7 @@ async def run_search(state: AgentState) -> AgentState:
                 "raw_results": raw,
                 "needs_human": needs_human,
                 "human_reason": human_reason,
+                "source_issues": source_issues,
                 "plan_detail": plan_detail,
                 "timeline": _log(state, "RUN SEARCH", detail),
             }

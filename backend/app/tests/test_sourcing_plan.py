@@ -622,7 +622,7 @@ def test_run_search_broken_flow_reports_source_issue(monkeypatch):
     async def fake_all_sources():
         return {"brokenboard"}
 
-    async def fake_via_flow(source_name, queries, excludes=None, location=None):
+    async def fake_via_flow(source_name, queries, excludes=None, location=None, deadline=None):
         assert source_name == "brokenboard"
         return {
             "raw_results": [],

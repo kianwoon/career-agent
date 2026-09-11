@@ -17,6 +17,7 @@ import logging
 import os
 import random
 import re
+from time import monotonic
 from typing import Any
 from urllib.parse import quote
 
@@ -698,6 +699,7 @@ async def search_linkedin_people(
     queries: list[str],
     excludes: list[str] | None = None,
     location: str | None = None,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     """Run a sourcing plan against LinkedIn people search.
 
@@ -712,6 +714,10 @@ async def search_linkedin_people(
     - `location` is a conservative post-filter (the geoUrn URL facet
       returned empty sets live, so it is not used).
     - Profile enrichment opens at most ENRICH_BUDGET profiles TOTAL.
+    - `deadline` (optional, monotonic timestamp): global task-level time
+      budget. Each dispatch is capped to the remaining time and later passes
+      (throttle-retry, relaxed, broad, enrich top-up) are skipped when the
+      budget is exhausted — partial results are returned instead.
 
     Returns {"raw_results": [...], "needs_human": bool, "human_reason": str|None}.
     """
@@ -742,6 +748,20 @@ async def search_linkedin_people(
         # LinkedIn quirk: NOT clauses are capped at MAX_NOT_TERMS (5+ terms
         # return zero results), so the tail excludes are NOT in the query.
         # Enforce the FULL list here via post-filter on the returned rows.
+
+        def _remaining_s() -> float | None:
+            return None if deadline is None else deadline - monotonic()
+
+        def _pass_timeout(n_queries: int) -> float:
+            """Per-dispatch timeout capped by the global budget."""
+            floor_t = max(180.0, 90.0 * n_queries)
+            remaining = _remaining_s()
+            return floor_t if remaining is None else max(5.0, min(floor_t, remaining))
+
+        def _budget_gone() -> bool:
+            remaining = _remaining_s()
+            return remaining is not None and remaining < 15.0
+
         try:
             data = await agent_registry.dispatch(
                 "linkedin_people_plan",
@@ -751,7 +771,7 @@ async def search_linkedin_people(
                     "location": location or "",
                     "enrichBudget": ENRICH_BUDGET,
                 },
-                timeout_s=max(180, 90 * len(effective_queries)),
+                timeout_s=_pass_timeout(len(effective_queries)),
             )
         except Exception as exc:
             # The extension dropped mid-plan (MV3 service worker sleep,
@@ -785,7 +805,11 @@ async def search_linkedin_people(
         # minutes later succeed against the same tab. When the plan aborts
         # with a throttle blocker, cool down and re-dispatch ONCE before
         # surfacing the pause.
-        if results["needs_human"] and "throttl" in (results.get("human_reason") or "").lower():
+        if (
+            results["needs_human"]
+            and "throttl" in (results.get("human_reason") or "").lower()
+            and not _budget_gone()
+        ):
             await asyncio.sleep(45)
             try:
                 retry = await agent_registry.dispatch(
@@ -796,7 +820,7 @@ async def search_linkedin_people(
                         "location": location or "",
                         "enrichBudget": ENRICH_BUDGET,
                     },
-                    timeout_s=max(180, 90 * len(effective_queries)),
+                    timeout_s=_pass_timeout(len(effective_queries)),
                 )
             except Exception as exc:
                 logger.warning("Throttle-retry dispatch failed: %s", exc)
@@ -820,6 +844,7 @@ async def search_linkedin_people(
         if (
             not results["needs_human"]
             and len(results["raw_results"]) < RELAXED_MERGE_THRESHOLD
+            and not _budget_gone()
         ):
             relaxed: list[str] = []
             for q in queries:
@@ -835,7 +860,7 @@ async def search_linkedin_people(
                         "location": location or "",
                         "enrichBudget": relaxed_budget,
                     },
-                    timeout_s=max(180, 90 * len(relaxed)),
+                    timeout_s=_pass_timeout(len(relaxed)),
                 )
                 relaxed_rows, gate_dropped = _gate_relaxed_rows(
                     _filter_excluded(extra.get("raw_results", []), excludes), queries
@@ -851,7 +876,7 @@ async def search_linkedin_people(
                 )
                 # Second widen pass: strict AND relaxed both produced nothing
                 # usable — retry with quote-free, AND-free broad variants.
-                if not combined:
+                if not combined and not _budget_gone():
                     broad = _broad_variants(queries)
                     if broad:
                         extra2 = await agent_registry.dispatch(
@@ -862,7 +887,7 @@ async def search_linkedin_people(
                                 "location": location or "",
                                 "enrichBudget": ENRICH_BUDGET,
                             },
-                            timeout_s=max(180, 90 * len(broad)),
+                            timeout_s=_pass_timeout(len(broad)),
                         )
                         broad_rows, broad_dropped = _gate_relaxed_rows(
                             _filter_excluded(extra2.get("raw_results", []), excludes),
@@ -877,9 +902,13 @@ async def search_linkedin_people(
         # (no row has real profile sections), spend the enrich budget now so
         # 2nd-round assessment has data to score. Detect unenriched rows by
         # the absence of the enrichment marker key the extension sets.
-        if results["raw_results"] and not any(
-            r.get("education") is not None or r.get("certifications") is not None
-            for r in results["raw_results"]
+        if (
+            results["raw_results"]
+            and not any(
+                r.get("education") is not None or r.get("certifications") is not None
+                for r in results["raw_results"]
+            )
+            and not _budget_gone()
         ):
             try:
                 topup = await agent_registry.dispatch(
@@ -887,7 +916,7 @@ async def search_linkedin_people(
                     {
                         "candidates": results["raw_results"][:ENRICH_BUDGET],
                     },
-                    timeout_s=max(180, 60 * ENRICH_BUDGET),
+                    timeout_s=_pass_timeout(1),
                 )
                 enriched_rows = topup.get("candidates") if isinstance(topup, dict) else None
                 if enriched_rows:
