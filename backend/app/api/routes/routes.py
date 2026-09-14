@@ -249,6 +249,24 @@ async def _run_task_with_watchdog(
                 await db.commit()
     except asyncio.CancelledError:
         raise
+    except Exception as exc:
+        # Catch-all: a pipeline crash (non-timeout) used to leave the task
+        # stuck in 'running' forever. Mirror the timeout handler using a
+        # FRESH session (the failing one may be unusable).
+        from app.db import async_session as _session_factory
+
+        logger.exception("Pipeline crashed for task %s", task_id)
+        async with _session_factory() as db:
+            task = await db.get(SearchTask, task_id)
+            if task is not None and task.status not in (
+                TaskStatus.completed.value,
+                TaskStatus.failed.value,
+                TaskStatus.paused.value,
+            ):
+                task.status = TaskStatus.failed.value
+                task.error = f"Pipeline crashed: {exc}"
+                task.completed_at = datetime.utcnow()
+                await db.commit()
 
 
 async def _run_task(
@@ -438,9 +456,34 @@ async def _run_task(
                 return
             await db.commit()
         except Exception as exc:
-            task.status = TaskStatus.failed.value
-            task.error = str(exc)
-            await db.commit()
+            # If the original failure was a DB session failure this commit
+            # throws too, killing the coroutine and leaving status='running'.
+            # Roll back and retry the failure-write on a fresh session.
+            try:
+                task.status = TaskStatus.failed.value
+                task.error = str(exc)
+                await db.commit()
+            except Exception:
+                logger.exception("Failed to persist failure for task %s; retrying", task_id)
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
+                try:
+                    async with _session_factory() as fresh_db:
+                        t = await fresh_db.get(SearchTask, task_id)
+                        if t is not None and t.status not in (
+                            TaskStatus.completed.value,
+                            TaskStatus.failed.value,
+                            TaskStatus.paused.value,
+                        ):
+                            t.status = TaskStatus.failed.value
+                            t.error = str(exc)
+                            t.completed_at = datetime.utcnow()
+                            await fresh_db.commit()
+                except Exception:
+                    # Best-effort: the retry must never raise out of the coroutine.
+                    logger.exception("Failure-write retry also failed for task %s", task_id)
 
 
 @router.get("/search/history", response_model=SearchHistoryResponse)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -18,6 +19,33 @@ from app.services.browser import browser_service
 settings = get_settings()
 
 logger = logging.getLogger(__name__)
+
+
+async def reconcile_orphaned_tasks() -> None:
+    """Fail tasks left pending/running by a previous server process.
+
+    Background pipelines are launched with asyncio.create_task and are lost
+    on restart, so such tasks would otherwise stay 'running' forever.
+    """
+    from sqlalchemy import update
+
+    from app.db import async_session
+    from app.models.orm import SearchTask
+    from app.models.schemas import TaskStatus
+
+    async with async_session() as db:
+        result = await db.execute(
+            update(SearchTask)
+            .where(SearchTask.status.in_(["pending", "running"]))
+            .values(
+                status=TaskStatus.failed.value,
+                error="Interrupted by server restart",
+                completed_at=datetime.utcnow(),
+            )
+        )
+        await db.commit()
+        if result.rowcount:
+            logger.info("Reconciled %d orphaned task(s) as failed", result.rowcount)
 
 
 @asynccontextmanager
@@ -44,6 +72,13 @@ async def lifespan(app: FastAPI):
             await seed_builtin_sources(db)
     except Exception as exc:  # startup must not hard-crash on DB hiccups
         logger.error("Could not initialize DB tables: %s", exc)
+    # Reconcile tasks orphaned by a previous process: background pipelines
+    # run as asyncio.create_task and do NOT survive a restart, so any task
+    # left pending/running is dead — mark it failed so the UI stops waiting.
+    try:
+        await reconcile_orphaned_tasks()
+    except Exception as exc:
+        logger.error("Could not reconcile orphaned tasks: %s", exc)
     # Startup: nothing heavy yet. Shutdown: close browser sessions.
     yield
     await browser_service.shutdown()
