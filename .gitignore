@@ -25,3 +25,6 @@ out/
 # Extension packaging
 dist/
 *.pem
+
+# Code graph (generated artifacts)
+graphify-out/
