@@ -276,9 +276,9 @@
     "semantic_hash": "678b5e89c9924f06bd102f52c141b3a1"
   },
   "extension/background.js": {
-    "mtime": 1789385349.2445068,
-    "seen": 1789385407.153502,
-    "ast_hash": "adef4bc364cbfcea122a2ab691695032",
+    "mtime": 1788943420.4809368,
+    "seen": 1789098638.280895,
+    "ast_hash": "e21101142ab59e11ae2c2e01e33cdd08",
     "semantic_hash": ""
   },
   "extension/manifest.json": {

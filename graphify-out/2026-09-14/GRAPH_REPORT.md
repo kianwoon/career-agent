@@ -1,23 +1,23 @@
-# Graph Report - career bot  (2026-09-14)
+# Graph Report - career bot  (2026-09-11)
 
 ## Corpus Check
-- 131 files · ~94,981 words
+- 131 files · ~94,504 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1512 nodes · 2778 edges · 127 communities (110 shown, 15 thin omitted)
+- 1510 nodes · 2773 edges · 130 communities (112 shown, 16 thin omitted)
 - Extraction: 94% EXTRACTED · 6% INFERRED · 0% AMBIGUOUS · INFERRED: 176 edges (avg confidence: 0.93)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `225bf7c3`
+- Built from commit: `3b23a3e6`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
 ## Community Hubs (Navigation)
 - api.ts
 - AsyncSession
-- AsyncSession
+- BrowserSession
 - matching.py
 - AgentState
 - test_session.py
@@ -31,7 +31,7 @@
 - assess_credibility
 - test_source_flows.py
 - manifest.json
-- BaseModel
+- schemas.py
 - compilerOptions
 - WizardSession
 - package.json
@@ -44,19 +44,19 @@
 - main.py
 - Career Agent System
 - agent.py
-- SearchType
+- get_settings
 - test_candidates.py
 - _apply_excludes
-- search_linkedin_people
+- dedupe_candidates
 - _gate_relaxed_rows
 - test_security.py
-- get_settings
+- config.py
 - test_sources_api.py
 - _first_or_group
 - proxy_config
 - filter_excluded_results
 - sources.py
-- BrowserError
+- linkedin.py
 - handle_client
 - SlidingWindowLimiter
 - popup.js
@@ -78,16 +78,19 @@
 - _agent_discover
 - test_llm_rerank.py
 - test_compat_routes.py
-- MatchResult
-- seed_builtin_sources
-- test_quality_gates.py
+- EmbeddingProvider
+- BrowserError
+- deduplicate
 - Career-agent flow recording: SEEK/jobstreet selectors
-- filter_by_location
-- delete_flow
+- SourceFlowView
+- browser.py
 - _MultiQueryFakeRegistry
 - APIKeyStore
+- BrowserService
 - Runbook: Package a production OpenCode desktop app
 - Career-bot revised spec (2026-09-02): integration diff checklist
+- _restore_stripped_api_prefix
+- _connect
 - Disable V1 snapshot event persistence for local builds
 - Pluggable job-source architecture (guided wizard)
 - Expired source session UX (pause + re-login banner)
@@ -168,27 +171,27 @@
 ## Import Cycles
 - None detected.
 
-## Communities (127 total, 15 thin omitted)
+## Communities (130 total, 16 thin omitted)
 
 ### Community 0 - "api.ts"
 Cohesion: 0.05
 Nodes (98): addEvent(), ConnectBrowserAgent(), Home(), addEventPrev(), clearWizPolls(), ensureSession(), handleAddSource(), handleAgentCaptureSession() (+90 more)
 
 ### Community 1 - "AsyncSession"
-Cohesion: 0.14
-Nodes (26): agent_login(), agent_record(), agent_record_manual_start(), agent_record_manual_stop(), agent_session_capture(), AgentRecordRequest, delete_source(), _get_source() (+18 more)
+Cohesion: 0.12
+Nodes (29): agent_login(), agent_record(), agent_record_manual_start(), agent_record_manual_stop(), agent_session_capture(), AgentRecordRequest, delete_flow(), delete_source() (+21 more)
 
-### Community 2 - "AsyncSession"
-Cohesion: 0.23
-Nodes (16): browser_refresh(), cancel_task(), get_task(), AsyncSession, post, Mark a running task as cancelled so the UI stops waiting on it. The background…, Create and start a job search task., Create and start a candidate search task. Accepts a full sourcing plan… (+8 more)
+### Community 2 - "BrowserSession"
+Cohesion: 0.18
+Nodes (6): BrowserSession, Any, Extract structured data per a schema of field name -> selector., No-op in Phase 1 local mode; signals Steel to freeze the session., Thin wrapper over a Playwright page with a restricted command surface. In Phase…, Human Takeover Flow
 
 ### Community 3 - "matching.py"
-Cohesion: 0.09
-Nodes (30): Evidence, A single piece of traceable evidence backing a match score., _build_reason(), EmbeddingProvider, _find_gaps(), keyword_overlap(), NoopEmbeddingProvider, NoopReranker (+22 more)
+Cohesion: 0.13
+Nodes (21): Evidence, A single piece of traceable evidence backing a match score., _build_reason(), _find_gaps(), keyword_overlap(), NoopEmbeddingProvider, Matching engine: hybrid scoring pipeline per the Phase 1 design spec. Pipeline:…, Score one candidate against a job description. Uses enriched profile data when… (+13 more)
 
 ### Community 4 - "AgentState"
-Cohesion: 0.16
-Nodes (21): build_graph(), LangGraph supervisor graph definition., Build the Phase 1 supervisor graph., AgentState, check_human(), extract(), _log(), match_rank() (+13 more)
+Cohesion: 0.10
+Nodes (35): build_graph(), LangGraph supervisor graph definition., Build the Phase 1 supervisor graph., AgentState, check_human(), extract(), _log(), match_rank() (+27 more)
 
 ### Community 5 - "test_session.py"
 Cohesion: 0.09
@@ -207,20 +210,20 @@ Cohesion: 0.10
 Nodes (33): AsyncClient, _build_search_url(), _client(), _extract_skills(), _fetch_job_detail(), _format_employment_types(), _format_location(), _format_salary() (+25 more)
 
 ### Community 9 - "routes.py"
-Cohesion: 0.13
-Nodes (26): browser_capture(), browser_observe(), browser_replay(), browser_takeover(), create_browser_session(), decide_approval(), _default_user_id(), API routes for the Career Agent service. (+18 more)
+Cohesion: 0.10
+Nodes (34): browser_capture(), browser_observe(), browser_refresh(), browser_replay(), cancel_task(), candidate_platforms(), create_browser_session(), decide_approval() (+26 more)
 
 ### Community 10 - "fastjobs.py"
 Cohesion: 0.12
 Nodes (30): _build_listing_url(), _check_blocker(), _clean_salary(), _connect(), _extract_job_detail(), _extract_jobs(), _extract_jobs_with_details(), _latest_session_row() (+22 more)
 
 ### Community 11 - "linkedin_people.py"
-Cohesion: 0.11
-Nodes (26): _build_search_url(), _cdp_headers(), _check_blocker(), _connect(), enrich_candidates(), _extract_candidates(), _extract_candidates_with_details(), _extract_profile_detail() (+18 more)
+Cohesion: 0.10
+Nodes (29): _build_search_url(), _check_blocker(), enrich_candidates(), _extract_candidates(), _extract_candidates_with_details(), _extract_profile_detail(), filter_by_location(), _filter_excluded() (+21 more)
 
 ### Community 12 - "background.js"
-Cohesion: 0.17
-Nodes (35): classifyLinkedinResultsPage(), cmdClick(), cmdDiscoverFlow(), cmdExtract(), cmdFill(), cmdFindResultCard(), cmdGetCookies(), cmdLinkedinJobsSearch() (+27 more)
+Cohesion: 0.19
+Nodes (33): cmdClick(), cmdDiscoverFlow(), cmdExtract(), cmdFill(), cmdFindResultCard(), cmdGetCookies(), cmdLinkedinJobsSearch(), cmdLinkedinPeopleEnrich() (+25 more)
 
 ### Community 13 - "assess_credibility"
 Cohesion: 0.11
@@ -234,9 +237,9 @@ Nodes (34): build_boolean_keywords(), build_boolean_keywords_async(), compact_bo
 Cohesion: 0.10
 Nodes (19): action, default_icon, default_popup, default_title, background, service_worker, 128, 16 (+11 more)
 
-### Community 16 - "BaseModel"
-Cohesion: 0.15
-Nodes (14): wizard_complete(), Raw recorded steps from the guided wizard, before templatization. Kept so a…, SourceRecording, BaseModel, Start a guided wizard step. `mode`: login | record., SourceCreate, SourceFlowUpdate, WizardCompleteRequest (+6 more)
+### Community 16 - "schemas.py"
+Cohesion: 0.13
+Nodes (25): browser_takeover(), ActivityEvent, ApprovalRequest, BrowserSessionView, BrowserTakeoverRequest, CandidateMatchResult, JobMatchResult, JobSearchRequest (+17 more)
 
 ### Community 17 - "compilerOptions"
 Cohesion: 0.11
@@ -263,20 +266,20 @@ Cohesion: 0.31
 Nodes (20): brave_cdp_ready(), cmd_brave(), cmd_start(), cmd_start_ngrok(), cmd_start_proxy(), cmd_status(), cmd_stop(), cmd_stop_one() (+12 more)
 
 ### Community 23 - "nodes.py"
-Cohesion: 0.14
-Nodes (21): _candidate_adapters(), _clean(), _no_browser_session_available(), _noop_search(), _norm_text(), Any, LangGraph workflow nodes for the Career Agent supervisor. Phase 1 implements a…, Strip whitespace on strings; leave other types alone. (+13 more)
+Cohesion: 0.10
+Nodes (29): _candidate_adapters(), _candidate_source_platforms(), _clean(), _flow_platforms(), _no_browser_session_available(), _noop_search(), _norm_text(), Any (+21 more)
 
 ### Community 24 - "Base"
-Cohesion: 0.14
-Nodes (20): Base, Database setup: SQLAlchemy async engine + session factory., Declarative base for all ORM models., Approval, BrowserAction, BrowserSession, CareerProfile, Company (+12 more)
+Cohesion: 0.12
+Nodes (22): Base, get_db(), AsyncSession, Database setup: SQLAlchemy async engine + session factory., Declarative base for all ORM models., FastAPI dependency yielding a database session., Approval, BrowserAction (+14 more)
 
 ### Community 25 - "source_flows.py"
 Cohesion: 0.18
 Nodes (18): discover_flow(), domain_of(), execute_flow(), _extract_page(), _looks_blocked(), _looks_logged_out(), page_keyboard_type(), Any (+10 more)
 
 ### Community 26 - "main.py"
-Cohesion: 0.10
-Nodes (26): candidate_platforms(), get_task_results(), get_task_results_compat(), health(), get, Candidate-search platforms available right now. Built-in adapters plus any…, Canonical task results endpoint., Compat shim for an external system's path convention. `opportunity_id` is the… (+18 more)
+Cohesion: 0.12
+Nodes (24): get_task(), get_task_results(), get_task_results_compat(), AsyncSession, get, List past search tasks (most recent first), with result counts. Lets users…, Canonical task results endpoint., Compat shim for an external system's path convention. `opportunity_id` is the… (+16 more)
 
 ### Community 27 - "Career Agent System"
 Cohesion: 0.16
@@ -286,21 +289,21 @@ Nodes (18): Career Agent System, GitHub Actions CI Workflow, Koyeb Deployment Gu
 Cohesion: 0.19
 Nodes (15): agent_execute(), agent_poll(), agent_result(), agent_status(), AgentResult, AgentStatus, FlowExecuteRequest, Any (+7 more)
 
-### Community 29 - "SearchType"
-Cohesion: 0.20
-Nodes (15): Run _run_task with a hard deadline. A hung Playwright/LLM call used to leave…, Execute the LangGraph pipeline for a task in the background., List past search tasks (most recent first), with result counts. Lets users…, _run_task(), _run_task_with_watchdog(), search_history(), MatchRole, Which side of the match we are scoring. (+7 more)
+### Community 29 - "get_settings"
+Cohesion: 0.31
+Nodes (8): _get_key_store(), Request, API authentication and per-key rate limiting. API-key auth via the `X-API-Key`…, FastAPI dependency enforcing API-key auth + rate limiting. Returns the…, require_api_key(), get_settings(), X-API-Key Authentication, Per-Key Rate Limiting
 
 ### Community 30 - "test_candidates.py"
-Cohesion: 0.09
-Nodes (31): deduplicate(), _extract_skills(), _normalize_flow_candidate(), DEDUPLICATE: drop duplicates on (source, name), preferring deep links, then a…, Best-effort keyword extraction from a candidate search query. e.g. "Java,…, Map one raw flow-extracted row to the canonical candidate schema.…, _cand(), _FakeFlow (+23 more)
+Cohesion: 0.13
+Nodes (20): _extract_skills(), _normalize_flow_candidate(), Best-effort keyword extraction from a candidate search query. e.g. "Java,…, Map one raw flow-extracted row to the canonical candidate schema.…, _FakeFlow, _FakeFlowSource, Tests for candidate search helpers and scoring., A search/listing wrapper href (SEEK /talentsearch/keyword?...searchQuery=) must… (+12 more)
 
 ### Community 31 - "_apply_excludes"
 Cohesion: 0.18
 Nodes (10): Normalized query list (queries[] or the single query), capped at…, _apply_excludes(), Append LinkedIn's NOT (...) clause for the plan's exclude terms. Validated…, LinkedIn quirk (live A/B-verified): NOT clauses with 5+ terms return ZERO…, Long multi-OR base + NOT(...) makes LinkedIn serve empty pages — the clause…, test_apply_excludes_capped_at_max_not_terms(), test_apply_excludes_drops_not_clause_on_long_queries(), test_apply_excludes_none() (+2 more)
 
-### Community 32 - "search_linkedin_people"
-Cohesion: 0.20
-Nodes (11): dedupe_candidates(), _filter_excluded(), _normalize_profile_url(), Canonical form of a profile URL for dedupe (path only, no query/fragment). Live…, Merge results across queries by normalized profile URL. Keeps the first…, Run a sourcing plan against LinkedIn people search. Plan semantics (all…, Drop candidates whose headline/current_role mention an excluded term. The…, search_linkedin_people() (+3 more)
+### Community 32 - "dedupe_candidates"
+Cohesion: 0.33
+Nodes (6): dedupe_candidates(), _normalize_profile_url(), Canonical form of a profile URL for dedupe (path only, no query/fragment). Live…, Merge results across queries by normalized profile URL. Keeps the first…, test_dedupe_candidates_counts_hits(), test_normalize_profile_url()
 
 ### Community 33 - "_gate_relaxed_rows"
 Cohesion: 0.18
@@ -310,9 +313,9 @@ Nodes (11): _gate_relaxed_rows(), _matches_plan_groups(), _or_groups(), Parse a 
 Cohesion: 0.18
 Nodes (5): client(), fixture, Tests for API security: auth + rate limiting + error envelope., test-key-2 has a limit of 3/min -> 4th request is 429., test_rate_limit_429()
 
-### Community 35 - "get_settings"
-Cohesion: 0.14
-Nodes (16): _get_key_store(), Request, API authentication and per-key rate limiting. API-key auth via the `X-API-Key`…, FastAPI dependency enforcing API-key auth + rate limiting. Returns the…, require_api_key(), get_settings(), _parse_list(), Application configuration loaded from environment variables. (+8 more)
+### Community 35 - "config.py"
+Cohesion: 0.18
+Nodes (8): _parse_list(), Application configuration loaded from environment variables., Accept both JSON arrays and comma-separated strings for list fields., Runtime settings. Override via environment variables or .env file., Settings, LLM service using the Z.AI GLM coding-plan endpoint. The coding-plan…, Polite pacing service. Goal: behave like a human user so LinkedIn's anti-robot…, BaseSettings
 
 ### Community 36 - "test_sources_api.py"
 Cohesion: 0.31
@@ -331,12 +334,12 @@ Cohesion: 0.50
 Nodes (4): filter_excluded_results(), Post-filter results whose text mentions an excluded term. The NOT() clause in…, test_filter_excluded_results_drops_matches(), test_filter_excluded_results_no_excludes_noop()
 
 ### Community 40 - "sources.py"
-Cohesion: 0.12
-Nodes (28): BaseModel, get, API routes for pluggable sources: CRUD, guided wizard, flows., # NOTE: `from __future__ import annotations` makes `-> None` a string that, Live PNG of the wizard browser. The UI polls this for a live view. zoom=page —…, # NOTE: run_flow's step loop does NOT execute find_result_card, Type credentials into the visible login form (UI-driven sign-in)., Click at screenshot coordinates (for consent screens, cookies, etc.). (+20 more)
+Cohesion: 0.11
+Nodes (29): AgentSessionPayload, BaseModel, API routes for pluggable sources: CRUD, guided wizard, flows., # NOTE: `from __future__ import annotations` makes `-> None` a string that, # NOTE: run_flow's step loop does NOT execute find_result_card, Type credentials into the visible login form (UI-driven sign-in)., Click at screenshot coordinates (for consent screens, cookies, etc.)., Type into the focused element (click a field in the preview first). (+21 more)
 
-### Community 41 - "BrowserError"
-Cohesion: 0.05
-Nodes (47): BrowserError, BrowserService, BrowserSession, ElementRef, ObserveResult, Any, Exception, Browser service layer. Phase 1 implementation drives a local/remote Chromium… (+39 more)
+### Community 41 - "linkedin.py"
+Cohesion: 0.11
+Nodes (29): _build_search_url(), _cdp_headers(), _check_blocker(), _connect(), _connect_with_best_session(), _connect_with_session(), _extract_job_detail(), _extract_jobs() (+21 more)
 
 ### Community 42 - "handle_client"
 Cohesion: 0.38
@@ -347,12 +350,12 @@ Cohesion: 0.40
 Nodes (3): Per-key sliding-window rate limiter (in-memory)., Check if the key is within limit. Returns (allowed, retry_after_s)., SlidingWindowLimiter
 
 ### Community 48 - "SourceFlow"
-Cohesion: 0.14
-Nodes (25): _candidate_source_platforms(), _flow_platforms(), Run a candidate search on a custom source via its recorded flow. Lets any…, Names of enabled sources that have an active find_candidates flow. These are…, Names of enabled sources with a find_candidates flow of ANY status. Unlike…, _search_candidates_via_flow(), agent_session(), agent_session_store() (+17 more)
+Cohesion: 0.15
+Nodes (21): agent_session(), agent_session_store(), create_source(), list_sources(), Update a source: enable/disable, rename, or repoint its base_url. base_url…, Store cookies captured by the extension after a manual login. Stored as a…, Store cookies captured by the extension after a manual login., _source_view() (+13 more)
 
 ### Community 59 - "LLMService"
-Cohesion: 0.15
-Nodes (9): LLMService, Parse the LLM's JSON response, tolerating markdown fences., Recover complete records from a JSON array cut mid-record., Thin client for the Z.AI coding-plan LLM endpoint., Send a chat request. Returns the text response or None on error., Z.AI Coding-Plan Headers, Z.AI GLM-5.3-flash Model, LLM as Advisory Layer (+1 more)
+Cohesion: 0.13
+Nodes (12): LLMService, LLM rerank of jobs against the career profile. Preserves the deterministic…, LLM rerank of candidates against a search criteria / job reference. Uses the…, Parse the LLM's JSON response, tolerating markdown fences., Recover complete records from a JSON array cut mid-record., Thin client for the Z.AI coding-plan LLM endpoint., Send a chat request. Returns the text response or None on error., Z.AI Coding-Plan Headers (+4 more)
 
 ### Community 61 - "_agent_discover"
 Cohesion: 0.22
@@ -366,29 +369,29 @@ Nodes (12): _FakeRegistry, asyncio, Exception, fixture, Tests for LLM rerank JSO
 Cohesion: 0.30
 Nodes (11): Candidate, MatchEvaluation, client(), _compat_paths(), _headers(), fixture, Tests for the external-candidates compat routes (Expressautomate-style paths)., _seed_completed_task_with_results() (+3 more)
 
-### Community 64 - "MatchResult"
-Cohesion: 0.29
-Nodes (6): JobMatchResult, MatchResult, A ranked job or candidate with score and supporting evidence., LLM rerank of jobs against the career profile. Preserves the deterministic…, LLM rerank of candidates against a search criteria / job reference. Uses the…, LLM Reranking of Results
+### Community 64 - "EmbeddingProvider"
+Cohesion: 0.20
+Nodes (7): EmbeddingProvider, NoopReranker, Any, Interface for embedding similarity (Qdrant-backed in production)., Interface for LLM-based reranking., Reranker, Protocol
 
-### Community 65 - "seed_builtin_sources"
-Cohesion: 0.40
-Nodes (4): AsyncSession, Seed built-in sources as real Source rows. LinkedIn, MyCareersFuture and…, Insert missing built-in sources; leave existing rows untouched. Committing is…, seed_builtin_sources()
-
-### Community 66 - "test_quality_gates.py"
+### Community 65 - "BrowserError"
 Cohesion: 0.22
-Nodes (8): normalize(), NORMALIZE: map raw results to the canonical job/candidate schema. Drops junk…, test_normalize_accepts_name_and_sets_title(), Quality-gate tests: stable IDs, posted-at parsing, normalize/dedupe, min-score…, test_cache_does_not_store_empty(), test_fuzzy_dedupe_collapses_cross_source(), test_normalize_drops_junk(), test_parse_posted_at_cases()
+Nodes (8): BrowserError, Exception, Raised when a browser operation fails., Launch (or connect to) a browser and open a fresh page., A platform raising BrowserError mid-loop (extension agent offline) must not…, When the only platform goes offline and nothing was collected, the run still…, test_midloop_browsererror_keeps_partial_results(), test_offline_only_still_pauses_with_actionable_message()
+
+### Community 66 - "deduplicate"
+Cohesion: 0.29
+Nodes (8): deduplicate(), DEDUPLICATE: drop duplicates on (source, name), preferring deep links, then a…, _cand(), Regression: candidate rows have no title/company keys, so the fuzzy pass keyed…, test_deduplicate_collapses_exact_name_dupes_preferring_deep_link(), test_deduplicate_collapses_seek_search_and_profile_rows(), test_deduplicate_keeps_distinct_candidates(), test_fuzzy_dedupe_collapses_cross_source()
 
 ### Community 67 - "Career-agent flow recording: SEEK/jobstreet selectors"
 Cohesion: 0.25
 Nodes (7): Career-agent flow recording: SEEK/jobstreet selectors, Diagnostics that worked (in order), Fix, Known residual (career-agent repo, unfixed), Root cause, Symptom, Verification
 
-### Community 68 - "filter_by_location"
-Cohesion: 0.50
-Nodes (4): filter_by_location(), Post-filter results by target location (e.g. 'Singapore'). LinkedIn's geoUrn…, test_filter_by_location_drops_other_country_keeps_unknown(), test_filter_by_location_noop_without_location()
+### Community 68 - "SourceFlowView"
+Cohesion: 0.29
+Nodes (7): list_flows(), get, Live PNG of the wizard browser. The UI polls this for a live view. zoom=page —…, update_flow(), wizard_screenshot(), SourceFlowView, patch
 
-### Community 69 - "delete_flow"
-Cohesion: 0.67
-Nodes (3): delete_flow(), Remove a recorded flow by type (find_jobs / find_candidates)., delete
+### Community 69 - "browser.py"
+Cohesion: 0.29
+Nodes (6): ElementRef, ObserveResult, Browser service layer. Phase 1 implementation drives a local/remote Chromium…, A lightweight, stable reference to a page element for click/type., Persistent Browser Session Design, Steel Cloud Browser Runtime
 
 ### Community 70 - "_MultiQueryFakeRegistry"
 Cohesion: 0.29
@@ -401,6 +404,14 @@ Nodes (5): Context, Correct chain (both steps, in order, same channel), Extra co
 ### Community 74 - "Career-bot revised spec (2026-09-02): integration diff checklist"
 Cohesion: 0.40
 Nodes (4): Career-bot revised spec (2026-09-02): integration diff checklist, Expressautomate-side conformance state, The path trap (cost ~20 min on 2026-09-02), What the revised spec changed (2026-09-02)
+
+### Community 75 - "_restore_stripped_api_prefix"
+Cohesion: 0.50
+Nodes (4): Any, Request, _restore_stripped_api_prefix(), middleware
+
+### Community 76 - "_connect"
+Cohesion: 0.50
+Nodes (4): _cdp_headers(), _connect(), Connect Playwright to the authenticated Brave session via CDP., Parse CDP_AUTH_HEADER ('Name: Value') into a headers dict, or None.
 
 ### Community 77 - "Disable V1 snapshot event persistence for local builds"
 Cohesion: 0.50
@@ -613,15 +624,15 @@ Nodes (3): Koyeb prod career-agent API: Koyeb route rule strips '/api' prefix, A
 ## Knowledge Gaps
 - **226 isolated node(s):** `_FakeFlowSource`, `_FakeFlow`, `entrypoint.sh script`, `BRAVE_CDP_URL`, `career-agent-backend` (+221 more)
   These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 681 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
-- **15 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **16 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `BrowserError` connect `BrowserError` to `search_linkedin_people`, `routes.py`, `fastjobs.py`, `linkedin_people.py`, `nodes.py`, `test_candidates.py`?**
+- **Why does `BrowserError` connect `BrowserError` to `BrowserSession`, `browser.py`, `BrowserService`, `routes.py`, `fastjobs.py`, `linkedin.py`, `linkedin_people.py`, `_connect`, `schemas.py`, `nodes.py`, `test_candidates.py`?**
   _High betweenness centrality (0.076) - this node is a cross-community bridge._
 - **Why does `AgentRegistry` connect `AgentRegistry` to `test_sourcing_plan.py`?**
-  _High betweenness centrality (0.072) - this node is a cross-community bridge._
+  _High betweenness centrality (0.065) - this node is a cross-community bridge._
 - **Why does `install_error_handlers()` connect `cdp-proxy.py` to `main.py`?**
   _High betweenness centrality (0.046) - this node is a cross-community bridge._
 - **Are the 5 inferred relationships involving `BrowserError` (e.g. with `run_search()` and `browser_observe()`) actually correct?**
