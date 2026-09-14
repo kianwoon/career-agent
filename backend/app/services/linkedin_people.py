@@ -227,29 +227,55 @@ def _matches_plan_groups(candidate: dict[str, Any], groups: list[list[str]]) -> 
     """
     if not groups:
         return True
-    hay = " ".join(
-        str(candidate.get(k) or "")
-        for k in ("headline", "current_role", "summary", "experience", "location")
-    ).lower()
+    parts: list[str] = []
+    for k in ("headline", "current_role", "summary", "experience", "location", "skills"):
+        value = candidate.get(k)
+        # `skills` (and occasionally other harvest fields) is a list; joining
+        # it keeps every term searchable, whereas str(list) leaked brackets
+        # and quotes into the haystack.
+        if isinstance(value, (list, tuple)):
+            parts.append(" ".join(str(v) for v in value))
+        else:
+            parts.append(str(value or ""))
+    hay = " ".join(parts).lower()
     hits = sum(1 for g in groups if any(t in hay for t in g))
     return hits >= 2 if len(groups) >= 2 else hits >= 1
 
 
 def _gate_relaxed_rows(
-    rows: list[dict[str, Any]], queries: list[str]
+    rows: list[dict[str, Any]],
+    queries: list[str],
+    gate_groups: list[list[str]] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Drop relaxed-pass rows that don't loosely match the plan structure.
 
     Returns (kept, dropped). A row is kept if it satisfies ANY plan query's
     group shape (>=2 distinct OR-groups matched, or the single group).
+
+    `gate_groups` lets a caller supply the groups that were ACTUALLY searched.
+    This matters because the relaxed pass deliberately dispatches only the
+    FIRST OR-group of each query; gating those rows against the full plan's
+    AND-shape then demands vocabulary the search never asked for, producing
+    false negatives that drop genuinely relevant people. When gate_groups is
+    provided, a row is kept if it matches ANY of those group-lists (a single
+    group therefore needs only hits>=1 via `_matches_plan_groups`). When None,
+    behaviour is exactly as before: groups are derived from the full `queries`.
     """
-    all_groups = [g for q in queries if (g := _or_groups(q))]
-    if not all_groups:
+    if gate_groups is not None:
+        # gate_groups entries are individual searched OR-groups (list[str]);
+        # check each as a one-group plan-set so a single group needs only
+        # hits>=1 (`_matches_plan_groups` with len(groups)==1).
+        plan_group_sets: list[list[list[str]]] = [
+            [grp] for grp in gate_groups if grp
+        ]
+    else:
+        plan_group_sets = [g for q in queries if (g := _or_groups(q))]
+    if not plan_group_sets:
         return rows, 0
     kept: list[dict[str, Any]] = []
     dropped = 0
     for r in rows:
-        if any(_matches_plan_groups(r, g) for g in all_groups):
+        if any(_matches_plan_groups(r, gs) for gs in plan_group_sets):
             kept.append(r)
         else:
             dropped += 1
@@ -863,7 +889,11 @@ async def search_linkedin_people(
                     timeout_s=_pass_timeout(len(relaxed)),
                 )
                 relaxed_rows, gate_dropped = _gate_relaxed_rows(
-                    _filter_excluded(extra.get("raw_results", []), excludes), queries
+                    _filter_excluded(extra.get("raw_results", []), excludes),
+                    queries,
+                    # Gate against the OR-groups actually dispatched, not the
+                    # full plan: the relaxed pass searched only group 1.
+                    gate_groups=[grp for r in relaxed for grp in _or_groups(r)],
                 )
                 if gate_dropped:
                     logger.info(
@@ -892,6 +922,8 @@ async def search_linkedin_people(
                         broad_rows, broad_dropped = _gate_relaxed_rows(
                             _filter_excluded(extra2.get("raw_results", []), excludes),
                             queries,
+                            # Gate against the broad OR-groups actually searched.
+                            gate_groups=[grp for b in broad for grp in _or_groups(b)],
                         )
                         combined2 = dedupe_candidates(results["raw_results"] + broad_rows)
                         results["raw_results"] = combined2
