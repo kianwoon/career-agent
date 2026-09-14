@@ -605,6 +605,68 @@ async function cmdLinkedinProfileDetail(profileUrl) {
   };
 }
 
+// Pure classifier: maps a raw results-page snapshot to a page state. Kept
+// free of DOM access so it can be unit-tested without a browser; the probe
+// below collects the raw fields, and this decides what they mean.
+// A GENUINELY EMPTY results page (LinkedIn's own "No results found" state for
+// a narrow boolean query) must never be mistaken for a throttled/unrendered
+// page — the two look identical when the tab is backgrounded (active:false).
+function classifyLinkedinResultsPage(s) {
+  // s = { low, hasPw, inLinks, hasScaffoldSelector, hasEmptyStateSelector,
+  //       bodyLen, url, title }
+  const emptyMarkers = [
+    "no results found",
+    "we couldn't find a match",
+    "we couldn't find any",
+    "try a new search",
+    "no results for",
+    "no matching",
+    "your search did not match",
+  ];
+  const genuineEmpty =
+    emptyMarkers.some((m) => (s.low || "").includes(m)) || !!s.hasEmptyStateSelector;
+  // Scaffold = the search-results chrome actually rendered (filters / result
+  // list / a "N results" line). If it rendered and there are no rows, that is
+  // "no matches", not a page that never loaded.
+  const scaffold = !!s.hasScaffoldSelector && /result/.test((s.low || "").slice(0, 600));
+  return {
+    loaded: scaffold && !s.hasPw,
+    genuineEmpty,
+    inLinks: s.inLinks || 0,
+    scaffold,
+    bodyLen: s.bodyLen || 0,
+    url: s.url || "",
+    title: s.title || "",
+    text: (s.low || "").slice(0, 300),
+  };
+}
+
+async function linkedinResultsPageState() {
+  // Classify the current results page so a legitimately-empty page is never
+  // mistaken for throttling. Collect only raw DOM facts in the tab, then
+  // classify in background scope (testable).
+  const snap =
+    (await execOnTab(() => {
+      const txt = document.body?.innerText || "";
+      const low = txt.slice(0, 6000).toLowerCase();
+      return {
+        low,
+        hasPw: !!document.querySelector("input[type='password']"),
+        inLinks: document.querySelectorAll("a[href*='/in/']").length,
+        hasScaffoldSelector: !!document.querySelector(
+          ".reusable-search__entity-result-list, .search-results-container, li.reusable-search__result-container, .search-results__filters, .artdeco-pill, h1"
+        ),
+        hasEmptyStateSelector: !!document.querySelector(
+          ".artdeco-empty-state, .search-no-results, [data-test-id='no-results'], .reusable-search__entity-result-list--empty"
+        ),
+        bodyLen: txt.length,
+        url: location.href,
+        title: document.title || "",
+      };
+    })) || {};
+  return classifyLinkedinResultsPage(snap);
+}
+
 async function cmdLinkedinPeoplePlan(params) {
   // Full sourcing plan in ONE command so the backend's single dispatch maps
   // to one atomic extension execution (no interleaved queue state).
@@ -613,6 +675,7 @@ async function cmdLinkedinPeoplePlan(params) {
   const perQuery = [];
   let blocker = null;
   let consecutiveZeroes = 0;
+  const pageDiag = [];
   for (const q of queries) {
     // LinkedIn rate-limits rapid successive distinct people searches —
     // live evidence: 1-query plans always succeed, 5-query plans at ~2s
@@ -684,13 +747,49 @@ async function cmdLinkedinPeoplePlan(params) {
       });
     }
     n = candidates.length;
-    consecutiveZeroes = n === 0 ? consecutiveZeroes + 1 : 0;
-    perQuery.push(`${q.slice(0, 30)}${q.length > 30 ? "…" : ""}: ${n}`);
-    merged.push(...candidates);
-    // Several truly-empty pages in a row = throttled. Stop burning the
-    // remaining queries; report honestly.
-    if (consecutiveZeroes >= 2 && merged.length === 0) {
-      blocker = "LinkedIn returned empty results pages repeatedly — likely throttling; wait a few minutes and re-run";
+    if (n === 0) {
+      // Zero rows after extract + harvest + retry. Probe the page to tell a
+      // GENUINELY empty result (LinkedIn's own "No results found" state for a
+      // narrow query) from a throttled/unrendered page — they are
+      // indistinguishable when the results tab is backgrounded.
+      const state = await linkedinResultsPageState();
+      if (state.genuineEmpty) {
+        // Legitimate no-match: not a strike; keep planning the other queries.
+        consecutiveZeroes = 0;
+        perQuery.push(`${q.slice(0, 30)}${q.length > 30 ? "…" : ""}: 0 (no results)`);
+        merged.push(...candidates);
+        continue;
+      }
+      consecutiveZeroes += 1;
+      perQuery.push(`${q.slice(0, 30)}${q.length > 30 ? "…" : ""}: ${n}`);
+      merged.push(...candidates);
+      pageDiag.push({
+        q: q.slice(0, 40),
+        url: (() => {
+          try {
+            const u = new URL(state.url);
+            return u.host + u.pathname;
+          } catch {
+            return state.url || "";
+          }
+        })(),
+        title: (state.title || "").slice(0, 80),
+        inLinks: state.inLinks,
+        scaffold: state.scaffold,
+        bodyLen: state.bodyLen,
+      });
+    } else {
+      consecutiveZeroes = 0;
+      perQuery.push(`${q.slice(0, 30)}${q.length > 30 ? "…" : ""}: ${n}`);
+      merged.push(...candidates);
+    }
+    // Several blank (non-empty-state) pages in a row = throttled/unrendered.
+    // Stop burning the remaining queries; report honestly. Keep "throttl" so
+    // the backend (linkedin_people.py) still schedules its 45s retry.
+    if (consecutiveZeroes >= 3 && merged.length === 0) {
+      blocker =
+        "LinkedIn returned blank pages repeatedly (page not loaded / likely throttling) — wait a few minutes and re-run" +
+        (pageDiag.length ? ` [${JSON.stringify(pageDiag).slice(0, 500)}]` : "");
       break;
     }
   }
@@ -782,7 +881,9 @@ async function cmdLinkedinPeoplePlan(params) {
     raw_results: uniques,
     needs_human: uniques.length === 0 && !!blocker,
     human_reason: blocker,
-    plan_detail: `Extension plan v2: ${queries.length} queries [${perQuery.join("; ")}] → ${uniques.length} unique (${dropped} location-dropped, ${enriched} enriched)`,
+    plan_detail:
+      `Extension plan v2: ${queries.length} queries [${perQuery.join("; ")}] → ${uniques.length} unique (${dropped} location-dropped, ${enriched} enriched)` +
+      (pageDiag.length ? ` | pageDiag: ${JSON.stringify(pageDiag).slice(0, 600)}` : ""),
   };
 }
 
