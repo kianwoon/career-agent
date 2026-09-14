@@ -46,6 +46,13 @@ ENRICH_BUDGET = 10
 # to fewer than this many unique candidates — validated live: an
 # over-constrained AND clause hid the exact target profile.
 RELAXED_MERGE_THRESHOLD = 8
+# Minimum dispatch timeout for a widen pass (relaxed/broad) to be worth
+# attempting. WHY: the extension paces 6-11s BEFORE EACH query (plus tab
+# navigation and result extraction), so a pass dispatched with a smaller
+# remaining budget can NEVER complete — it would only raise a guaranteed
+# timeout. When the global deadline leaves less than this, skip the pass and
+# return the partial results already collected instead of pausing the task.
+MIN_PASS_TIMEOUT_S = 90.0
 
 # Certification/acronym tokens that appear on lines directly under a name.
 # The old location heuristic ("short line with a comma") grabbed these.
@@ -877,59 +884,99 @@ async def search_linkedin_people(
                 group = _first_or_group(q)
                 if group and group.strip().upper() != q.strip().upper():
                     relaxed.append(group)
-            if relaxed:
-                extra = await agent_registry.dispatch(
-                    "linkedin_people_plan",
-                    {
-                        "queries": [_apply_excludes(g, excludes) for g in relaxed],
-                        "excludes": [],
-                        "location": location or "",
-                        "enrichBudget": relaxed_budget,
-                    },
-                    timeout_s=_pass_timeout(len(relaxed)),
-                )
-                relaxed_rows, gate_dropped = _gate_relaxed_rows(
-                    _filter_excluded(extra.get("raw_results", []), excludes),
-                    queries,
-                    # Gate against the OR-groups actually dispatched, not the
-                    # full plan: the relaxed pass searched only group 1.
-                    gate_groups=[grp for r in relaxed for grp in _or_groups(r)],
-                )
-                if gate_dropped:
-                    logger.info(
-                        "Relaxed-pass relevance gate dropped %d irrelevant rows", gate_dropped
-                    )
-                combined = dedupe_candidates(results["raw_results"] + relaxed_rows)
-                results["raw_results"] = combined
+            relaxed_timeout = _pass_timeout(len(relaxed)) if relaxed else 0.0
+            if relaxed and relaxed_timeout < MIN_PASS_TIMEOUT_S:
+                # Budget too small to finish even one paced query — a dispatch
+                # here would raise a guaranteed "timed out" RuntimeError and
+                # pause the whole task. Skip; keep the results we already have.
                 results["plan_detail"] = (
-                    f"{results.get('plan_detail', '')} + relaxed (gate dropped {gate_dropped}) → {len(combined)} unique"
+                    f"{results.get('plan_detail', '')} + relaxed skipped "
+                    f"(only {relaxed_timeout:.0f}s left)"
                 )
-                # Second widen pass: strict AND relaxed both produced nothing
-                # usable — retry with quote-free, AND-free broad variants.
-                if not combined and not _budget_gone():
-                    broad = _broad_variants(queries)
-                    if broad:
-                        extra2 = await agent_registry.dispatch(
-                            "linkedin_people_plan",
-                            {
-                                "queries": [_apply_excludes(g, excludes) for g in broad],
-                                "excludes": [],
-                                "location": location or "",
-                                "enrichBudget": ENRICH_BUDGET,
-                            },
-                            timeout_s=_pass_timeout(len(broad)),
+            elif relaxed:
+                try:
+                    extra = await agent_registry.dispatch(
+                        "linkedin_people_plan",
+                        {
+                            "queries": [_apply_excludes(g, excludes) for g in relaxed],
+                            "excludes": [],
+                            "location": location or "",
+                            "enrichBudget": relaxed_budget,
+                        },
+                        timeout_s=relaxed_timeout,
+                    )
+                except Exception as exc:
+                    # Budget may still shrink while awaiting the dispatch. A
+                    # failed widen pass must degrade to partial results, never
+                    # propagate — the primary pass rows stay intact.
+                    logger.warning("Relaxed-pass dispatch failed: %s", exc)
+                    extra = None
+                    results["plan_detail"] = (
+                        f"{results.get('plan_detail', '')} + relaxed failed: {str(exc)[:80]}"
+                    )
+                if extra is not None:
+                    relaxed_rows, gate_dropped = _gate_relaxed_rows(
+                        _filter_excluded(extra.get("raw_results", []), excludes),
+                        queries,
+                        # Gate against the OR-groups actually dispatched, not
+                        # the full plan: relaxed searched only group 1.
+                        gate_groups=[grp for r in relaxed for grp in _or_groups(r)],
+                    )
+                    if gate_dropped:
+                        logger.info(
+                            "Relaxed-pass relevance gate dropped %d irrelevant rows",
+                            gate_dropped,
                         )
-                        broad_rows, broad_dropped = _gate_relaxed_rows(
-                            _filter_excluded(extra2.get("raw_results", []), excludes),
-                            queries,
-                            # Gate against the broad OR-groups actually searched.
-                            gate_groups=[grp for b in broad for grp in _or_groups(b)],
-                        )
-                        combined2 = dedupe_candidates(results["raw_results"] + broad_rows)
-                        results["raw_results"] = combined2
-                        results["plan_detail"] = (
-                            f"{results.get('plan_detail', '')} + broad (gate dropped {broad_dropped}) → {len(combined2)} unique"
-                        )
+                    combined = dedupe_candidates(results["raw_results"] + relaxed_rows)
+                    results["raw_results"] = combined
+                    results["plan_detail"] = (
+                        f"{results.get('plan_detail', '')} + relaxed (gate dropped {gate_dropped}) → {len(combined)} unique"
+                    )
+                    # Second widen pass: strict AND relaxed both produced
+                    # nothing usable — retry with quote-free, AND-free broad
+                    # variants.
+                    if not combined and not _budget_gone():
+                        broad = _broad_variants(queries)
+                        broad_timeout = _pass_timeout(len(broad)) if broad else 0.0
+                        if broad and broad_timeout < MIN_PASS_TIMEOUT_S:
+                            # Same guarantee as the relaxed pass: too little
+                            # budget to finish a paced query — skip, not time out.
+                            results["plan_detail"] = (
+                                f"{results.get('plan_detail', '')} + broad skipped "
+                                f"(only {broad_timeout:.0f}s left)"
+                            )
+                        elif broad:
+                            try:
+                                extra2 = await agent_registry.dispatch(
+                                    "linkedin_people_plan",
+                                    {
+                                        "queries": [_apply_excludes(g, excludes) for g in broad],
+                                        "excludes": [],
+                                        "location": location or "",
+                                        "enrichBudget": ENRICH_BUDGET,
+                                    },
+                                    timeout_s=broad_timeout,
+                                )
+                            except Exception as exc:
+                                # Same degradation contract as the relaxed
+                                # pass: swallow, log, keep collected results.
+                                logger.warning("Broad-pass dispatch failed: %s", exc)
+                                extra2 = None
+                                results["plan_detail"] = (
+                                    f"{results.get('plan_detail', '')} + broad failed: {str(exc)[:80]}"
+                                )
+                            if extra2 is not None:
+                                broad_rows, broad_dropped = _gate_relaxed_rows(
+                                    _filter_excluded(extra2.get("raw_results", []), excludes),
+                                    queries,
+                                    # Gate against the broad OR-groups actually searched.
+                                    gate_groups=[grp for b in broad for grp in _or_groups(b)],
+                                )
+                                combined2 = dedupe_candidates(results["raw_results"] + broad_rows)
+                                results["raw_results"] = combined2
+                                results["plan_detail"] = (
+                                    f"{results.get('plan_detail', '')} + broad (gate dropped {broad_dropped}) → {len(combined2)} unique"
+                                )
         # Final safety net: if the merged set is still entirely unenriched
         # (no row has real profile sections), spend the enrich budget now so
         # 2nd-round assessment has data to score. Detect unenriched rows by
