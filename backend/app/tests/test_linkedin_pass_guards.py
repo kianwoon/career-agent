@@ -107,7 +107,6 @@ async def test_relaxed_pass_skipped_when_budget_cannot_finish_it(monkeypatch):
 async def test_relaxed_timeout_is_swallowed_not_fatal(monkeypatch):
     """A relaxed dispatch that RAISES must degrade, not pause the task."""
     primary = _row("https://www.linkedin.com/in/primary/", "agency accounting")
-    seen = {"n": 0}
 
     def handler(action, params):
         if " AND " in params["queries"][0].upper():
