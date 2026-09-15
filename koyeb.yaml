@@ -71,3 +71,5 @@ service:
         value: "https://career-agent-<your-org>.koyeb.app/api"   # API behind /api route
       - name: NEXT_PUBLIC_API_KEY
         value: ""            # ← same key as API_KEYS, so the UI authenticates
+      - name: NEXT_PUBLIC_EXTENSION_STORE_URL
+        value: ""            # ← Chrome Web Store listing URL (optional; empty hides "Add to Chrome")

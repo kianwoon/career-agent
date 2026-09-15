@@ -14,6 +14,7 @@
 export interface RuntimeConfig {
   apiBaseUrl: string;
   apiKey: string;
+  storeUrl: string;
 }
 
 let cached: RuntimeConfig | null = null;
@@ -24,7 +25,7 @@ async function fetchRuntimeConfig(): Promise<RuntimeConfig> {
     const res = await fetch("/config", { cache: "no-store" });
     if (res.ok) {
       const data = (await res.json()) as RuntimeConfig;
-      if (data.apiBaseUrl) return data;
+      if (data.apiBaseUrl) return { ...data, storeUrl: data.storeUrl ?? "" };
     }
   } catch {
     // ignore — fall through to env defaults
@@ -32,6 +33,7 @@ async function fetchRuntimeConfig(): Promise<RuntimeConfig> {
   return {
     apiBaseUrl: process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000",
     apiKey: process.env.NEXT_PUBLIC_API_KEY ?? "",
+    storeUrl: process.env.NEXT_PUBLIC_EXTENSION_STORE_URL ?? "",
   };
 }
 
@@ -53,4 +55,8 @@ export async function apiBaseUrl(): Promise<string> {
 
 export async function apiKey(): Promise<string> {
   return (await getRuntimeConfig()).apiKey;
+}
+
+export async function extensionStoreUrl(): Promise<string> {
+  return (await getRuntimeConfig()).storeUrl;
 }

@@ -25,3 +25,9 @@ rm -f dist/career-agent-extension.zip
 
 echo "✅ Built dist/career-agent-extension.zip"
 echo "   Upload at: https://chrome.google.com/webstore/devconsole"
+
+# Sync the artifact into the frontend so deployed users can download it
+# directly from /career-agent-extension.zip (public/ ships with Next.js).
+mkdir -p frontend/public
+cp dist/career-agent-extension.zip frontend/public/career-agent-extension.zip
+echo "✅ Synced to frontend/public/career-agent-extension.zip"

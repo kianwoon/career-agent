@@ -16,5 +16,6 @@ export function GET() {
     apiBaseUrl:
       process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000",
     apiKey: process.env.NEXT_PUBLIC_API_KEY ?? "",
+    storeUrl: process.env.NEXT_PUBLIC_EXTENSION_STORE_URL ?? "",
   });
 }

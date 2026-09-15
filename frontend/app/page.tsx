@@ -39,7 +39,7 @@ import {
   type SearchHistoryItem,
   type SourceView,
 } from "@/lib/api";
-import { apiBaseUrl } from "@/lib/runtime-config";
+import { apiBaseUrl, extensionStoreUrl } from "@/lib/runtime-config";
 
 type Phase = "idle" | "running" | "completed" | "error";
 type Verdict = "approved" | "rejected";
@@ -2241,8 +2241,10 @@ function SourceAvatar({ name, domain }: { name: string; domain: string }) {
  */
 function ConnectBrowserAgent({ onClose }: { onClose: () => void }) {
   const [apiUrl, setApiUrl] = useState("…");
+  const [storeUrl, setStoreUrl] = useState("");
   useEffect(() => {
     apiBaseUrl().then(setApiUrl).catch(() => setApiUrl("http://localhost:8000"));
+    extensionStoreUrl().then(setStoreUrl).catch(() => {});
   }, []);
   return (
     <div className="connect-agent-panel" role="dialog" aria-label="Connect the browser agent">
@@ -2257,9 +2259,22 @@ function ConnectBrowserAgent({ onClose }: { onClose: () => void }) {
       </p>
       <ol className="connect-agent-steps">
         <li>
-          <strong>Install the extension</strong> in Chrome — see{" "}
-          <code>extension/INSTALL.md</code> in the project (load unpacked via{" "}
-          <code>chrome://extensions</code>, Developer mode → Load unpacked).
+          <strong>Install the extension</strong> in Chrome:
+          <div style={{ display: "flex", gap: "0.5rem", margin: "0.5rem 0" }}>
+            {storeUrl ? (
+              <a className="btn small primary" href={storeUrl} target="_blank" rel="noreferrer">
+                Add to Chrome
+              </a>
+            ) : null}
+            <a className="btn small" href="/career-agent-extension.zip" download>
+              Download extension (.zip)
+            </a>
+          </div>
+          <small>
+            Unzip, then open <code>chrome://extensions</code> → enable Developer
+            mode → <strong>Load unpacked</strong> (Chrome blocks direct install
+            of unsigned zips).
+          </small>
         </li>
         <li>
           <strong>Point it at this server:</strong> click the Career Agent icon in
