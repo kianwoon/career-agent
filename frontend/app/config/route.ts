@@ -14,7 +14,8 @@ export const dynamic = "force-dynamic";
 export function GET() {
   return NextResponse.json({
     apiBaseUrl:
-      process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000",
+      process.env.NEXT_PUBLIC_API_BASE_URL ??
+      "https://career-agent-kianwoon-88223cd5.koyeb.app",
     apiKey: process.env.NEXT_PUBLIC_API_KEY ?? "",
     storeUrl: process.env.NEXT_PUBLIC_EXTENSION_STORE_URL ?? "",
   });

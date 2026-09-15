@@ -31,7 +31,9 @@ async function fetchRuntimeConfig(): Promise<RuntimeConfig> {
     // ignore — fall through to env defaults
   }
   return {
-    apiBaseUrl: process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000",
+    apiBaseUrl:
+      process.env.NEXT_PUBLIC_API_BASE_URL ??
+      "https://career-agent-kianwoon-88223cd5.koyeb.app",
     apiKey: process.env.NEXT_PUBLIC_API_KEY ?? "",
     storeUrl: process.env.NEXT_PUBLIC_EXTENSION_STORE_URL ?? "",
   };
