@@ -68,9 +68,14 @@ async function ensureTab(url, { activate = false } = {}) {
     try {
       const t = await chrome.tabs.get(agentTabId);
       if (t && t.id !== undefined) {
+        // Attach the completion listener BEFORE updating the URL so we can't
+        // miss the "complete" event, then navigate. Activation runs (and is
+        // awaited) immediately after update — before we block on the load
+        // promise — so the tab is foregrounded the moment navigation starts.
+        const loadP = waitForComplete(agentTabId); // resolves true/false, never throws
         await chrome.tabs.update(agentTabId, { url });
-        await waitForComplete(agentTabId);
         if (activate) await activateTab(agentTabId);
+        await loadP;
         return agentTabId;
       }
     } catch {
@@ -79,21 +84,35 @@ async function ensureTab(url, { activate = false } = {}) {
   }
   const tab = await chrome.tabs.create({ active: activate, url });
   agentTabId = tab.id;
+  if (activate) await activateTab(tab.id); // foreground before blocking on load
   await waitForComplete(tab.id);
-  if (activate) await activateTab(tab.id);
   return tab.id;
 }
 
+// Resolves true once the tab reaches status "complete", or false on timeout.
+// Non-fatal by design: callers proceed regardless (their steps guard the DOM).
+// The listener is always removed on settle (complete OR timeout).
 function waitForComplete(tabId, timeoutMs = 30000) {
-  return new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error("Page load timed out")), timeoutMs);
-    chrome.tabs.onUpdated.addListener(function listener(id, info) {
-      if (id === tabId && info.status === "complete") {
-        clearTimeout(t);
-        chrome.tabs.onUpdated.removeListener(listener);
-        resolve();
-      }
-    });
+  return new Promise((resolve) => {
+    const finish = (ok) => {
+      clearTimeout(t);
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve(ok);
+    };
+    const t = setTimeout(() => finish(false), timeoutMs);
+    const listener = (id, info) => {
+      if (id === tabId && info.status === "complete") finish(true);
+    };
+    // Short-circuit: if the tab is already fully loaded, resolve immediately.
+    chrome.tabs
+      .get(tabId)
+      .then((tab) => {
+        if (tab && tab.status === "complete") finish(true);
+      })
+      .catch(() => {
+        /* tab may be gone; let the timeout path settle it */
+      });
+    chrome.tabs.onUpdated.addListener(listener);
   });
 }
 

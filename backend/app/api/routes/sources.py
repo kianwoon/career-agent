@@ -292,7 +292,7 @@ async def agent_login(source_id: str, db: AsyncSession = Depends(get_db)) -> dic
         # activate=True brings the agent tab to the foreground so the user
         # actually sees the login page they're being asked to sign in on.
         await agent_registry.dispatch(
-            "navigate", {"url": login_url, "activate": True}, timeout_s=30
+            "navigate", {"url": login_url, "activate": True}, timeout_s=60
         )
     except RuntimeError as exc:
         raise HTTPException(502, str(exc))
