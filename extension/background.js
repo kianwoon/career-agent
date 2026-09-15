@@ -304,6 +304,27 @@ async function cmdGetCookies(url) {
   }));
 }
 
+async function cmdClearCookies(url) {
+  // Best-effort wipe of all cookies for a site's domain so a re-login starts
+  // from a clean slate (lets the user switch accounts). Never throws fatally;
+  // returns however many removes succeeded.
+  const u = new URL(url);
+  const cookies = await chrome.cookies.getAll({ domain: u.hostname });
+  let cleared = 0;
+  for (const c of cookies) {
+    try {
+      const scheme = c.secure ? "https://" : "http://";
+      const host = (c.domain || u.hostname).replace(/^\./, "");
+      const cookieUrl = `${scheme}${host}${c.path || "/"}`;
+      const res = await chrome.cookies.remove({ url: cookieUrl, name: c.name });
+      if (res) cleared += 1;
+    } catch (err) {
+      // ignore individual failures — best-effort
+    }
+  }
+  return { cleared };
+}
+
 async function cmdRunFlow(baseUrl, query, steps) {
   const results = [];
   for (const step of steps || []) {
@@ -1306,6 +1327,7 @@ async function executeCommand(cmd) {
     case "run_flow": return cmdRunFlow(params.baseUrl, params.query, params.steps);
     case "discover_flow": return cmdDiscoverFlow(params.baseUrl, params.query, params.flowType);
     case "get_cookies": return cmdGetCookies(params.url);
+    case "clear_cookies": return cmdClearCookies(params.url);
     case "start_record": return cmdStartRecord(params.baseUrl);
     case "stop_record": return cmdStopRecord();
     case "page_state": return cmdPageState(params.selectors);

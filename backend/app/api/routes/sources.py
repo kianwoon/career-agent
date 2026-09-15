@@ -288,6 +288,23 @@ async def agent_login(source_id: str, db: AsyncSession = Depends(get_db)) -> dic
         login_url = "https://www.linkedin.com/login"
     elif "mycareersfuture.gov.sg" in source.domain:
         login_url = "https://www.mycareersfuture.gov.sg/sign-in"
+
+    # Re-login = switch accounts. Best-effort wipe the browser's cookies for
+    # this site so the login page starts clean. Never fail login on this.
+    try:
+        await agent_registry.dispatch(
+            "clear_cookies", {"url": source.base_url}, timeout_s=20
+        )
+    except Exception as exc:  # noqa: BLE001 — clear is best-effort
+        logger.warning("clear_cookies failed for %s: %s", source_id, exc)
+
+    # Drop the stored session BEFORE navigating so has_session flips false and
+    # the freshly captured login replaces it.
+    if source.session_state is not None or source.captured_at is not None:
+        source.session_state = None
+        source.captured_at = None
+        await db.commit()
+
     try:
         # activate=True brings the agent tab to the foreground so the user
         # actually sees the login page they're being asked to sign in on.
