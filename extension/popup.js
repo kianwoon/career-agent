@@ -1,12 +1,22 @@
 const apiInput = document.getElementById("api");
 const statusEl = document.getElementById("status");
+const enabledToggle = document.getElementById("enabledToggle");
 const DEFAULT_API = "https://career-agent-kianwoon-88223cd5.koyeb.app";
 
-chrome.storage.local.get(["apiBase"]).then(({ apiBase }) => {
+let agentEnabled = true;
+
+chrome.storage.local.get(["apiBase", "enabled"]).then(({ apiBase, enabled }) => {
   apiInput.value = apiBase || DEFAULT_API;
+  agentEnabled = enabled !== false;
+  enabledToggle.checked = agentEnabled;
 });
 
 async function checkStatus() {
+  if (!agentEnabled) {
+    statusEl.textContent = "⏸ Paused — extension won't take jobs";
+    statusEl.className = "down";
+    return;
+  }
   // Ask the BACKEND whether the agent has polled recently — the badge is
   // stale-prone (it persists after Chrome suspends the service worker), so
   // it caused "extension ON but page shows agent off" mismatches.
@@ -32,6 +42,16 @@ async function checkStatus() {
   statusEl.textContent = "○ Not connected — retrying every 5s…";
   statusEl.className = "down";
 }
+
+enabledToggle.addEventListener("change", () => {
+  agentEnabled = enabledToggle.checked;
+  chrome.storage.local.set({ enabled: agentEnabled }).then(() => {
+    // Apply immediately in the running service worker (don't wait for its next
+    // wake), then refresh the status line.
+    chrome.runtime.sendMessage({ type: "set-enabled", enabled: agentEnabled }).catch(() => {});
+    checkStatus();
+  });
+});
 
 document.getElementById("save").addEventListener("click", () => {
   chrome.storage.local

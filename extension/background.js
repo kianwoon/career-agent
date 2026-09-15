@@ -39,9 +39,15 @@ let recordingActive = false;
 const REC_ACTIVE_KEY = "caRecordingActive";
 const REC_EVENTS_KEY = "caRecordEvents";
 
+// Master on/off switch (popup toggle). When false the agent stays connected
+// to nothing: pollOnce() short-circuits so no command is ever fetched, but the
+// loop keeps rescheduling so flipping it back on resumes instantly.
+let AGENT_ENABLED = true;
+
 async function loadConfig() {
-  const stored = await chrome.storage.local.get(["apiBase"]);
+  const stored = await chrome.storage.local.get(["apiBase", "enabled"]);
   API_BASE = (stored.apiBase || DEFAULT_API).replace(/\/+$/, "");
+  AGENT_ENABLED = stored.enabled !== false;
 }
 
 function setBadge(on) {
@@ -1531,6 +1537,13 @@ async function pollOnce() {
     busy = false;
     currentCmdStartedAt = 0;
   }
+  if (!AGENT_ENABLED) {
+    // Paused from the popup — never take a job. loop() reschedules us, so
+    // re-enabling resumes within one poll interval (or immediately via the
+    // set-enabled message).
+    setBadge(false);
+    return;
+  }
   const res = await fetch(`${API_BASE}/api/v1/agent/poll?boot=${encodeURIComponent(BOOT_ID)}`);
   if (!res.ok) {
     setBadge(false);
@@ -1598,6 +1611,15 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (msg && msg.type === "restart-loop") {
     looping = false; // allow a fresh loop with the new config
     loopGuarded();
+  }
+  if (msg && msg.type === "set-enabled") {
+    AGENT_ENABLED = msg.enabled !== false;
+    setBadge(AGENT_ENABLED);
+    if (AGENT_ENABLED) {
+      // Resume immediately rather than waiting for the next poll tick.
+      looping = false;
+      loopGuarded();
+    }
   }
 });
 
