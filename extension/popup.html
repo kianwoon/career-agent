@@ -10,13 +10,35 @@
     button { padding: 6px 10px; border: none; border-radius: 6px; background: #2f6fed; color: #fff; cursor: pointer; }
     #status { margin-top: 8px; font-weight: 600; }
     .ok { color: #1e9e5f; } .down { color: #c33; }
+
+    /* iOS-style toggle switch */
+    .toggle { display: flex; align-items: center; gap: 8px; flex: 1; cursor: pointer; }
+    #enabledToggle {
+      position: absolute; opacity: 0; width: 0; height: 0;
+      padding: 0; margin: 0; border: 0; flex: none;
+    }
+    .switch {
+      position: relative; flex: none; width: 40px; height: 22px;
+      background: #c9ccd1; border-radius: 999px;
+      transition: background .2s ease;
+    }
+    .switch::after {
+      content: ""; position: absolute; top: 2px; left: 2px;
+      width: 18px; height: 18px; background: #fff; border-radius: 50%;
+      box-shadow: 0 1px 2px rgba(0,0,0,.3);
+      transition: transform .2s ease;
+    }
+    #enabledToggle:checked + .switch { background: #34c759; }
+    #enabledToggle:checked + .switch::after { transform: translateX(18px); }
+    #enabledToggle:focus-visible + .switch { outline: 2px solid #2f6fed; outline-offset: 2px; }
   </style>
 </head>
 <body>
   <h1>Career Agent</h1>
   <div class="row" id="toggleRow">
-    <label style="display:flex;align-items:center;gap:8px;flex:1;cursor:pointer">
-      <input id="enabledToggle" type="checkbox" style="flex:none;width:16px;height:16px" />
+    <label class="toggle">
+      <input id="enabledToggle" type="checkbox" />
+      <span class="switch"></span>
       <span>Take jobs (agent ON)</span>
     </label>
   </div>
