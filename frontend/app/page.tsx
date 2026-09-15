@@ -587,6 +587,8 @@ export default function Home() {
       setTimeline((prev) =>
         addEvent(prev, "warn", `Session capture failed: ${e instanceof Error ? e.message : e}`)
       );
+      // Keep the card state fresh even when capture fails.
+      await reloadSources();
     } finally {
       setWizardBusy(null);
       setPendingLoginSource(null);

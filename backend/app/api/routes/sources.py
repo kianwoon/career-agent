@@ -343,6 +343,12 @@ async def agent_session(
     wizard captures), so every existing consumer keeps working.
     """
     source = await _get_source(source_id, db)
+    if not req.cookies:
+        # An empty capture must not flip has_session true (false positive).
+        source.session_state = None
+        source.captured_at = None
+        await db.commit()
+        raise HTTPException(422, "No cookies captured — sign in to the site first")
     storage_state = {
         "cookies": req.cookies,
         "origins": [],
@@ -377,6 +383,12 @@ async def agent_session_store(
 ) -> SourceView:
     """Store cookies captured by the extension after a manual login."""
     source = await _get_source(source_id, db)
+    if not req.cookies:
+        # An empty capture must not flip has_session true (false positive).
+        source.session_state = None
+        source.captured_at = None
+        await db.commit()
+        raise HTTPException(422, "No cookies captured — sign in to the site first")
     storage_state = {"cookies": req.cookies, "origins": []}
     source.session_state = encrypt_session_state(json.dumps(storage_state))
     source.captured_at = datetime.utcnow()

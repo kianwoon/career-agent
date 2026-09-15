@@ -284,8 +284,10 @@ async function cmdExtract(cardSelector, fields, maxItems) {
 }
 
 async function cmdGetCookies(url) {
-  const u = new URL(url);
-  const cookies = await chrome.cookies.getAll({ domain: u.hostname });
+  // Query by URL (not domain) so parent/apex cookies the browser would SEND to
+  // this page are included — e.g. MCF sets its session on .mycareersfuture.gov.sg
+  // while base_url is https://www.mycareersfuture.gov.sg/.
+  const cookies = await chrome.cookies.getAll({ url });
   return cookies.map((c) => ({
     name: c.name,
     value: c.value,
@@ -309,7 +311,8 @@ async function cmdClearCookies(url) {
   // from a clean slate (lets the user switch accounts). Never throws fatally;
   // returns however many removes succeeded.
   const u = new URL(url);
-  const cookies = await chrome.cookies.getAll({ domain: u.hostname });
+  // Enumerate by URL so parent/apex cookies are cleared too (see cmdGetCookies).
+  const cookies = await chrome.cookies.getAll({ url });
   let cleared = 0;
   for (const c of cookies) {
     try {
