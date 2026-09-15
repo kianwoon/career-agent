@@ -31,6 +31,15 @@ async def agent_status() -> AgentStatus:
     return AgentStatus(connected=agent_registry.connected)
 
 
+@router.post("/disconnect")
+async def agent_disconnect() -> dict[str, bool]:
+    """Explicit disconnect — the extension fires this when toggled OFF so
+    /status flips to disconnected immediately instead of waiting out the
+    liveness window. Public, same as /poll and /status."""
+    agent_registry.disconnect()
+    return {"ok": True}
+
+
 @router.get("/poll", dependencies=[])
 async def agent_poll(wait: int = 0, boot: str | None = None) -> dict[str, Any]:
     """Extension fetches the next command. Optional `wait` seconds long-poll.

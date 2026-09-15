@@ -95,6 +95,15 @@ class AgentRegistry:
         """The agent is 'connected' if it polled recently (within 40s)."""
         return self.last_poll_ts is not None and (time.time() - self.last_poll_ts) < CONNECTED_WINDOW_S
 
+    def disconnect(self) -> None:
+        """Explicit disconnect: clear liveness so /status flips OFF immediately.
+
+        Called when the user toggles the extension OFF. Without this the
+        `connected` property stays True for up to CONNECTED_WINDOW_S after the
+        last poll, so the UI shows the agent ON for ~90s past the off switch.
+        """
+        self.last_poll_ts = None
+
     async def wait_for_agent(self, timeout_s: float = 20.0) -> None:
         deadline = time.time() + timeout_s
         while not self.connected:

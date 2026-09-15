@@ -1619,6 +1619,10 @@ chrome.runtime.onMessage.addListener((msg) => {
       // Resume immediately rather than waiting for the next poll tick.
       looping = false;
       loopGuarded();
+    } else {
+      // Tell the backend we're going down so /status flips OFF now instead of
+      // after the liveness window. Fire-and-forget — never block the toggle.
+      fetch(`${API_BASE}/api/v1/agent/disconnect`, { method: "POST" }).catch(() => {});
     }
   }
 });
