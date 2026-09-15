@@ -19,7 +19,7 @@ import asyncio
 import json
 import logging
 from typing import Any, cast
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from playwright.async_api import async_playwright
 
@@ -557,8 +557,9 @@ def templatize(
             if is_query_param:
                 query_assigned = True
         elif action == "mark_card":
-            if card_selector is None:
-                card_selector = ev.get("selector")
+            sel = ev.get("selector")
+            if card_selector is None and sel and not is_root_selector(sel):
+                card_selector = sel
         elif action == "submit":
             steps.append({"action": "press", "selector": ev["selector"], "key": "Enter"})
         elif action == "click":
@@ -595,6 +596,34 @@ def templatize(
 # ---------------------------------------------------------------------------
 
 MAX_PAGES = 5
+
+# Root-level elements are never a valid "one result card" selector. A flow
+# that resolves to html/body/#root (e.g. an SPA shell like MCF's
+# <div id="root">) matches the whole page as a single degenerate card and
+# silently produces junk, so it must be rejected loudly instead.
+_ROOT_SELECTOR_TOKENS = frozenset(
+    {"html", "body", "#root", "div#root", "[id=root]", "[id='root']", '[id="root"]',
+     "div[id=root]", "div[id='root']", 'div[id="root"]', ":root"}
+)
+
+
+def is_root_selector(selector: str | None) -> bool:
+    """True when a card selector points at the page root / app shell."""
+    if not selector or not isinstance(selector, str):
+        return True
+    sel = selector.strip().lower().replace(" ", "")
+    if not sel:
+        return True
+    # Bare `div#root`, `html`, `body`, `#root`, `div[id=root]`, etc.
+    if sel in _ROOT_SELECTOR_TOKENS:
+        return True
+    if sel.startswith(("html", "body")):  # html.foo / body > div …
+        return True
+    # #root, div#root, div#root.foo, #root/div, div[id=root] (any tag prefix).
+    if sel.endswith(("#root", "[id=root]", "[id='root']", '[id="root"]')):
+        return True
+    return "#root" in sel and len(sel) <= len("#root") + 6
+
 
 # Default card selectors for JobStreet/SEEK when the wizard only captured the
 # outer card (fields missing/empty).Guessed from the live DOM structure.
@@ -717,6 +746,22 @@ def _sanitize_storage_state(storage_state_encrypted: str | None) -> dict[str, An
     return state
 
 
+async def _wait_for_ready(page: Any) -> None:
+    """Best-effort wait for a freshly-navigated page to render its content.
+
+    domcontentloaded fires before SPA shells (MCF's React app, SEEK) paint
+    their result lists; give the network a short beat, but never fail the
+    flow if the site keeps long-poll connections open (networkidle timeout).
+    """
+    try:
+        await page.wait_for_load_state("networkidle", timeout=8_000)
+    except Exception:
+        try:
+            await asyncio.sleep(1.5)
+        except Exception:
+            pass
+
+
 async def execute_flow(
     base_url: str,
     steps: list[dict[str, Any]],
@@ -763,7 +808,33 @@ async def execute_flow(
         for step in steps:
             action = step.get("action")
             try:
-                if action == "fill":
+                if action == "navigate":
+                    # Recorded flows lead with a navigate step (SEEK/LinkedIn
+                    # URL templates, MCF employer talent-search). Substitute
+                    # {query} then drive the browser there. Invalid URLs are
+                    # skipped so a malformed step never aborts the whole run.
+                    url = str(step.get("url") or "").replace(
+                        "{query}", quote(query or "")
+                    ).strip()
+                    if url.startswith(("http://", "https://")):
+                        await page.goto(
+                            url, timeout=45_000, wait_until="domcontentloaded"
+                        )
+                        await _wait_for_ready(page)
+                        # Re-check the session after each navigation: sites can
+                        # bounce to a login wall after a search leg.
+                        bounced = await _looks_logged_out(page, base_domain)
+                        if bounced:
+                            return {
+                                "results": [],
+                                "needs_human": True,
+                                "human_reason": bounced,
+                            }
+                elif action == "wait":
+                    # Cap at 10s so a runaway recorded wait can't stall the run.
+                    seconds = max(0.0, min(float(step.get("seconds", 2)), 10.0))
+                    await asyncio.sleep(seconds)
+                elif action == "fill":
                     value = query if step.get("param") == "query" else step.get("value", "")
                     await pacing.human_type(page, step["selector"], value)
                 elif action == "click":
@@ -865,7 +936,9 @@ async def execute_flow(
 
 async def _extract_page(page: Any, card_selectors: dict[str, str] | None) -> list[dict[str, Any]]:
     card = (card_selectors or {}).get("card")
-    if not card:
+    if not card or is_root_selector(card):
+        # A root/html/body/#root selector matches the entire page as one
+        # degenerate "card" — reject it rather than returning junk.
         return []
     fields = (card_selectors or {}).get("fields", {})
     try:
@@ -1300,7 +1373,12 @@ async def discover_flow(
             tag, idbase = m.groups()
             card = f"{tag}[id^='{idbase}-']" if tag else f"[id^='{idbase}-']"
             logger.info("generalized card id selector to: %s", card)
-        # sanity: selector must match something
+        # sanity: selector must match something, and must NOT be the page root
+        # (html/body/#root match the whole page as one degenerate card).
+        if is_root_selector(card):
+            top = candidates[0]
+            card = f"{top['tag']}.{top['cls'].split()[0]}" if top.get("cls") else top["tag"]
+            logger.warning("rejected root card selector; fell back to %s", card)
         try:
             count = await page.locator(card).count()
         except Exception:
@@ -1310,8 +1388,12 @@ async def discover_flow(
             top = candidates[0]
             card = f"{top['tag']}.{top['cls'].split()[0]}" if top.get("cls") else top["tag"]
             count = await page.locator(card).count()
-        if not count:
-            raise RuntimeError("LLM-selected card selector matched nothing on the page")
+        if not count or is_root_selector(card):
+            raise RuntimeError(
+                "Card discovery resolved to a single page-level element "
+                f"(selector '{card or '<empty>'}') — no repeated result cards "
+                "were found. Run a search returning visible results, then retry."
+            )
 
         # --- Step 4: discover inner field selectors (title/company/etc.) ---
         # Grab one real card's inner structure for the LLM to map fields.

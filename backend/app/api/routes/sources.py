@@ -31,11 +31,54 @@ from app.services.source_flows import (
     discover_flow,
     domain_of,
     execute_flow,
+    is_root_selector,
 )
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/sources", dependencies=[])
+
+# MCF splits public job search (www) from the logged-in EMPLOYER talent search
+# (employer host). Candidate discovery + cookie capture must target the latter:
+# a session captured on www.mycareersfuture.gov.sg does not authorize
+# employer.mycareersfuture.gov.sg/talent-search.
+MCF_EMPLOYER_HOST = "employer.mycareersfuture.gov.sg"
+MCF_TALENT_SEARCH_URL = f"https://{MCF_EMPLOYER_HOST}/talent-search"
+MCF_TALENT_SEARCH_INPUT = "#talent-search-input"
+
+
+def _is_mcf_candidates(source: Source, flow_type: str | None) -> bool:
+    """True for a MyCareersFuture find_candidates flow (needs the employer app)."""
+    return (
+        flow_type == "find_candidates"
+        and "mycareersfuture.gov.sg" in (source.domain or "")
+    )
+
+
+def _session_capture_urls(source: Source) -> list[str]:
+    """URLs whose cookies must be captured to cover every host a flow touches.
+
+    MCF splits its public site (www) from the employer talent-search app
+    (employer host) — capturing only base_url would leave the candidate flow
+    unauthorized, so both hosts are captured and merged.
+    """
+    urls = [source.base_url]
+    if "mycareersfuture.gov.sg" in (source.domain or ""):
+        urls.append(MCF_TALENT_SEARCH_URL)
+    return urls
+
+
+def _merge_cookies(cookie_lists: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Merge cookie blobs, de-duplicating by (name, domain, path)."""
+    merged: dict[tuple[Any, Any, Any], dict[str, Any]] = {}
+    for cookies in cookie_lists:
+        for c in cookies or []:
+            if not isinstance(c, dict) or not c.get("name"):
+                continue
+            merged[(c.get("name"), c.get("domain"), c.get("path"))] = c
+    return list(merged.values())
+
+
 
 # In-memory wizard sessions (single-process dev deployment).
 _wizards: dict[str, WizardSession] = {}
@@ -291,19 +334,21 @@ async def agent_login(source_id: str, db: AsyncSession = Depends(get_db)) -> dic
 
     # Re-login = switch accounts. Best-effort wipe the browser's cookies for
     # this site so the login page starts clean. Never fail login on this.
-    try:
-        await agent_registry.dispatch(
-            "clear_cookies", {"url": source.base_url}, timeout_s=20
-        )
-    except Exception as exc:  # clear is best-effort
-        if "Unknown action" in str(exc):
-            logger.info(
-                "clear_cookies unsupported for %s (extension outdated — reload the "
-                "unpacked extension to enable cookie wipe); continuing to login page: %s",
-                source_id,
-                exc,
+    # MCF splits www/employer hosts, so clear (and later capture) both.
+    for target in _session_capture_urls(source):
+        try:
+            await agent_registry.dispatch(
+                "clear_cookies", {"url": target}, timeout_s=20
             )
-        else:
+        except Exception as exc:  # clear is best-effort
+            if "Unknown action" in str(exc):
+                logger.info(
+                    "clear_cookies unsupported for %s (extension outdated — reload the "
+                    "unpacked extension to enable cookie wipe); continuing to login page: %s",
+                    source_id,
+                    exc,
+                )
+                break
             logger.warning("clear_cookies failed for %s: %s", source_id, exc)
 
     # Drop the stored session BEFORE navigating so has_session flips false and
@@ -369,9 +414,10 @@ async def agent_session_capture(source_id: str, db: AsyncSession = Depends(get_d
     from app.services.agent_relay import agent_registry
 
     try:
-        cookies = await agent_registry.dispatch(
-            "get_cookies", {"url": source.base_url}, timeout_s=20
-        )
+        cookies: list[dict[str, Any]] = []
+        for url in _session_capture_urls(source):
+            part = await agent_registry.dispatch("get_cookies", {"url": url}, timeout_s=20)
+            cookies = _merge_cookies([cookies, part])
     except RuntimeError as exc:
         raise HTTPException(502, str(exc))
     return {"ok": True, "cookies": cookies}
@@ -669,6 +715,109 @@ async def _agent_discover(source: Source, req: AgentRecordRequest) -> list[dict[
     the record button). For other sites: fall back to legacy discover_flow.
     """
     from app.services.agent_relay import agent_registry
+
+    if _is_mcf_candidates(source, req.flow_type):
+        logger.info("agent_record: mcf candidate discovery for %s starting", source.name)
+        query = (req.query_hint or "software engineer").strip() or "software engineer"
+        # Landing navigation runs first (mirrors SEEK) so the employer SPA is
+        # on the talent-search route before the search input is filled.
+        prefix: list[dict[str, Any]] = [
+            {"action": "navigate", "url": MCF_TALENT_SEARCH_URL},
+            {"action": "wait", "seconds": 6},
+        ]
+        try:
+            flow_res = await agent_registry.dispatch(
+                "run_flow",
+                {
+                    "baseUrl": MCF_TALENT_SEARCH_URL,
+                    "query": query,
+                    "steps": prefix
+                    + [
+                        {"action": "fill", "selector": MCF_TALENT_SEARCH_INPUT, "param": "query"},
+                        {"action": "press", "key": "Enter"},
+                        {"action": "wait", "seconds": 6},
+                    ],
+                },
+                timeout_s=120,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(502, f"Agent discovery failed: {exc}")
+        if isinstance(flow_res, dict) and flow_res.get("needs_human"):
+            raise HTTPException(
+                502,
+                "MyCareersFuture employer session expired — re-login then retry "
+                f"({flow_res.get('error') or 'login page'})",
+            )
+        found = await agent_registry.dispatch("find_result_card", {}, timeout_s=30)
+        logger.info("agent_record: mcf find_result_card → %s", found)
+        if not (isinstance(found, dict) and found.get("found") and found.get("card")):
+            # React SPA can paint results slowly — wait and retry once.
+            await agent_registry.dispatch(
+                "run_flow",
+                {"baseUrl": MCF_TALENT_SEARCH_URL, "steps": [{"action": "wait", "seconds": 10}]},
+                timeout_s=60,
+            )
+            found = await agent_registry.dispatch("find_result_card", {}, timeout_s=30)
+        if isinstance(found, dict) and found.get("found") and found.get("card"):
+            card = found["card"]
+            if not is_root_selector(card):
+                logger.info("agent_record: mcf card found: %s", card)
+                return prefix + [{"card": card, "fields": {"title": "a"}}]
+            logger.warning("agent_record: mcf rejected root card selector %s", card)
+        # Last resort: probe candidate card selectors via extract.
+        for cand in (
+            "[data-testid*='talent']",
+            "[data-testid*='candidate']",
+            "[data-testid*='card']",
+            "div[class*='Card']",
+            "table tbody tr",
+        ):
+            try:
+                rows = await agent_registry.dispatch(
+                    "extract", {"card": cand, "fields": {}, "maxItems": 10}, timeout_s=60
+                )
+            except Exception as exc:
+                logger.debug("agent_record: mcf extract probe failed: %s", exc)
+                continue
+            real = [r for r in rows or [] if len(r.get("raw_text") or "") > 80]
+            if len(real) >= 3:
+                logger.info("agent_record: mcf fallback extract card: %s", cand)
+                return prefix + [{"card": cand, "fields": {"title": "a"}}]
+        # Diagnosable failure: surface page state (title/bodyChars/loginHint).
+        try:
+            state = await agent_registry.dispatch(
+                "page_state",
+                {
+                    "selectors": [
+                        MCF_TALENT_SEARCH_INPUT,
+                        "[data-testid*='talent']",
+                        "[data-testid*='candidate']",
+                        "input[type='password']",
+                    ]
+                },
+                timeout_s=30,
+            )
+        except Exception as exc:
+            logger.debug("agent_record: mcf page_state failed: %s", exc)
+            state = {}
+        logger.warning("agent_record: mcf page_state → %s", json.dumps(state)[:500])
+        if isinstance(state, dict) and (
+            state.get("loginHint")
+            or (state.get("counts") or {}).get("input[type='password']", 0) > 0
+        ):
+            raise HTTPException(
+                502,
+                "MyCareersFuture employer talent-search is showing a login wall — "
+                "re-login via the wizard, then retry recording",
+            )
+        body_chars = state.get("bodyChars", 0) if isinstance(state, dict) else 0
+        title = state.get("title", "?") if isinstance(state, dict) else "?"
+        raise HTTPException(
+            502,
+            f"MCF talent-search loaded (title '{title}', {body_chars} chars) but no "
+            "candidate rows — run a search returning visible candidates first "
+            f"(query '{query}' may match nothing; try broader).",
+        )
 
     if "seek.com" in (source.domain or ""):
         logger.info("agent_record: seek discovery for %s starting", source.name)
