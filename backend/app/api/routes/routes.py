@@ -84,7 +84,11 @@ async def start_candidate_search(
     # Valid platforms = built-in adapters + enabled sources with a
     # find_candidates flow of any status (active or broken — broken ones
     # are attempted and reported in source_issues, never silently dropped).
-    from app.agent.nodes import _candidate_source_platforms, _flow_platforms
+    from app.agent.nodes import (
+        _candidate_source_platforms,
+        _flow_platforms,
+        resolve_candidate_platform,
+    )
 
     flow_platforms = await _flow_platforms()
     candidate_source_platforms = await _candidate_source_platforms()
@@ -96,6 +100,8 @@ async def start_candidate_search(
     # Defensive re-check: rewrite MyCareersFuture variants to "linkedin" even
     # if the schema normalization was bypassed. MCF candidate search is not
     # ready; without this, MCF inputs would 422 as unknown platforms.
+    # Runs BEFORE alias resolution so "mcf"/"mycareersfuture" never get
+    # resolved to some other source.
     _MCF_VARIANTS = {"mycareersfuture", "my-careers-future", "my_careers_future", "my careers future", "mcf"}
     platforms = ["linkedin" if p.strip().lower() in _MCF_VARIANTS else p for p in platforms]
     # Legacy-default shape: callers that hardcoded the old default
@@ -109,13 +115,26 @@ async def start_candidate_search(
         | flow_platforms
         | candidate_source_platforms
     )
-    unknown = [p for p in platforms if p.lower() not in known]
+    # Canonicalize each requested name against the known set: exact match
+    # first, then alias fallbacks (normalized + singular/plural), so
+    # "FastJobs" resolves to the "fastjob" source instead of 422-ing. Names
+    # that resolve to nothing are kept verbatim for the error message.
+    resolved_platforms: list[str] = []
+    unknown: list[str] = []
+    for p in platforms:
+        canon = resolve_candidate_platform(p, known)
+        if canon is None:
+            unknown.append(p)
+            resolved_platforms.append(p)
+        else:
+            resolved_platforms.append(canon)
     if unknown:
         supported = sorted(known)
         raise HTTPException(
             status_code=422,
             detail=f"Unsupported platform(s) {unknown!r}; supported: {supported}",
         )
+    platforms = resolved_platforms
     return await _start_task(
         db,
         SearchType.candidates,

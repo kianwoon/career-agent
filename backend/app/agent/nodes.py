@@ -43,6 +43,53 @@ _SEARCH_MIN_REMAINING_S = 15.0
 _SEARCH_LEG_TIMEOUT_CAP_S = 240.0
 
 
+def _normalize_platform(s: str) -> str:
+    """Lowercase and drop non-alphanumerics (``JobStreet - Candidate`` ->
+    ``jobstreetcandidate``)."""
+    return "".join(ch for ch in s.lower() if ch.isalnum())
+
+
+def resolve_candidate_platform(requested: str, known: set[str]) -> str | None:
+    """Resolve a requested platform name to a canonical name in ``known``.
+
+    Resolution order — exact match always wins so unrelated sites are never
+    silently conflated:
+
+    1. exact case-insensitive, whitespace-trimmed match;
+    2. normalized match ignoring non-alphanumerics
+       (``JobStreet - Candidate`` == ``jobstreet - candidate``, but
+       ``jobstreet`` != ``jobstreet - candidate``);
+    3. singular/plural tolerance on the normalized form (trailing ``s``
+       add/strip), so ``FastJobs`` resolves to a known ``fastjob`` (and
+       ``fastjob`` to a known ``fastjobs``) — only when unambiguous.
+
+    Returns the canonical name from ``known``, or ``None`` if nothing matches.
+    """
+    req = (requested or "").strip().lower()
+    if not req:
+        return None
+    # 1) exact (case-insensitive) match wins.
+    if req in known:
+        return req
+    norm = _normalize_platform(req)
+    if not norm:
+        return None
+    norm_known = {_normalize_platform(k): k for k in known if _normalize_platform(k)}
+    # 2) normalized match.
+    if norm in norm_known:
+        return norm_known[norm]
+    # 3) singular/plural tolerance — trailing "s" only, and only when a
+    # single candidate matches (never guess between two).
+    candidates: set[str] = set()
+    if norm.endswith("s") and norm[:-1] in norm_known:
+        candidates.add(norm_known[norm[:-1]])
+    if norm + "s" in norm_known:
+        candidates.add(norm_known[norm + "s"])
+    if len(candidates) == 1:
+        return candidates.pop()
+    return None
+
+
 def _candidate_adapters() -> dict[str, Any]:
     """Lazy adapter registry (imports happen on first use, not at module load)."""
     if not _CANDIDATE_PLATFORM_ADAPTERS:
@@ -922,6 +969,15 @@ async def run_search(state: AgentState) -> AgentState:
         # platforms; broken flows are attempted and reported, not dropped).
         flow_platforms = await _flow_platforms()
         all_source_platforms = flow_platforms | await _candidate_source_platforms()
+        # Canonicalize requested platform names against the known set so
+        # display/builtin variants (e.g. "FastJobs") resolve to their source
+        # ("fastjob"). Exact matches win; alias resolution is fallback only.
+        # Unresolvable names are kept verbatim (they become the 422 list).
+        resolved: list[str] = []
+        for _p in platforms:
+            _canon = resolve_candidate_platform(_p, all_source_platforms | set(_candidate_adapters()))
+            resolved.append(_canon if _canon is not None else _p)
+        platforms = resolved
 
         def _resolve(p: str) -> Any:
             return _candidate_adapters().get(p) or (

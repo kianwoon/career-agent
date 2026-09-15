@@ -656,3 +656,116 @@ def test_run_search_broken_flow_reports_source_issue(monkeypatch):
     detail = result.get("plan_detail") or ""
     assert "unsupported" not in detail.lower()
     assert "no active find_candidates flow" in detail
+
+
+# ---------------------------------------------------------------------------
+# Platform alias resolution (exact match first, alias fallback)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_candidate_platform_exact_wins():
+    from app.agent.nodes import resolve_candidate_platform
+
+    known = {"linkedin", "fastjob"}
+    assert resolve_candidate_platform("LinkedIn", known) == "linkedin"
+    assert resolve_candidate_platform("fastjob", known) == "fastjob"
+
+
+def test_resolve_candidate_platform_plural_alias():
+    from app.agent.nodes import resolve_candidate_platform
+
+    # "FastJobs" (display/builtin plural) → "fastjob" source.
+    assert resolve_candidate_platform("FastJobs", {"fastjob"}) == "fastjob"
+    # Reverse direction tolerated too.
+    assert resolve_candidate_platform("fastjob", {"fastjobs"}) == "fastjobs"
+
+
+def test_resolve_candidate_platform_normalization_not_overreaching():
+    from app.agent.nodes import resolve_candidate_platform
+
+    known = {"jobstreet - candidate"}
+    # Punctuation/space insensitivity is allowed…
+    assert resolve_candidate_platform("JobStreet - Candidate", known) == "jobstreet - candidate"
+    # …but a plain "jobstreet" must NOT silently match the -candidate source.
+    assert resolve_candidate_platform("jobstreet", known) is None
+    assert resolve_candidate_platform("not-a-real-platform", known) is None
+
+
+def test_route_fastjobs_alias_resolves_and_dispatches(monkeypatch):
+    """FastJobs (plural display name) canonicalizes to the fastjob source
+    instead of 422-ing, and the plan stores the canonical lowercase name."""
+    import asyncio
+
+    from app.agent import nodes
+    from app.api.routes import routes as routes_mod
+    from app.models.schemas import CandidateSearchRequest
+
+    async def fake_flow_platforms():
+        return {"fastjob", "linkedin"}
+
+    async def fake_all_sources():
+        return {"fastjob"}
+
+    monkeypatch.setattr(nodes, "_flow_platforms", fake_flow_platforms)
+    monkeypatch.setattr(nodes, "_candidate_source_platforms", fake_all_sources)
+
+    captured = {}
+
+    async def fake_start_task(db, task_type, **kwargs):
+        captured["plan"] = kwargs.get("plan")
+        now = datetime.now(UTC)
+        return routes_mod.TaskStatusResponse(
+            task_id="t1", type=task_type,
+            status=routes_mod.TaskStatus.pending,
+            workflow_state=None, created_at=now, started_at=None,
+            completed_at=None, error=None,
+        )
+
+    monkeypatch.setattr(routes_mod, "_start_task", fake_start_task)
+
+    resp = asyncio.run(routes_mod.start_candidate_search(
+        req=CandidateSearchRequest(query="engineer", platforms=["FastJobs"]),
+        db=None,
+    ))
+    assert resp.task_id == "t1"
+    assert captured["plan"]["platforms"] == ["fastjob"]
+
+
+def test_run_search_fastjobs_dispatches_via_flow(monkeypatch):
+    """run_search canonicalizes "FastJobs" and passes source_name="fastjob"
+    to the flow adapter."""
+    import app.agent.nodes as nodes_mod
+
+    seen: list[str] = []
+
+    async def fake_flow_platforms():
+        return {"fastjob"}
+
+    async def fake_all_sources():
+        return {"fastjob"}
+
+    async def fake_via_flow(source_name, queries, excludes=None, location=None, deadline=None):
+        seen.append(source_name)
+        return {"raw_results": [], "needs_human": False}
+
+    async def fake_custom_sources(state):
+        return [], [], [], []
+
+    async def _async_false():
+        return False
+
+    monkeypatch.setattr(nodes_mod, "_flow_platforms", fake_flow_platforms)
+    monkeypatch.setattr(nodes_mod, "_candidate_source_platforms", fake_all_sources)
+    monkeypatch.setattr(nodes_mod, "_search_candidates_via_flow", fake_via_flow)
+    monkeypatch.setattr(nodes_mod, "_search_custom_sources", fake_custom_sources)
+    monkeypatch.setattr(nodes_mod, "_no_browser_session_available", lambda: _async_false())
+
+    state = {
+        "type": nodes_mod.SearchType.candidates,
+        "query": "engineer",
+        "plan": {"platforms": ["FastJobs"], "queries": ["engineer"]},
+    }
+    result = asyncio.run(nodes_mod.run_search(state))
+    assert seen == ["fastjob"]
+    assert "unsupported" not in (result.get("plan_detail") or "").lower()
+
