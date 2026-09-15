@@ -296,7 +296,15 @@ async def agent_login(source_id: str, db: AsyncSession = Depends(get_db)) -> dic
             "clear_cookies", {"url": source.base_url}, timeout_s=20
         )
     except Exception as exc:  # clear is best-effort
-        logger.warning("clear_cookies failed for %s: %s", source_id, exc)
+        if "Unknown action" in str(exc):
+            logger.info(
+                "clear_cookies unsupported for %s (extension outdated — reload the "
+                "unpacked extension to enable cookie wipe); continuing to login page: %s",
+                source_id,
+                exc,
+            )
+        else:
+            logger.warning("clear_cookies failed for %s: %s", source_id, exc)
 
     # Drop the stored session BEFORE navigating so has_session flips false and
     # the freshly captured login replaces it.
