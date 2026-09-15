@@ -295,7 +295,7 @@ async def agent_login(source_id: str, db: AsyncSession = Depends(get_db)) -> dic
         await agent_registry.dispatch(
             "clear_cookies", {"url": source.base_url}, timeout_s=20
         )
-    except Exception as exc:  # noqa: BLE001 — clear is best-effort
+    except Exception as exc:  # clear is best-effort
         logger.warning("clear_cookies failed for %s: %s", source_id, exc)
 
     # Drop the stored session BEFORE navigating so has_session flips false and
