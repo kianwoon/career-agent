@@ -615,27 +615,38 @@ export default function Home() {
     }
   }
 
-  /** Manual filter recording: capture the user's filter-panel clicks and
-   * merge them into the flow so every search replays those filters. */
+  /** User-driven click recording: capture the user's clicks (filters, or a
+   * candidate result card) and merge them into the flow so every search
+   * replays them. Used for both jobs (filters) and candidates (search + card). */
   async function handleRecordFilters(source: SourceView, flowType: "find_jobs" | "find_candidates", phase: "start" | "stop") {
     if (!agentConnected) return;
     setWizardBusy(`${source.id}:filters:${phase}`);
+    const noun = flowType === "find_candidates" ? "candidates" : "filters";
     try {
       if (phase === "start") {
-        await agentRecordFiltersStart(source.id);
+        await agentRecordFiltersStart(source.id, flowType);
         setRecordingFilters(`${source.id}:${flowType}`);
         setTimeline((prev) =>
-          addEvent(prev, "action", `Recording filters for ${source.name} — in the agent tab, run a search, click the filter options you want, then press "Done recording filters" here.`)
+          addEvent(
+            prev,
+            "action",
+            flowType === "find_candidates"
+              ? `Recording candidates for ${source.name} — in the opened tab, search for candidates and click a result card, then press Done.`
+              : `Recording filters for ${source.name} — in the agent tab, run a search, click the filter options you want, then press "Done recording filters" here.`
+          )
         );
       } else {
         await agentRecordFiltersStop(source.id, flowType);
-        setTimeline((prev) => addEvent(prev, "success", `Filters saved for ${source.name} — they'll be applied on every ${flowType === "find_jobs" ? "job" : "candidate"} search.`));
+        setTimeline((prev) => addEvent(prev, "success", `${flowType === "find_candidates" ? "Candidates" : "Filters"} saved for ${source.name} — they'll be applied on every ${flowType === "find_jobs" ? "job" : "candidate"} search.`));
         await reloadSources();
       }
     } catch (e) {
       setTimeline((prev) =>
-        addEvent(prev, "warn", `Filter recording failed: ${e instanceof Error ? e.message : e}`)
+        addEvent(prev, "warn", `${noun === "candidates" ? "Candidate" : "Filter"} recording failed: ${e instanceof Error ? e.message : e}`)
       );
+      // A failed stop still changed nothing server-side, but refresh so the
+      // card state reflects reality (e.g. a partial save).
+      if (phase === "stop") await reloadSources().catch(() => {});
     } finally {
       setWizardBusy(null);
       if (phase === "stop") setRecordingFilters(null);
@@ -1387,17 +1398,35 @@ export default function Home() {
                             >
                               {s.flows.find_jobs === "active" ? "Re-record jobs" : "Record jobs"}
                             </button>
-                            <button
-                              className="btn small"
-                              disabled={!!wizardBusy || isRunning}
-                              onClick={(e) => {
-                                e.preventDefault();
-                                handleAgentRecord(s, "find_candidates");
-                              }}
-                              title="Discover the candidate-search flow in your browser"
-                            >
-                              {s.flows.find_candidates === "active" ? "Re-record candidates" : "Record candidates"}
-                            </button>
+                            {recordingFilters === `${s.id}:find_candidates` ? (
+                              <button
+                                className="btn small primary"
+                                disabled={!!wizardBusy}
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  handleRecordFilters(s, "find_candidates", "stop");
+                                }}
+                                title="Save the candidate search + card you just did into the flow"
+                              >
+                                ✓ Done recording candidates
+                              </button>
+                            ) : (
+                              <button
+                                className="btn small"
+                                disabled={!!wizardBusy || isRunning || !s.has_session}
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  handleRecordFilters(s, "find_candidates", "start");
+                                }}
+                                title={
+                                  s.has_session
+                                    ? "Record a candidate search + card click in your browser (sign in first)"
+                                    : "Sign in first (Login button), then record candidates"
+                                }
+                              >
+                                {s.flows.find_candidates === "active" ? "Re-record candidates" : "Record candidates"}
+                              </button>
+                            )}
                             {recordingFilters === `${s.id}:find_jobs` ? (
                               <button
                                 className="btn small primary"

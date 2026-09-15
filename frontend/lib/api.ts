@@ -109,10 +109,17 @@ export async function agentRecord(
   });
 }
 
-/** Start recording the user's filter clicks in the agent tab. */
-export async function agentRecordFiltersStart(sourceId: string): Promise<void> {
+/** Start recording the user's clicks in the agent tab.
+ * flow_type tells the backend which entry URL to open (candidates use the
+ * per-source employer talent search) and enforces the session guard. */
+export async function agentRecordFiltersStart(
+  sourceId: string,
+  flowType: "find_jobs" | "find_candidates" = "find_jobs"
+): Promise<void> {
   const base = await resolveApiBase();
-  await postJson(`${base}/api/v1/sources/${sourceId}/agent_record/start`, {});
+  await postJson(`${base}/api/v1/sources/${sourceId}/agent_record/start`, {
+    flow_type: flowType,
+  });
 }
 
 /** Stop recording and merge the captured filter clicks into the flow. */

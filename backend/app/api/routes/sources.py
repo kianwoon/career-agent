@@ -46,6 +46,13 @@ MCF_EMPLOYER_HOST = "employer.mycareersfuture.gov.sg"
 MCF_TALENT_SEARCH_URL = f"https://{MCF_EMPLOYER_HOST}/talent-search"
 MCF_TALENT_SEARCH_INPUT = "#talent-search-input"
 
+# FastJobs likewise separates its public/employer login host from the logged-in
+# EMPLOYER talent search. Candidate discovery + cookie capture must target the
+# talent-search route on the employer host; the coyid is tied to the recorded
+# employer account (f5e92471), so candidate results are scoped to that account.
+FASTJOBS_EMPLOYER_HOST = "employer.fastjobs.sg"
+FASTJOBS_TALENT_SEARCH_URL = "https://employer.fastjobs.sg/p/talent/search/?coyid=22091"
+
 
 def _is_mcf_candidates(source: Source, flow_type: str | None) -> bool:
     """True for a MyCareersFuture find_candidates flow (needs the employer app)."""
@@ -55,16 +62,44 @@ def _is_mcf_candidates(source: Source, flow_type: str | None) -> bool:
     )
 
 
+def _is_fastjobs_candidates(source: Source, flow_type: str | None) -> bool:
+    """True for a FastJobs find_candidates flow (needs the employer talent search)."""
+    return (
+        flow_type == "find_candidates"
+        and "fastjobs.sg" in (source.domain or "")
+    )
+
+
+def _candidate_entry_url(source: Source) -> str:
+    """Landing URL for a find_candidates recording, per source.
+
+    Candidate discovery starts on a DIFFERENT host/route than the public job
+    search for MCF and FastJobs (logged-in employer talent search) — recording
+    the user's clicks on the public site would capture steps that replay
+    against an empty/unauthorized page. Fall back to base_url for every other
+    source.
+    """
+    domain = source.domain or ""
+    if "mycareersfuture.gov.sg" in domain:
+        return MCF_TALENT_SEARCH_URL
+    if "fastjobs.sg" in domain:
+        return FASTJOBS_TALENT_SEARCH_URL
+    return source.base_url
+
+
 def _session_capture_urls(source: Source) -> list[str]:
     """URLs whose cookies must be captured to cover every host a flow touches.
 
     MCF splits its public site (www) from the employer talent-search app
     (employer host) — capturing only base_url would leave the candidate flow
-    unauthorized, so both hosts are captured and merged.
+    unauthorized, so both hosts are captured and merged. FastJobs employer
+    talent search is likewise captured alongside the login/base URL.
     """
     urls = [source.base_url]
     if "mycareersfuture.gov.sg" in (source.domain or ""):
         urls.append(MCF_TALENT_SEARCH_URL)
+    if "fastjobs.sg" in (source.domain or ""):
+        urls.append(FASTJOBS_TALENT_SEARCH_URL)
     return urls
 
 
@@ -331,6 +366,8 @@ async def agent_login(source_id: str, db: AsyncSession = Depends(get_db)) -> dic
         login_url = "https://www.linkedin.com/login"
     elif "mycareersfuture.gov.sg" in source.domain:
         login_url = "https://www.mycareersfuture.gov.sg/sign-in"
+    elif "fastjobs.sg" in source.domain:
+        login_url = f"https://{FASTJOBS_EMPLOYER_HOST}/site/login/"
 
     # Re-login = switch accounts. Best-effort wipe the browser's cookies for
     # this site so the login page starts clean. Never fail login on this.
@@ -376,6 +413,10 @@ class AgentSessionPayload(BaseModel):
 class AgentRecordRequest(BaseModel):
     flow_type: str = Field(..., description="find_jobs or find_candidates")
     query_hint: str | None = Field(default=None)
+
+
+class AgentRecordStartRequest(BaseModel):
+    flow_type: str = Field(default="find_jobs", description="find_jobs or find_candidates")
 
 
 @router.post("/{source_id}/agent_session", response_model=SourceView)
@@ -447,24 +488,41 @@ async def agent_session_store(
 
 @router.post("/{source_id}/agent_record/start")
 async def agent_record_manual_start(
-    source_id: str, db: AsyncSession = Depends(get_db)
+    source_id: str,
+    req: AgentRecordStartRequest | None = None,
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Start recording the user's filter clicks in the agent tab.
+    """Start recording the user's clicks in the agent tab.
 
-    The user does the keyword search (or it's already on screen), then clicks
-    the filter-panel options they want (Industry, Salary, Work Type…). Every
-    click is captured in the page; /agent_record/stop collects them and merges
-    them into the flow after the search steps.
+    For jobs: the user does the keyword search (or it's already on screen),
+    then clicks the filter-panel options they want (Industry, Salary, Work
+    Type…). For candidates: the recorder opens the source's employer talent
+    search and the user searches + clicks a result card. Every captured event
+    is recorded in the page; /agent_record/stop collects them.
     """
     source = await _get_source(source_id, db)  # 404 if unknown source
+    flow_type = (req.flow_type if req else None) or "find_jobs"
+    if flow_type not in FLOW_TYPES:
+        raise HTTPException(400, f"flow_type must be one of {FLOW_TYPES}")
     from app.services.agent_relay import agent_registry
 
+    # Candidate discovery runs on the logged-in employer app — without a
+    # stored session the recorder would open a login wall and every captured
+    # click would replay against it. Jobs search stays on the public site.
+    if flow_type == "find_candidates" and not source.session_state:
+        raise HTTPException(422, "Sign in first (Login button), then record.")
+
+    # Candidate flows start on their per-source entry URL (employer talent
+    # search); job flows keep the public base_url. Pass it to the recorder so
+    # it attaches/opens a tab the user can actually see and click.
+    entry_url = (
+        _candidate_entry_url(source)
+        if flow_type == "find_candidates"
+        else source.base_url
+    )
     try:
-        # Pass the source base_url so the recorder attaches to a tab the
-        # user can actually see/click (worker reload loses agentTabId —
-        # creating about:blank silently captured zero clicks).
         await agent_registry.dispatch(
-            "start_record", {"baseUrl": source.base_url}, timeout_s=30
+            "start_record", {"baseUrl": entry_url}, timeout_s=30
         )
     except RuntimeError as exc:
         raise HTTPException(502, str(exc))
@@ -477,11 +535,12 @@ async def agent_record_manual_stop(
     req: AgentRecordRequest,
     db: AsyncSession = Depends(get_db),
 ) -> SourceFlowView:
-    """Stop recording, merge captured clicks into the flow, save it.
+    """Stop recording, merge captured events into the flow, save it.
 
-    Merge order: [search steps …] + [recorded filter clicks] + [extract card].
-    The search prefix is reused from the existing flow when present (keyword
-    fill + Enter + wait); otherwise a minimal navigate is used.
+    Merge order: [navigate + search prefix …] + [recorded events] + [extract card].
+    For an existing flow the search prefix + extract step are reused (jobs and
+    candidates). For a FIRST-TIME candidates flow (no flow yet) the entry URL
+    is the prefix and the card step is detected live via find_result_card.
     """
     source = await _get_source(source_id, db)
     if req.flow_type not in FLOW_TYPES:
@@ -497,6 +556,41 @@ async def agent_record_manual_stop(
     if not clicks:
         raise HTTPException(
             422, "No clicks were recorded — click some filter options, then press Stop"
+        )
+
+    # Convert raw recorded events into replayable steps (Part 4): the
+    # templatizer isn't reachable from this route, so apply the minimal inline
+    # conversion — a text-input fill carries NO typed text (never store the
+    # user's query literally); it becomes param:"query". A press keeps only
+    # the key. Everything else (clicks) stays literal.
+    def _to_step(e: dict[str, Any]) -> dict[str, Any] | None:
+        action = e.get("action")
+        selector = e.get("selector")
+        if action == "fill":
+            if not selector:
+                return None
+            return {"action": "fill", "selector": selector, "param": "query"}
+        if action == "press":
+            return {"action": "press", "key": e.get("key") or "Enter"}
+        if action == "click":
+            if not selector:
+                return None
+            step: dict[str, Any] = {"action": "click", "selector": selector}
+            if e.get("text"):
+                step["text"] = e["text"]
+            return step
+        return None
+
+    recorded: list[dict[str, Any]] = []
+    for e in clicks:
+        if not isinstance(e, dict):
+            continue
+        step = _to_step(e)
+        if step:
+            recorded.append(step)
+    if not recorded:
+        raise HTTPException(
+            422, "No usable events were recorded — click a result card, then press Stop"
         )
 
     # Prefix: reuse the existing flow's search steps up to (and including)
@@ -516,8 +610,15 @@ async def agent_record_manual_stop(
                 break
             prefix.append(step)
     if not prefix:
+        # First-time flow: lead with the source's candidate entry URL when
+        # recording candidates, else the public base_url.
+        entry = (
+            _candidate_entry_url(source)
+            if req.flow_type == "find_candidates"
+            else source.base_url
+        )
         prefix = [
-            {"action": "navigate", "url": source.base_url},
+            {"action": "navigate", "url": entry},
             {"action": "wait", "seconds": 3},
         ]
 
@@ -528,7 +629,9 @@ async def agent_record_manual_stop(
             if "card" in step or step.get("action") == "extract":
                 suffix = [step]
                 break
-    if not suffix:
+    if not suffix and req.flow_type == "find_jobs":
+        # Jobs has no sensible card to synthesize — a recorded jobs flow must
+        # reuse the existing extract from "Record jobs".
         raise HTTPException(
             502, "No result-card step in the existing flow — press Record jobs first"
         )
@@ -540,15 +643,20 @@ async def agent_record_manual_stop(
     # broken step again — re-record must be able to heal the selector.
     extract_ok = False
     heal_note: str | None = None
+    probe_steps = prefix + recorded + suffix
     try:
-        probe_url = source.base_url
+        probe_url = (
+            _candidate_entry_url(source)
+            if req.flow_type == "find_candidates"
+            else source.base_url
+        )
         probe_q = (req.query_hint or "qc").strip() or "qc"
         probe = await agent_registry.dispatch(
             "run_flow",
             {
                 "baseUrl": probe_url,
                 "query": probe_q,
-                "steps": prefix + suffix,
+                "steps": probe_steps,
             },
             timeout_s=90,
         )
@@ -558,22 +666,26 @@ async def agent_record_manual_stop(
         if isinstance(probe, dict) and probe.get("needs_human"):
             heal_note = "login wall during verification — sign in on the site, then re-record"
             raise RuntimeError(heal_note)
-        rows = await agent_registry.dispatch(
-            "extract",
-            {"card": suffix[0].get("card", ""), "fields": suffix[0].get("fields", {}), "maxItems": 10},
-            timeout_s=30,
-        )
-        real = [
-            r for r in (rows or [])
-            if isinstance(r, dict)
-            and (r.get("title") or "").strip()
-            and len(r.get("raw_text") or "") > 60
-        ]
-        extract_ok = len(real) >= 2
+        if suffix:
+            rows = await agent_registry.dispatch(
+                "extract",
+                {"card": suffix[0].get("card", ""), "fields": suffix[0].get("fields", {}), "maxItems": 10},
+                timeout_s=30,
+            )
+            real = [
+                r for r in (rows or [])
+                if isinstance(r, dict)
+                and (r.get("title") or "").strip()
+                and len(r.get("raw_text") or "") > 60
+            ]
+            extract_ok = len(real) >= 2
     except Exception as exc:
         extract_ok = False
         heal_note = heal_note or str(exc)[:120]
     if not extract_ok:
+        # detect the card from the live page (currently showing the results
+        # the user just recorded against — the probe left it there for jobs
+        # and candidates alike).
         healed = False
         try:
             found = await agent_registry.dispatch("find_result_card", {}, timeout_s=30)
@@ -585,10 +697,16 @@ async def agent_record_manual_stop(
                 healed = True
         except Exception:
             pass  # keep the old suffix; better than failing the whole save
+        if not healed and not suffix:
+            # First-time candidates recording where no card was detected.
+            raise HTTPException(
+                502,
+                "Couldn't detect result cards — click a candidate card while recording, then press Done",
+            )
         if not healed and not heal_note:
             heal_note = "stored card selector no longer matches — could not auto-detect a new one"
 
-    steps = prefix + clicks + suffix
+    steps = prefix + recorded + suffix
 
     if existing:
         existing.steps = steps

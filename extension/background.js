@@ -31,6 +31,13 @@ let loopTimer = null;
 // The tab the agent opened for its own work — all fill/click/extract target
 // THIS tab, never whatever the user happens to have focused.
 let agentTabId = null;
+// Manual click-recording state. The recorder lives in the page (MAIN world)
+// and is DESTROYED on hard navigation, so events are mirrored to
+// chrome.storage.session and the flag survives so tabs.onUpdated can
+// re-inject after a reload. See cmdStartRecord / cmdStopRecord.
+let recordingActive = false;
+const REC_ACTIVE_KEY = "caRecordingActive";
+const REC_EVENTS_KEY = "caRecordEvents";
 
 async function loadConfig() {
   const stored = await chrome.storage.local.get(["apiBase"]);
@@ -119,7 +126,7 @@ function waitForComplete(tabId, timeoutMs = 30000) {
 // NOTE: there is deliberately no "active tab" concept anywhere in this agent.
 // All navigation and script execution happens in the agent-owned tab.
 
-async function execOnTab(fn, args = []) {
+async function execOnTab(fn, args = [], world = "MAIN") {
   // Always target the agent's own tab. If it doesn't exist yet, create it
   // on the site first — the agent NEVER touches the user's focused tab.
   let tabId;
@@ -134,7 +141,7 @@ async function execOnTab(fn, args = []) {
   if (!tabId) tabId = await ensureTab("about:blank");
   const res = await chrome.scripting.executeScript({
     target: { tabId },
-    world: "MAIN",
+    world,
     func: fn,
     args,
   });
@@ -1110,95 +1117,210 @@ async function cmdStartRecord(baseUrl) {
   if (agentTabId === null) {
     await ensureTab(baseUrl || "about:blank");
   }
-  await execOnTab(() => {
-    if (window.__caRecord) return { already: true };
-    window.__caRecord = { events: [], capture: null };
-    const state = window.__caRecord;
-
-    // Build a CSS selector for a clicked element: prefer unique id, then
-    // data-testid/aria-label, then a short tag+class path (max 4 levels).
-    function buildSelector(el) {
-      if (!(el instanceof Element)) return null;
-      if (el.id && document.querySelectorAll(`#${CSS.escape(el.id)}`).length === 1) {
-        return `#${CSS.escape(el.id)}`;
-      }
-      const dt = el.getAttribute("data-testid") || el.getAttribute("data-test");
-      if (dt && document.querySelectorAll(`[data-testid="${dt}"]`).length === 1) {
-        return `[data-testid="${dt}"]`;
-      }
-      const aria = el.getAttribute("aria-label");
-      if (aria && document.querySelectorAll(`[aria-label="${aria}"]`).length === 1) {
-        return `[aria-label="${aria}"]`;
-      }
-      // name+type for form controls
-      if (el.name && document.getElementsByName(el.name).length === 1) {
-        return `${el.tagName.toLowerCase()}[name="${el.name}"]`;
-      }
-      const parts = [];
-      let cur = el;
-      let depth = 0;
-      while (cur && cur instanceof Element && depth < 4) {
-        let part = cur.tagName.toLowerCase();
-        if (cur.id && document.querySelectorAll(`#${CSS.escape(cur.id)}`).length === 1) {
-          parts.unshift(`#${CSS.escape(cur.id)}`);
-          break;
-        }
-        if (cur.className && typeof cur.className === "string" && cur.className.trim()) {
-          const cls = cur.className.trim().split(/\s+/).slice(0, 2);
-          const scoped = cls.map((c) => `.${CSS.escape(c)}`).join("");
-          part += scoped;
-        }
-        // nth-of-type disambiguation among siblings
-        const parent = cur.parentElement;
-        if (parent) {
-          const sameTag = Array.from(parent.children).filter((c) => c.tagName === cur.tagName);
-          if (sameTag.length > 1) {
-            part += `:nth-of-type(${sameTag.indexOf(cur) + 1})`;
-          }
-        }
-        parts.unshift(part);
-        cur = cur.parentElement;
-        depth += 1;
-      }
-      return parts.join(" > ");
-    }
-
-    const capture = (ev) => {
-      try {
-        // Only left clicks on real elements; ignore the recorder's own UI.
-        if (ev.button !== 0) return;
-        const el = ev.target;
-        if (!(el instanceof Element)) return;
-        if (el.closest("[data-ca-record-ignore]")) return;
-        const label = (
-          el.getAttribute("aria-label") ||
-          el.getAttribute("title") ||
-          (el.textContent || "").trim().slice(0, 60) ||
-          el.tagName.toLowerCase()
-        );
-        state.events.push({
-          action: "click",
-          selector: buildSelector(el),
-          text: label,
-          ts: Date.now(),
-        });
-        // Visual feedback flash so the user sees what's captured.
-        const prev = el.style.outline;
-        el.style.outline = "2px solid #2e9e5b";
-        setTimeout(() => {
-          el.style.outline = prev;
-        }, 400);
-      } catch {
-        /* never let the recorder break the page */
-      }
-    };
-    state.capture = capture;
-    // capture phase + pointerdown so dropdown option handlers (which may
-    // unmount the element on click) still get recorded.
-    document.addEventListener("click", capture, true);
-    return { ok: true };
-  });
+  // A recording is active across navigations: flag it so the tabs.onUpdated
+  // hook re-injects the capture listener after a hard reload (the recorder
+  // lives in the page and dies when the document is replaced).
+  recordingActive = true;
+  try {
+    await chrome.storage.session.set({ [REC_ACTIVE_KEY]: true });
+  } catch {
+    /* session storage is best-effort */
+  }
+  // Seed from any events already captured in THIS recording (a reload of the
+  // recording session must continue the same event stream, not restart it).
+  let seed = [];
+  try {
+    const stored = await chrome.storage.session.get([REC_EVENTS_KEY]);
+    seed = stored[REC_EVENTS_KEY] || [];
+  } catch {
+    /* best-effort */
+  }
+  await injectRecorder(seed);
   return { ok: true, recording: true };
+}
+
+// injectRecorder — (re)install the click/fill/press capture listeners in the
+// agent tab, seeded with the events captured so far. Idempotent: a document
+// that already has the recorder is left alone (onUpdated fires "complete"
+// for background tabs and SPA route changes). Never throws into the caller.
+async function injectRecorder(seed = []) {
+  // MAIN world: capture listeners + the in-page event buffer.
+  await execOnTab(_mainWorldRecorder, [seed]).catch(() => {});
+  // ISOLATED world: bridges captured events to chrome.storage.session so a
+  // hard navigation (which destroys the MAIN-world recorder) still keeps the
+  // events the user already produced.
+  await execOnTab(_isoRecorderBridge, [], "ISOLATED").catch(() => {});
+}
+
+// Main-world recorder installer. MUST be self-contained (serialized into the
+// page): no closures over module state. Builds a CSS selector for an element,
+// captures click + input change + Enter, and mirrors every event to the
+// ISOLATED world via a DOM CustomEvent for session persistence. Typed text is
+// NEVER recorded — the backend templatizes a text-input fill to param:query.
+function _mainWorldRecorder(seed) {
+  const mergeSeed = () => {
+    if (!seed || !seed.length) return;
+    const have = new Set(
+      window.__caRecord.events.map((e) => `${e.ts}|${e.selector}`)
+    );
+    for (const e of seed) {
+      if (!have.has(`${e.ts}|${e.selector}`)) window.__caRecord.events.push(e);
+    }
+  };
+  if (window.__caRecord) {
+    mergeSeed();
+    return { already: true };
+  }
+  window.__caRecord = { events: (seed || []).slice(), capture: null };
+
+  // Build a CSS selector for an element: prefer unique id, then
+  // data-testid/aria-label, then a short tag+class path (max 4 levels).
+  function buildSelector(el) {
+    if (!(el instanceof Element)) return null;
+    if (el.id && document.querySelectorAll(`#${CSS.escape(el.id)}`).length === 1) {
+      return `#${CSS.escape(el.id)}`;
+    }
+    const dt = el.getAttribute("data-testid") || el.getAttribute("data-test");
+    if (dt && document.querySelectorAll(`[data-testid="${dt}"]`).length === 1) {
+      return `[data-testid="${dt}"]`;
+    }
+    const aria = el.getAttribute("aria-label");
+    if (aria && document.querySelectorAll(`[aria-label="${aria}"]`).length === 1) {
+      return `[aria-label="${aria}"]`;
+    }
+    // name+type for form controls
+    if (el.name && document.getElementsByName(el.name).length === 1) {
+      return `${el.tagName.toLowerCase()}[name="${el.name}"]`;
+    }
+    const parts = [];
+    let cur = el;
+    let depth = 0;
+    while (cur && cur instanceof Element && depth < 4) {
+      let part = cur.tagName.toLowerCase();
+      if (cur.id && document.querySelectorAll(`#${CSS.escape(cur.id)}`).length === 1) {
+        parts.unshift(`#${CSS.escape(cur.id)}`);
+        break;
+      }
+      if (cur.className && typeof cur.className === "string" && cur.className.trim()) {
+        const cls = cur.className.trim().split(/\s+/).slice(0, 2);
+        const scoped = cls.map((c) => `.${CSS.escape(c)}`).join("");
+        part += scoped;
+      }
+      // nth-of-type disambiguation among siblings
+      const parent = cur.parentElement;
+      if (parent) {
+        const sameTag = Array.from(parent.children).filter((c) => c.tagName === cur.tagName);
+        if (sameTag.length > 1) {
+          part += `:nth-of-type(${sameTag.indexOf(cur) + 1})`;
+        }
+      }
+      parts.unshift(part);
+      cur = cur.parentElement;
+      depth += 1;
+    }
+    return parts.join(" > ");
+  }
+
+  const push = (event) => {
+    try {
+      window.__caRecord.events.push(event);
+      // Mirror to the ISOLATED world for chrome.storage.session persistence.
+      document.dispatchEvent(
+        new CustomEvent("__caRecordEvent", { detail: event })
+      );
+    } catch {
+      /* never let persistence break the page */
+    }
+  };
+
+  const capture = (ev) => {
+    try {
+      // Only left clicks on real elements; ignore the recorder's own UI.
+      if (ev.button !== 0) return;
+      const el = ev.target;
+      if (!(el instanceof Element)) return;
+      if (el.closest("[data-ca-record-ignore]")) return;
+      const label = (
+        el.getAttribute("aria-label") ||
+        el.getAttribute("title") ||
+        (el.textContent || "").trim().slice(0, 60) ||
+        el.tagName.toLowerCase()
+      );
+      push({
+        action: "click",
+        selector: buildSelector(el),
+        text: label,
+        ts: Date.now(),
+      });
+      // Visual feedback flash so the user sees what's captured.
+      const prev = el.style.outline;
+      el.style.outline = "2px solid #2e9e5b";
+      setTimeout(() => {
+        el.style.outline = prev;
+      }, 400);
+    } catch {
+      /* never let the recorder break the page */
+    }
+  };
+
+  // Typed text is deliberately NOT stored: record the fill (so the step
+  // replays as the search term) but never the literal characters — the
+  // backend converts an input fill to {"param": "query"} on stop.
+  const captureChange = (ev) => {
+    try {
+      const el = ev.target;
+      if (!(el instanceof Element)) return;
+      if (!/^(input|textarea)$/i.test(el.tagName)) return;
+      if (el.closest("[data-ca-record-ignore]")) return;
+      if ((el.getAttribute("type") || "").toLowerCase() === "password") return;
+      push({ action: "fill", selector: buildSelector(el), ts: Date.now() });
+    } catch {
+      /* best-effort */
+    }
+  };
+
+  const captureKeydown = (ev) => {
+    try {
+      if (ev.key !== "Enter") return;
+      const el = ev.target;
+      if (!(el instanceof Element)) return;
+      if (!/^(input|textarea)$/i.test(el.tagName)) return;
+      push({ action: "press", key: "Enter", selector: buildSelector(el), ts: Date.now() });
+    } catch {
+      /* best-effort */
+    }
+  };
+
+  window.__caRecord.capture = capture;
+  window.__caRecord.captureChange = captureChange;
+  window.__caRecord.captureKeydown = captureKeydown;
+  // capture phase so dropdown option handlers (which may unmount the element
+  // on click) still get recorded.
+  document.addEventListener("click", capture, true);
+  document.addEventListener("change", captureChange, true);
+  document.addEventListener("keydown", captureKeydown, true);
+  return { ok: true };
+}
+
+// Isolated-world bridge: persist MAIN-world recorder events to
+// chrome.storage.session so a hard navigation mid-recording keeps them.
+function _isoRecorderBridge() {
+  if (window.__caRecordBridge) return { already: true };
+  window.__caRecordBridge = true;
+  document.addEventListener("__caRecordEvent", (ev) => {
+    try {
+      const event = ev && ev.detail;
+      if (!event) return;
+      chrome.storage.session.get(["caRecordEvents"]).then((s) => {
+        const arr = s.caRecordEvents || [];
+        arr.push(event);
+        chrome.storage.session.set({ caRecordEvents: arr });
+      }).catch(() => {});
+    } catch {
+      /* fire-and-forget: recording must never throw */
+    }
+  });
+  return { ok: true };
 }
 
 // page_state — diagnostic snapshot of the current tab so a failed
@@ -1302,17 +1424,61 @@ async function cmdStopRecord() {
       if (!state) return null;
       const out = state.events.slice();
       if (state.capture) document.removeEventListener("click", state.capture, true);
+      if (state.captureChange)
+        document.removeEventListener("change", state.captureChange, true);
+      if (state.captureKeydown)
+        document.removeEventListener("keydown", state.captureKeydown, true);
       delete window.__caRecord;
       return out;
-    })) || [];
-  // Drop events with no usable selector; collapse rapid duplicate clicks
-  // (double-click on the same target records twice).
+    }).catch(() => null)) || [];
+  // Merge the storage mirror: a hard navigation destroyed the in-page buffer,
+  // so the events from before the reload live ONLY in chrome.storage.session.
+  let stored = [];
+  try {
+    const s = await chrome.storage.session.get([REC_EVENTS_KEY]);
+    stored = s[REC_EVENTS_KEY] || [];
+  } catch {
+    /* best-effort */
+  }
+  const merged = [];
+  const seen = new Set();
+  for (const e of [...stored, ...events]) {
+    if (!e || typeof e !== "object") continue;
+    const key = `${e.ts}|${e.selector}|${e.action}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(e);
+  }
+  merged.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+  // Keep events with a selector (a press without a selector still carries the
+  // key and is replayable; a fill/click without a selector is not).
   const cleaned = [];
-  for (const e of events) {
-    if (!e.selector) continue;
+  for (const e of merged) {
+    const action = e.action || "click";
+    if (action !== "press" && !e.selector) continue;
     const last = cleaned[cleaned.length - 1];
-    if (last && last.selector === e.selector && e.ts - last.ts < 400) continue;
-    cleaned.push({ action: "click", selector: e.selector, text: e.text });
+    // Collapse rapid duplicate clicks (double-click records twice).
+    if (
+      last &&
+      action === "click" &&
+      last.selector === e.selector &&
+      e.ts - last.ts < 400
+    )
+      continue;
+    if (action === "fill") {
+      cleaned.push({ action: "fill", selector: e.selector, ts: e.ts });
+    } else if (action === "press") {
+      cleaned.push({ action: "press", key: e.key || "Enter", selector: e.selector, ts: e.ts });
+    } else {
+      cleaned.push({ action: "click", selector: e.selector, text: e.text, ts: e.ts });
+    }
+  }
+  // Recording is over — clear both storage keys so a later recording starts clean.
+  recordingActive = false;
+  try {
+    await chrome.storage.session.remove([REC_EVENTS_KEY, REC_ACTIVE_KEY]);
+  } catch {
+    /* best-effort */
   }
   return { ok: true, events: cleaned, count: cleaned.length };
 }
@@ -1435,6 +1601,28 @@ chrome.runtime.onMessage.addListener((msg) => {
   }
 });
 
+// Manual recording survives hard navigation: when a page finishes loading
+// while a recording is active, re-inject the recorder seeded with the events
+// already persisted to session storage. The module flag is lost on worker
+// reload, so rehydrate it from chrome.storage.session too. Idempotent — the
+// in-page installer skips a document that already has the recorder.
+chrome.tabs.onUpdated.addListener(async (tabId, info) => {
+  try {
+    if (info.status !== "complete") return;
+    if (tabId !== agentTabId) return;
+    if (!recordingActive) {
+      const s = await chrome.storage.session.get([REC_ACTIVE_KEY]).catch(() => ({}));
+      recordingActive = !!(s && s[REC_ACTIVE_KEY]);
+    }
+    if (!recordingActive) return;
+    const s = await chrome.storage.session.get([REC_EVENTS_KEY]).catch(() => ({}));
+    const seed = (s && s[REC_EVENTS_KEY]) || [];
+    await injectRecorder(seed);
+  } catch {
+    /* re-injection is best-effort — never disturb the recording or the user */
+  }
+});
+
 // A persistent while-loop in the service worker keeps it alive while active,
 // and every fetch wakes it if suspended. Chrome suspends idle MV3 workers
 // after ~30s regardless of pending work, killing the loop — so a
@@ -1446,6 +1634,17 @@ const HEARTBEAT_ALARM = "career-agent-heartbeat";
 
 chrome.runtime.onStartup.addListener(loopGuarded);
 chrome.runtime.onInstalled.addListener(loopGuarded);
+
+// The ISOLATED-world recorder bridge (a content-script context) needs to
+// write recording events to chrome.storage.session — that API is gated to
+// trusted contexts by default, so open it to content scripts. Idempotent.
+try {
+  chrome.storage.session.setAccessLevel({
+    accessLevel: "TRUSTED_AND_UNTRUSTED_CONTEXTS",
+  });
+} catch {
+  /* older Chrome — the recorder still works in-page, just not across reloads */
+}
 
 chrome.alarms.create(HEARTBEAT_ALARM, { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
