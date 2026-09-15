@@ -44,9 +44,25 @@ function setBadge(on) {
 
 // --- command execution (unchanged semantics) ------------------------------
 
-async function ensureTab(url) {
-  // Always open agent navigation in a NEW background tab — never hijack the
-  // user's current tab (it may be the app itself, or anything else).
+// Bring the agent tab (and its window) to the foreground. Used when the agent
+// needs the USER to interact — e.g. Re-login / session-expiry. Never throws.
+async function activateTab(tabId) {
+  try {
+    await chrome.tabs.update(tabId, { active: true });
+    const t = await chrome.tabs.get(tabId);
+    if (t && t.windowId !== undefined) {
+      await chrome.windows.update(t.windowId, { focused: true });
+    }
+  } catch {
+    /* focus is best-effort — never fail the command on it */
+  }
+}
+
+async function ensureTab(url, { activate = false } = {}) {
+  // Open agent navigation in the agent-owned tab — never hijack the user's
+  // current tab (it may be the app itself, or anything else). Background by
+  // default so scraping/search flows don't steal focus; callers that need the
+  // user to see the page (Re-login) pass { activate: true }.
   // Reuse the existing agent tab if it's still open (one workspace per agent).
   if (agentTabId !== null) {
     try {
@@ -54,15 +70,17 @@ async function ensureTab(url) {
       if (t && t.id !== undefined) {
         await chrome.tabs.update(agentTabId, { url });
         await waitForComplete(agentTabId);
+        if (activate) await activateTab(agentTabId);
         return agentTabId;
       }
     } catch {
       agentTabId = null; // tab was closed — fall through and create a new one
     }
   }
-  const tab = await chrome.tabs.create({ active: false, url });
+  const tab = await chrome.tabs.create({ active: activate, url });
   agentTabId = tab.id;
   await waitForComplete(tab.id);
+  if (activate) await activateTab(tab.id);
   return tab.id;
 }
 
@@ -129,9 +147,9 @@ async function waitForPageReady(timeoutMs = 15000) {
   return false; // proceed anyway — caller steps have their own guards
 }
 
-async function cmdNavigate(url) {
+async function cmdNavigate(url, { activate = false } = {}) {
   if (!/^https?:\/\//i.test(url)) url = "https://" + url;
-  await ensureTab(url);
+  await ensureTab(url, { activate });
   await waitForPageReady(); // replaces the blind 2.5s SPA beat
   return { url };
 }
@@ -1261,7 +1279,7 @@ async function cmdStopRecord() {
 async function executeCommand(cmd) {
   const { action, params = {} } = cmd;
   switch (action) {
-    case "navigate": return cmdNavigate(params.url);
+    case "navigate": return cmdNavigate(params.url, { activate: params.activate || false });
     case "fill": return cmdFill(params.selector, params.text);
     case "click": return cmdClick(params.selector);
     case "press": return cmdPress(params.key || "Enter");

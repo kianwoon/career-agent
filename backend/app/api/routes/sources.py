@@ -286,8 +286,14 @@ async def agent_login(source_id: str, db: AsyncSession = Depends(get_db)) -> dic
     login_url = source.base_url
     if "linkedin.com" in source.domain:
         login_url = "https://www.linkedin.com/login"
+    elif "mycareersfuture.gov.sg" in source.domain:
+        login_url = "https://www.mycareersfuture.gov.sg/sign-in"
     try:
-        await agent_registry.dispatch("navigate", {"url": login_url}, timeout_s=30)
+        # activate=True brings the agent tab to the foreground so the user
+        # actually sees the login page they're being asked to sign in on.
+        await agent_registry.dispatch(
+            "navigate", {"url": login_url, "activate": True}, timeout_s=30
+        )
     except RuntimeError as exc:
         raise HTTPException(502, str(exc))
     return {"ok": True, "login_url": login_url}
