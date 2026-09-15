@@ -14,6 +14,9 @@ export interface SearchRequest {
   location?: string;
   /** Source IDs to include; empty/undefined = all enabled sources. */
   sources?: string[];
+  /** Use the connected browser-extension agent when available. false forces
+   * server-side adapters (user paused the agent). Default true. */
+  use_agent?: boolean;
   /** Structured sourcing plan (candidate mode) — mirrors the external
    * analysis panel: boolean queries, exclude terms, salary, employment type. */
   plan?: {
@@ -428,11 +431,12 @@ async function getJson<T>(url: string): Promise<T> {
 export async function startSearch(request: SearchRequest): Promise<TaskStatus> {
   const body =
     request.mode === "jobs"
-      ? { query: request.query, location: request.location, sources: request.sources }
+      ? { query: request.query, location: request.location, sources: request.sources, use_agent: request.use_agent }
       : {
           query: request.query,
           location: request.location,
           sources: request.sources,
+          use_agent: request.use_agent,
           ...(request.plan ?? {}),
         };
   const base = await resolveApiBase();

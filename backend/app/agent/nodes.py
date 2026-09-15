@@ -259,6 +259,7 @@ async def _search_candidates_via_flow(
     excludes: list[str] | None = None,
     location: str | None = None,
     deadline: float | None = None,
+    use_agent: bool = True,
 ) -> dict[str, Any]:
     """Run a candidate search on a custom source via its recorded flow.
 
@@ -315,7 +316,7 @@ async def _search_candidates_via_flow(
     from app.services.agent_relay import agent_registry
 
     results: list[dict[str, Any]] = []
-    if agent_registry.connected:
+    if use_agent and agent_registry.connected:
         leg_counts: list[str] = []
         needs_human_leg: str | None = None
         for q in flow_queries:
@@ -514,6 +515,9 @@ class AgentState(TypedDict, total=False):
     plan_detail: str | None
     source_ids: list[str] | None
     source_issues: list[dict[str, str]]
+    # User intent: may searches use the connected browser-extension agent?
+    # Defaults True (backward-compatible). False forces server-side adapters.
+    use_agent: bool
 
 
 def _log(state: AgentState, step: str, detail: str | None = None, url: str | None = None) -> list[ActivityEvent]:
@@ -577,6 +581,7 @@ async def _safe_search(
     fn: Any,
     query: str,
     location: str | None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     """Call a search adapter and normalize failures into the adapter contract.
 
@@ -585,7 +590,7 @@ async def _safe_search(
     takes down the other.
     """
     try:
-        result = await fn(query, location)
+        result = await fn(query, location, **kwargs)
         return result or {}
     except Exception as exc:
         return {
@@ -652,7 +657,7 @@ async def _search_custom_sources(
 
         results: list[dict[str, Any]] | None = None
         reason: str | None = None
-        if agent_registry.connected:
+        if state.get("use_agent", True) and agent_registry.connected:
             try:
                 data = await agent_registry.dispatch(
                     "run_flow",
@@ -730,7 +735,7 @@ async def _search_custom_sources(
     return raw, ok, failed, issues
 
 
-async def _no_browser_session_available() -> bool:
+async def _no_browser_session_available(use_agent: bool = True) -> bool:
     """Preflight: would any candidate adapter have a browser to work with?
 
     Fast-fail check for candidate searches: when there is no connected
@@ -738,13 +743,17 @@ async def _no_browser_session_available() -> bool:
     every adapter can only end in "No authenticated browser session" — so
     the caller can complete the task in seconds instead of grinding through
     a multi-minute pipeline whose per-source timeouts sum up.
+
+    `use_agent=False` (user paused the browser agent) means a connected
+    extension does NOT count as an available browser — the search will run
+    server-side, so the CDP/session checks alone decide.
     """
     import httpx
 
     from app.services.agent_relay import agent_registry
     from app.services.linkedin import BRAVE_CDP_URL
 
-    if agent_registry.connected:
+    if use_agent and agent_registry.connected:
         return False
     try:
         async with httpx.AsyncClient(timeout=3.0) as client:
@@ -783,6 +792,7 @@ async def run_search(state: AgentState) -> AgentState:
     query = state.get("query", "")
     location = state.get("location")
     task_type = state.get("type")
+    use_agent = state.get("use_agent", True)
 
     # -------------------------------------------------------
     # Custom user-registered sources (templatized flows)
@@ -827,7 +837,7 @@ async def run_search(state: AgentState) -> AgentState:
         fj_on = "fastjobs.io" not in disabled_domains
 
         li_result, mcf_result, fj_result = await asyncio.gather(
-            _safe_search(search_linkedin_jobs, query, location) if li_on else _noop_search("disabled"),
+            _safe_search(search_linkedin_jobs, query, location, use_agent=use_agent) if li_on else _noop_search("disabled"),
             _safe_search(search_mycareersfuture_jobs, query, location) if mcf_on else _noop_search("disabled"),
             _safe_search(search_fastjobs_jobs, query, location) if fj_on else _noop_search("disabled"),
         )
@@ -914,7 +924,7 @@ async def run_search(state: AgentState) -> AgentState:
         # browser session". Complete immediately with an actionable message
         # instead of burning the multi-minute pipeline (TASK_HARD_TIMEOUT_S
         # remains the backstop for genuinely slow-but-working runs).
-        if await _no_browser_session_available():
+        if await _no_browser_session_available(use_agent):
             return {
                 **state,
                 "raw_results": [],
@@ -1024,6 +1034,7 @@ async def run_search(state: AgentState) -> AgentState:
                             excludes=excludes or None,
                             location=location,
                             deadline=deadline,
+                            use_agent=use_agent,
                         )
                     else:
                         result = await adapter(
@@ -1031,6 +1042,7 @@ async def run_search(state: AgentState) -> AgentState:
                             excludes=excludes or None,
                             location=location,
                             deadline=deadline,
+                            use_agent=use_agent,
                         )
                 except BrowserError as exc:
                     offline_issues.append({"source": platform, "reason": str(exc)})

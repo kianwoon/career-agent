@@ -52,6 +52,13 @@ class JobSearchRequest(BaseModel):
         default=None,
         description="Source IDs to include; None/empty = all enabled sources (built-in + custom)",
     )
+    use_agent: bool = Field(
+        default=True,
+        description=(
+            "Run searches through the connected browser-extension agent when one "
+            "is available. False forces server-side adapters (user paused the agent)."
+        ),
+    )
 
 
 # Hard caps on sourcing-plan size — each query is a separate paced page
@@ -115,6 +122,13 @@ class CandidateSearchRequest(BaseModel):
     sources: list[str] | None = Field(
         default=None,
         description="Source IDs to include; None/empty = all enabled sources (built-in + custom)",
+    )
+    use_agent: bool = Field(
+        default=True,
+        description=(
+            "Run searches through the connected browser-extension agent when one "
+            "is available. False forces server-side adapters (user paused the agent)."
+        ),
     )
 
     def plan_queries(self) -> list[str]:

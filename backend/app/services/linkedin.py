@@ -363,7 +363,9 @@ async def _extract_jobs_with_details(
     return enriched
 
 
-async def search_linkedin_jobs(query: str, location: str | None = None) -> dict[str, Any]:
+async def search_linkedin_jobs(
+    query: str, location: str | None = None, use_agent: bool = True
+) -> dict[str, Any]:
     """Run a LinkedIn job search through an authenticated browser session.
 
     Uses the captured/replayed session (fresh Chromium + stored cookies) when
@@ -381,7 +383,7 @@ async def search_linkedin_jobs(query: str, location: str | None = None) -> dict[
     # full search + detail opens, atomic in the agent tab.
     from app.services.agent_relay import agent_registry
 
-    if agent_registry.connected:
+    if use_agent and agent_registry.connected:
         cached = query_cache.get(query, location, source="linkedin")
         if cached is not None:
             logger.info("Cache hit for %r (location=%r) — %d jobs", query, location, len(cached))

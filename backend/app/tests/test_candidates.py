@@ -343,7 +343,7 @@ async def test_budget_exhaustion_returns_partial_results(monkeypatch):
 
     monkeypatch.setattr(nodes_mod, "SEARCH_BUDGET_S", 0.0)
 
-    async def fake_no_browser():
+    async def fake_no_browser(*_a, **_k):
         return False
 
     async def fake_flow_platforms():
@@ -390,7 +390,7 @@ async def test_midloop_browsererror_keeps_partial_results(monkeypatch):
     import app.agent.nodes as nodes_mod
     from app.services.browser import BrowserError
 
-    async def fake_no_browser():
+    async def fake_no_browser(*_a, **_k):
         return False
 
     async def fake_flow_platforms():
@@ -445,7 +445,7 @@ async def test_offline_only_still_pauses_with_actionable_message(monkeypatch):
     import app.agent.nodes as nodes_mod
     from app.services.browser import BrowserError
 
-    async def fake_no_browser():
+    async def fake_no_browser(*_a, **_k):
         return False
 
     async def fake_flow_platforms():

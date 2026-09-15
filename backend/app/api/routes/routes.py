@@ -59,8 +59,14 @@ async def start_job_search(
     db: AsyncSession = Depends(get_db),
 ) -> TaskStatusResponse:
     """Create and start a job search task."""
-    return await _start_task(db, SearchType.jobs, query=req.query, location=req.location, source_ids=req.sources)
-
+    return await _start_task(
+        db,
+        SearchType.jobs,
+        query=req.query,
+        location=req.location,
+        source_ids=req.sources,
+        use_agent=req.use_agent,
+    )
 
 @router.post("/search/candidates", status_code=201)
 async def start_candidate_search(
@@ -141,6 +147,7 @@ async def start_candidate_search(
         query=req.query or " | ".join(queries),
         location=req.location,
         source_ids=req.sources,
+        use_agent=req.use_agent,
         plan={
             "queries": queries,
             "exclude": [
@@ -196,6 +203,7 @@ async def _start_task(
     location: str | None = None,
     source_ids: list[str] | None = None,
     plan: dict | None = None,
+    use_agent: bool = True,
 ) -> TaskStatusResponse:
     task = SearchTask(
         id=str(uuid.uuid4()),
@@ -212,7 +220,7 @@ async def _start_task(
     # task after TASK_HARD_TIMEOUT_S so a hung browser/Playwright call can
     # never leave a task "running" forever.
     asyncio.create_task(
-        _run_task_with_watchdog(task.id, task_type, query, location, source_ids, plan)
+        _run_task_with_watchdog(task.id, task_type, query, location, source_ids, plan, use_agent)
     )
     return TaskStatusResponse(
         task_id=task.id,
@@ -236,6 +244,7 @@ async def _run_task_with_watchdog(
     location: str | None,
     source_ids: list[str] | None = None,
     plan: dict | None = None,
+    use_agent: bool = True,
 ) -> None:
     """Run _run_task with a hard deadline.
 
@@ -246,7 +255,7 @@ async def _run_task_with_watchdog(
     """
     try:
         await asyncio.wait_for(
-            _run_task(task_id, task_type, query, location, source_ids, plan),
+            _run_task(task_id, task_type, query, location, source_ids, plan, use_agent),
             timeout=TASK_HARD_TIMEOUT_S,
         )
     except TimeoutError:
@@ -295,6 +304,7 @@ async def _run_task(
     location: str | None,
     source_ids: list[str] | None = None,
     plan: dict | None = None,
+    use_agent: bool = True,
 ) -> None:
     """Execute the LangGraph pipeline for a task in the background."""
     from app.db import async_session as _session_factory
@@ -323,6 +333,7 @@ async def _run_task(
             "status": TaskStatus.running,
             "profile": profile,
             "source_ids": source_ids,
+            "use_agent": use_agent,
         }
         if plan:
             initial["plan"] = plan

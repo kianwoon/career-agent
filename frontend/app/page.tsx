@@ -127,6 +127,12 @@ export default function Home() {
   const [customSources, setCustomSources] = useState<SourceView[]>([]);
   // Browser-extension agent connection (runs searches in the user's browser).
   const [agentConnected, setAgentConnected] = useState(false);
+  // User intent: should searches use the browser agent when connected?
+  // Separate from connection truth — the extension can be connected but
+  // paused (server-side fallback). Persisted so the choice survives reloads.
+  const [agentEnabled, setAgentEnabled] = useState(
+    () => (typeof window === "undefined" ? true : localStorage.getItem("agentEnabled") !== "0")
+  );
   // Onboarding panel shown when the agent is off and the user clicks the chip.
   const [showConnectAgent, setShowConnectAgent] = useState(false);
   // Source awaiting "I'm signed in" confirmation during agent login.
@@ -748,6 +754,9 @@ export default function Home() {
         // Enabled/disabled is persisted per source (PATCH /sources/{id});
         // the backend runs all enabled sources.
         sources: undefined,
+        // Honor the user's menu-bar intent: when paused, the backend skips
+        // the connected extension and runs server-side adapters instead.
+        use_agent: agentEnabled,
         plan: hasPlan
           ? {
               queries: queries.length > 0 ? queries : undefined,
@@ -1258,20 +1267,23 @@ export default function Home() {
               <span className="sources-label">Sources:</span>
               <button
                 type="button"
-                className={`agent-chip ${agentConnected ? "on" : "off"}`}
+                className={`agent-chip ${agentConnected && agentEnabled ? "on" : "off"}`}
                 title={
-                  agentConnected
-                    ? "Browser extension connected — searches run in your browser (no blocks)"
-                    : "Extension not connected — click for setup steps"
+                  agentConnected && agentEnabled
+                    ? "Browser extension connected — searches run in your browser (no blocks). Click to manage."
+                    : agentConnected && !agentEnabled
+                      ? "Browser agent paused — searches run server-side. Click to resume."
+                      : "Extension not connected — click for setup steps"
                 }
-                onClick={() => {
-                  if (!agentConnected) setShowConnectAgent((v) => !v);
-                  else setShowConnectAgent(false);
-                }}
+                onClick={() => setShowConnectAgent((v) => !v)}
                 aria-expanded={showConnectAgent}
               >
                 <span className="agent-dot" aria-hidden="true" />
-                {agentConnected ? "Browser agent: ON" : "Browser agent: off"}
+                {agentConnected && agentEnabled
+                  ? "Browser agent: ON"
+                  : agentConnected
+                    ? "Browser agent: paused"
+                    : "Browser agent: off"}
               </button>
               {!agentConnected && !showConnectAgent && (
                 <button type="button" className="link-btn" onClick={() => setShowConnectAgent(true)}>
@@ -1283,8 +1295,20 @@ export default function Home() {
               )}
             </div>
 
-            {showConnectAgent && !agentConnected && (
-              <ConnectBrowserAgent onClose={() => setShowConnectAgent(false)} />
+            {showConnectAgent && (
+              <ConnectBrowserAgent
+                connected={agentConnected}
+                enabled={agentEnabled}
+                onToggleEnabled={(next) => {
+                  setAgentEnabled(next);
+                  try {
+                    localStorage.setItem("agentEnabled", next ? "1" : "0");
+                  } catch {
+                    /* private mode / storage disabled — intent stays in-memory */
+                  }
+                }}
+                onClose={() => setShowConnectAgent(false)}
+              />
             )}
 
             {customSources.length === 0 && (
@@ -2239,7 +2263,17 @@ function SourceAvatar({ name, domain }: { name: string; domain: string }) {
  * extension — this explains install + config and auto-detects the API URL
  * they should paste into the extension popup.
  */
-function ConnectBrowserAgent({ onClose }: { onClose: () => void }) {
+function ConnectBrowserAgent({
+  connected,
+  enabled,
+  onToggleEnabled,
+  onClose,
+}: {
+  connected: boolean;
+  enabled: boolean;
+  onToggleEnabled: (next: boolean) => void;
+  onClose: () => void;
+}) {
   const [apiUrl, setApiUrl] = useState("…");
   const [storeUrl, setStoreUrl] = useState("");
   useEffect(() => {
@@ -2257,6 +2291,25 @@ function ConnectBrowserAgent({ onClose }: { onClose: () => void }) {
       <p className="connect-agent-why">
         Without it, searches run server-side and sites like LinkedIn usually block them.
       </p>
+      {connected && (
+        <div className="connect-agent-toggle">
+          {enabled ? (
+            <>
+              <span className="ok">Browser agent is ON — searches run in your browser.</span>
+              <button type="button" className="btn small" onClick={() => onToggleEnabled(false)}>
+                Pause agent (use server)
+              </button>
+            </>
+          ) : (
+            <>
+              <span>Browser agent is paused — searches run server-side.</span>
+              <button type="button" className="btn small primary" onClick={() => onToggleEnabled(true)}>
+                Resume agent
+              </button>
+            </>
+          )}
+        </div>
+      )}
       <ol className="connect-agent-steps">
         <li>
           <strong>Install the extension</strong> in Chrome:

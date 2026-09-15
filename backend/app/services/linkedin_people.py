@@ -733,6 +733,7 @@ async def search_linkedin_people(
     excludes: list[str] | None = None,
     location: str | None = None,
     deadline: float | None = None,
+    use_agent: bool = True,
 ) -> dict[str, Any]:
     """Run a sourcing plan against LinkedIn people search.
 
@@ -776,7 +777,7 @@ async def search_linkedin_people(
     # = one atomic plan execution in the agent tab.
     from app.services.agent_relay import agent_registry
 
-    if agent_registry.connected:
+    if use_agent and agent_registry.connected:
         effective_queries = [_apply_excludes(q, excludes) for q in queries]
         # LinkedIn quirk: NOT clauses are capped at MAX_NOT_TERMS (5+ terms
         # return zero results), so the tail excludes are NOT in the query.

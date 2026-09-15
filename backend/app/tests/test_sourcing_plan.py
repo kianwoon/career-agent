@@ -622,7 +622,7 @@ def test_run_search_broken_flow_reports_source_issue(monkeypatch):
     async def fake_all_sources():
         return {"brokenboard"}
 
-    async def fake_via_flow(source_name, queries, excludes=None, location=None, deadline=None):
+    async def fake_via_flow(source_name, queries, excludes=None, location=None, deadline=None, **_kwargs):
         assert source_name == "brokenboard"
         return {
             "raw_results": [],
@@ -639,12 +639,12 @@ def test_run_search_broken_flow_reports_source_issue(monkeypatch):
     async def fake_custom_sources(state):
         return [], [], [], []
 
-    async def _async_false():
+    async def _async_false(*_a, **_k):
         return False
 
     monkeypatch.setattr(nodes_mod, "_search_custom_sources", fake_custom_sources)
     monkeypatch.setattr(
-        nodes_mod, "_no_browser_session_available", lambda: _async_false()
+        nodes_mod, "_no_browser_session_available", lambda *_a, **_k: _async_false()
     )
 
     state = {
@@ -744,21 +744,21 @@ def test_run_search_fastjobs_dispatches_via_flow(monkeypatch):
     async def fake_all_sources():
         return {"fastjob"}
 
-    async def fake_via_flow(source_name, queries, excludes=None, location=None, deadline=None):
+    async def fake_via_flow(source_name, queries, excludes=None, location=None, deadline=None, **_kwargs):
         seen.append(source_name)
         return {"raw_results": [], "needs_human": False}
 
     async def fake_custom_sources(state):
         return [], [], [], []
 
-    async def _async_false():
+    async def _async_false(*_a, **_k):
         return False
 
     monkeypatch.setattr(nodes_mod, "_flow_platforms", fake_flow_platforms)
     monkeypatch.setattr(nodes_mod, "_candidate_source_platforms", fake_all_sources)
     monkeypatch.setattr(nodes_mod, "_search_candidates_via_flow", fake_via_flow)
     monkeypatch.setattr(nodes_mod, "_search_custom_sources", fake_custom_sources)
-    monkeypatch.setattr(nodes_mod, "_no_browser_session_available", lambda: _async_false())
+    monkeypatch.setattr(nodes_mod, "_no_browser_session_available", lambda *_a, **_k: _async_false())
 
     state = {
         "type": nodes_mod.SearchType.candidates,
