@@ -78,17 +78,6 @@ _PROFILES: dict[str, SiteProfile] = {
         candidate_entry_url="https://employer.fastjobs.sg/p/talent/search/?coyid=22091",
         notes="Cloudflare-protected; requires the extension's real browser session.",
     ),
-    "fastjobs.io": SiteProfile(
-        auth_model="portal",
-        cloudflare_protected=True,
-        # Same platform/employer portal as fastjobs.sg; regional TLDs still
-        # authenticate against employer.fastjobs.sg. The coyid is resolved at
-        # record time, so the template default is only a starting point.
-        login_url_patterns=("site/login", "session expiring"),
-        session_expired_markers=("session has expired due to inactivity", "session expiring"),
-        candidate_entry_url="https://employer.fastjobs.sg/p/talent/search/?coyid=22091",
-        notes="FastJobs alternate TLD — same platform, CF-protected.",
-    ),
     "employer.seek.com": SiteProfile(
         auth_model="portal",
         cloudflare_protected=False,

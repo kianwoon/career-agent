@@ -2239,7 +2239,7 @@ function SourceAvatar({ name, domain }: { name: string; domain: string }) {
       {showImg ? (
         /* DuckDuckGo's icon service sends permissive CORS headers (Google's
            s2/favicons does not — every load logs a CORS error + a 404 for
-           missing favicons like fastjobs.io). Same fallback applies. */
+           missing favicons like fastjobs.sg). Same fallback applies. */
         /* eslint-disable-next-line @next/next/no-img-element */
         <img
           className="source-card-favicon"

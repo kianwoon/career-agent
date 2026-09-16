@@ -200,7 +200,7 @@ def _is_mcf_candidates(source: Source, flow_type: str | None) -> bool:
 
 
 def _is_fastjobs(source_or_domain: Any) -> bool:
-    """True for any FastJobs TLD (fastjobs.sg, fastjobs.io, …).
+    """True for any FastJobs TLD (fastjobs.sg, regional fastjobs.* hosts, …).
 
     FastJobs serves regional accounts from the same employer portal
     (employer.fastjobs.sg), so host/login derivation must be tolerant of the

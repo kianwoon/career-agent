@@ -40,16 +40,16 @@ def test_candidate_entry_url_fastjobs():
     assert "coyid=22091" in FASTJOBS_TALENT_SEARCH_URL
 
 
-def test_candidate_entry_url_fastjobs_io():
+def test_candidate_entry_url_fastjobs_regional_tld():
     """Regional TLD resolves the employer talent-search entry, not base_url."""
-    src = _FakeSource("fastjobs.io", "https://www.fastjobs.io/")
+    src = _FakeSource("fastjobs.sg", "https://www.fastjobs.sg/")
     assert _candidate_entry_url(src) == FASTJOBS_TALENT_SEARCH_URL
     assert "employer.fastjobs.sg" in _candidate_entry_url(src)
 
 
-def test_session_capture_urls_fastjobs_io():
-    """.io captures both its base host and the employer host."""
-    src = _FakeSource("fastjobs.io", "https://www.fastjobs.io/")
+def test_session_capture_urls_fastjobs_regional_tld():
+    """FastJobs captures both its base host and the employer host."""
+    src = _FakeSource("fastjobs.sg", "https://www.fastjobs.sg/")
     urls = _session_capture_urls(src)
     assert src.base_url in urls
     assert FASTJOBS_TALENT_SEARCH_URL in urls

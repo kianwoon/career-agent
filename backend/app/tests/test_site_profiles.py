@@ -46,17 +46,17 @@ def test_fastjobs_field_values():
     assert "coyid=22091" in prof.candidate_entry_url
 
 
-def test_fastjobs_io_full_parity():
-    """Regional TLD must resolve the same employer-portal capabilities."""
+def test_fastjobs_employer_host_full_parity():
+    """The employer host must resolve the same employer-portal capabilities."""
     sg = profile_for("fastjobs.sg")
-    io = profile_for("fastjobs.io")
-    assert io is not None
-    assert io.auth_model == "portal"
-    assert io.cloudflare_protected is True
-    assert io.candidate_entry_url == sg.candidate_entry_url
-    assert io.candidate_entry_url.startswith("https://employer.fastjobs.sg/")
-    assert io.login_url_patterns == sg.login_url_patterns
-    assert io.session_expired_markers == sg.session_expired_markers
+    emp = profile_for("employer.fastjobs.sg")
+    assert emp is not None
+    assert emp.auth_model == "portal"
+    assert emp.cloudflare_protected is True
+    assert emp.candidate_entry_url == sg.candidate_entry_url
+    assert emp.candidate_entry_url.startswith("https://employer.fastjobs.sg/")
+    assert emp.login_url_patterns == sg.login_url_patterns
+    assert emp.session_expired_markers == sg.session_expired_markers
 
 
 def test_mcf_field_values():

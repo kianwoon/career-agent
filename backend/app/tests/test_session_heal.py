@@ -31,13 +31,13 @@ class _FakeSource:
 
 
 def test_prepare_fastjobs_keeps_employer_drops_cloudflare():
-    """fastjobs.io keeps employer.fastjobs.sg cookies and drops CF cookies
+    """fastjobs.sg keeps employer.fastjobs.sg cookies and drops CF cookies
     (profile is cloudflare_protected), and computes the earliest expiry."""
-    src = _FakeSource("fastjobs.io", profile=None)  # builtin .io profile is CF
+    src = _FakeSource("fastjobs.sg", profile=None)  # builtin profile is CF-protected
     cookies = [
-        {"name": "auth", "domain": ".fastjobs.io", "expires": 1_800_000_000},
+        {"name": "auth", "domain": ".fastjobs.sg", "expires": 1_800_000_000},
         {"name": "employer_sess", "domain": "employer.fastjobs.sg", "expires": 1_700_000_000},
-        {"name": "cf_clearance", "domain": ".fastjobs.io", "expires": 1_900_000_000},
+        {"name": "cf_clearance", "domain": ".fastjobs.sg", "expires": 1_900_000_000},
         {"name": "__cf_bm", "domain": ".fastjobs.sg", "expires": 1_900_000_000},
         {"name": "unrelated", "domain": ".example.com", "expires": 1_800_000_000},
     ]
@@ -144,13 +144,13 @@ async def test_self_heal_stores_cookies(monkeypatch):
 
     stale = datetime.now(UTC) - timedelta(hours=30)
     src = _FakeSource(
-        "fastjobs.io",
+        "fastjobs.sg",
         profile=None,
         session_state="old-blob",
         captured_at=stale,
         expires_at=None,
     )
-    fake = _FakeRegistry(cookies=[{"name": "a", "domain": ".fastjobs.io", "expires": 1_900_000_000}])
+    fake = _FakeRegistry(cookies=[{"name": "a", "domain": ".fastjobs.sg", "expires": 1_900_000_000}])
     monkeypatch.setattr("app.services.agent_relay.agent_registry", fake, raising=False)
     db = _FakeDb()
     healed = await self_heal_source_session(src, db, "https://employer.fastjobs.sg/p/talent/search/")
@@ -166,7 +166,7 @@ async def test_self_heal_stores_cookies(monkeypatch):
 async def test_self_heal_relay_unavailable_proceeds(monkeypatch):
     """RuntimeError from the relay is swallowed; session unchanged."""
     src = _FakeSource(
-        "fastjobs.io",
+        "fastjobs.sg",
         profile=None,
         session_state="old-blob",
         captured_at=datetime.now(UTC) - timedelta(hours=30),
@@ -184,7 +184,7 @@ async def test_self_heal_relay_unavailable_proceeds(monkeypatch):
 async def test_self_heal_empty_cookies_proceeds(monkeypatch):
     """An empty capture leaves the stored session untouched (no false flip)."""
     src = _FakeSource(
-        "fastjobs.io",
+        "fastjobs.sg",
         profile=None,
         session_state="old-blob",
         captured_at=datetime.now(UTC) - timedelta(hours=30),
@@ -202,13 +202,13 @@ async def test_self_heal_empty_cookies_proceeds(monkeypatch):
 async def test_self_heal_skips_fresh_session(monkeypatch):
     """A fresh session is never re-captured (no relay call)."""
     src = _FakeSource(
-        "fastjobs.io",
+        "fastjobs.sg",
         profile=None,
         session_state="blob",
         captured_at=datetime.now(UTC),
         expires_at=datetime.now(UTC) + timedelta(days=10),
     )
-    fake = _FakeRegistry(cookies=[{"name": "a", "domain": ".fastjobs.io"}])
+    fake = _FakeRegistry(cookies=[{"name": "a", "domain": ".fastjobs.sg"}])
     monkeypatch.setattr("app.services.agent_relay.agent_registry", fake, raising=False)
     db = _FakeDb()
     healed = await self_heal_source_session(src, db, "https://employer.fastjobs.sg/")
