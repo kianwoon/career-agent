@@ -25,6 +25,10 @@ from app.models.schemas import (
     WizardStartResponse,
 )
 from app.services.encryption import encrypt_session_state
+from app.services.session import (
+    prepare_source_cookies,
+    self_heal_source_session,
+)
 from app.services.site_probe import probe_site
 from app.services.site_profiles import profile_for_source
 from app.services.source_flows import (
@@ -460,6 +464,24 @@ class AgentRecordStartRequest(BaseModel):
     flow_type: str = Field(default="find_jobs", description="find_jobs or find_candidates")
 
 
+def _store_agent_cookies(
+    source: Source, cookies: list[dict[str, Any]]
+) -> datetime | None:
+    """Filter/expiry-stamp extension cookies onto a source row (no commit).
+
+    Shared by both /agent_session endpoints and the pre-search self-heal path so
+    every capture writes the same filtered+stripped blob plus captured_at and the
+    earliest cookie expiry. Returns the computed expires_at. Caller commits.
+    """
+    filtered, expires_at = prepare_source_cookies(cookies, source)
+    source.session_state = encrypt_session_state(
+        json.dumps({"cookies": filtered, "origins": []})
+    )
+    source.captured_at = datetime.utcnow()
+    source.expires_at = expires_at
+    return expires_at
+
+
 @router.post("/{source_id}/agent_session", response_model=SourceView)
 async def agent_session(
     source_id: str, req: AgentSessionPayload, db: AsyncSession = Depends(get_db)
@@ -474,14 +496,10 @@ async def agent_session(
         # An empty capture must not flip has_session true (false positive).
         source.session_state = None
         source.captured_at = None
+        source.expires_at = None
         await db.commit()
         raise HTTPException(422, "No cookies captured — sign in to the site first")
-    storage_state = {
-        "cookies": req.cookies,
-        "origins": [],
-    }
-    source.session_state = encrypt_session_state(json.dumps(storage_state))
-    source.captured_at = datetime.utcnow()
+    _store_agent_cookies(source, req.cookies)
     await db.commit()
     flows = (
         await db.execute(select(SourceFlow).where(SourceFlow.source_id == source.id))
@@ -515,11 +533,10 @@ async def agent_session_store(
         # An empty capture must not flip has_session true (false positive).
         source.session_state = None
         source.captured_at = None
+        source.expires_at = None
         await db.commit()
         raise HTTPException(422, "No cookies captured — sign in to the site first")
-    storage_state = {"cookies": req.cookies, "origins": []}
-    source.session_state = encrypt_session_state(json.dumps(storage_state))
-    source.captured_at = datetime.utcnow()
+    _store_agent_cookies(source, req.cookies)
     await db.commit()
     flows = (
         await db.execute(select(SourceFlow).where(SourceFlow.source_id == source.id))
@@ -1516,6 +1533,17 @@ async def test_flow(
     flow = await db.get(SourceFlow, flow_id)
     if flow is None or flow.source_id != source_id:
         raise HTTPException(404, "Flow not found")
+
+    # Pre-run self-heal: a stale stored session would bounce the flow to a
+    # login wall. Best-effort re-capture via the extension relay before we
+    # spend the run (never fails the test — existing wall handling still
+    # applies downstream).
+    entry_url = (
+        _candidate_entry_url(source)
+        if flow.flow_type == "find_candidates"
+        else source.base_url
+    )
+    await self_heal_source_session(source, db, entry_url)
 
     result = await execute_flow(
         base_url=source.base_url,

@@ -24,6 +24,7 @@ from typing import Any
 from app.models.orm import BrowserSession
 from app.services.encryption import decrypt_session_state, encrypt_session_state
 from app.services.proxy import proxy_config
+from app.services.site_profiles import profile_for_source
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +200,227 @@ def _earliest_expiry(state: dict) -> datetime | None:
         return datetime.fromtimestamp(earliest, tz=UTC)
     except (ValueError, OSError):
         return None
+
+
+# ---------------------------------------------------------------------------
+# Extension cookie capture helpers (shared by the /agent_session endpoints
+# and the pre-search self-heal path).
+# ---------------------------------------------------------------------------
+
+# Cloudflare clearance/challenge cookies are bound to the issuing host + client
+# and MUST NOT be replayed by a different browser (server-side Playwright): the
+# CF edge rejects a mismatched clearance and can flag the session. Sites whose
+# profile is cloudflare_protected have these stripped before storage.
+_CF_COOKIE_PREFIXES = ("__cf", "cf_clearance", "cf_bm")
+
+# A stored source session is considered STALE (and worth re-capturing via the
+# extension relay) when it is missing, older than this age, or within this
+# lead of its earliest cookie expiry.
+SESSION_MAX_AGE_H = 24.0
+SESSION_EXPIRY_LEAD_H = 12.0
+
+
+def _is_cloudflare_cookie(name: str) -> bool:
+    """True for a Cloudflare clearance/challenge cookie name."""
+    n = (name or "").lower()
+    return n.startswith(_CF_COOKIE_PREFIXES)
+
+
+def relevant_cookie_domains(source: Any) -> list[str]:
+    """Domains whose cookies authorize a source's recorded flows.
+
+    The source domain plus — for FastJobs, which authenticates every regional
+    TLD against its shared employer portal — the employer and apex hosts.
+    Never raises.
+    """
+    domain = (getattr(source, "domain", None) or (source if isinstance(source, str) else "") or "")
+    domain = domain.strip().lower()
+    domains: list[str] = []
+    if domain:
+        domains.append(domain)
+    if "fastjobs." in domain:
+        domains.extend(["employer.fastjobs.sg", "fastjobs.sg"])
+    return domains
+
+
+def _cookie_domain_matches(cookie_domain: str, domains: list[str]) -> bool:
+    """True if a cookie's (possibly leading-dot) domain falls under any target."""
+    host = (cookie_domain or "").lstrip(".").lower()
+    if not host:
+        return False
+    for d in domains:
+        target = d.lstrip(".").lower()
+        if host == target or host.endswith("." + target):
+            return True
+    return False
+
+
+def _strip_cloudflare(cookies: list[dict]) -> list[dict]:
+    """Drop Cloudflare cookies, but never return an empty list if input wasn't."""
+    kept = [c for c in cookies if not _is_cloudflare_cookie(c.get("name", ""))]
+    if not kept and cookies:
+        logger.warning(
+            "All %d cookies were Cloudflare-owned; keeping them (nothing else to store)",
+            len(cookies),
+        )
+        return list(cookies)
+    return kept
+
+
+def prepare_source_cookies(
+    cookies: list[dict], source: Any
+) -> tuple[list[dict], datetime | None]:
+    """Filter extension cookies to a source's hosts and compute earliest expiry.
+
+    Returns (cookies, expires_at). Cookies are filtered to the source's relevant
+    domains (see `relevant_cookie_domains`) and, when the source's profile is
+    cloudflare_protected, CF clearance cookies are stripped. Tolerant by design:
+    if filtering would drop ALL cookies from a non-empty input we keep the
+    unfiltered list (log a warning) rather than store nothing. `expires_at` is
+    the earliest cookie expiry, or None for an all-session-cookie state.
+    """
+    if not cookies:
+        return [], None
+    relevant = relevant_cookie_domains(source)
+    filtered = [
+        c for c in cookies if _cookie_domain_matches(c.get("domain", ""), relevant)
+    ]
+    if not filtered:
+        logger.warning(
+            "Cookie domain filter matched none of %s for source %s — keeping all %d cookies",
+            relevant,
+            getattr(source, "name", "?"),
+            len(cookies),
+        )
+        filtered = list(cookies)
+
+    prof = profile_for_source(
+        getattr(source, "domain", "") or getattr(source, "base_url", ""),
+        getattr(source, "profile", None),
+    )
+    if prof and prof.cloudflare_protected:
+        filtered = _strip_cloudflare(filtered)
+
+    return filtered, _earliest_expiry({"cookies": filtered})
+
+
+def session_is_stale(source: Any) -> bool:
+    """True when a source's stored session should be re-captured before use.
+
+    Stale when: no session_state, captured more than SESSION_MAX_AGE_H ago, or
+    within SESSION_EXPIRY_LEAD_H of its earliest cookie expiry (or already past).
+    """
+    if not getattr(source, "session_state", None):
+        return True
+    now = datetime.now(UTC)
+    captured = getattr(source, "captured_at", None)
+    if captured is not None:
+        c = captured if captured.tzinfo else captured.replace(tzinfo=UTC)
+        if (now - c).total_seconds() > SESSION_MAX_AGE_H * 3600:
+            return True
+    exp = getattr(source, "expires_at", None)
+    if exp is not None:
+        e = exp if exp.tzinfo else exp.replace(tzinfo=UTC)
+        if (e - now).total_seconds() < SESSION_EXPIRY_LEAD_H * 3600:
+            return True
+    return False
+
+
+async def self_heal_source_session(
+    source: Any, db: Any, entry_url: str | None = None
+) -> bool:
+    """Best-effort re-capture of a stale source session via the extension relay.
+
+    Runs BEFORE a recorded flow. If the session is stale and the source is not
+    anonymous, ask the extension for its live cookies for `entry_url` (falling
+    back to the source base_url), filter them, and store the blob
+    (session_state/captured_at/expires_at) on the row. Returns True if a fresh
+    capture was stored.
+
+    Never raises and NEVER breaks a passing flow: a missing extension
+    (RuntimeError), empty capture, or DB error just logs and returns False so the
+    existing downstream login-wall/Cloudflare handling still applies.
+    """
+    if not session_is_stale(source):
+        return False
+    prof = profile_for_source(
+        getattr(source, "domain", "") or getattr(source, "base_url", ""),
+        getattr(source, "profile", None),
+    )
+    if prof and prof.auth_model == "anonymous":
+        return False
+    url = entry_url or getattr(source, "base_url", None)
+    if not url:
+        return False
+    from app.services.agent_relay import agent_registry
+
+    try:
+        cookies = await agent_registry.dispatch("get_cookies", {"url": url}, timeout_s=20)
+    except RuntimeError as exc:
+        logger.warning(
+            "Session self-heal: extension unavailable for %s: %s",
+            getattr(source, "name", "?"),
+            exc,
+        )
+        return False
+    except Exception as exc:  # never let heal break the flow
+        logger.warning(
+            "Session self-heal dispatch failed for %s: %s",
+            getattr(source, "name", "?"),
+            exc,
+        )
+        return False
+    if not cookies:
+        logger.info(
+            "Session self-heal: no cookies returned for %s — proceeding with stored session",
+            getattr(source, "name", "?"),
+        )
+        return False
+    try:
+        filtered, expires_at = prepare_source_cookies(cookies, source)
+        source.session_state = encrypt_session_state(
+            json.dumps({"cookies": filtered, "origins": []})
+        )
+        source.captured_at = datetime.now(UTC)
+        source.expires_at = expires_at
+        await db.commit()
+    except Exception as exc:  # a DB hiccup must not abort the search
+        logger.warning(
+            "Session self-heal store failed for %s: %s", getattr(source, "name", "?"), exc
+        )
+        return False
+    logger.info(
+        "Session self-heal re-captured %d cookies for %s (expires %s)",
+        len(filtered),
+        getattr(source, "name", "?"),
+        expires_at,
+    )
+    return True
+
+
+async def heal_source_session(source_id: str, entry_url: str | None = None) -> bool:
+    """Look a source up and self-heal its session in its own DB session.
+
+    Thin convenience wrapper for flow entry points that don't already hold a
+    live Source row/session. Best-effort: never raises, returns False when no
+    heal was needed or possible.
+    """
+    from sqlalchemy import select
+
+    from app.db import async_session
+    from app.models.orm import Source
+
+    try:
+        async with async_session() as db:
+            source = (
+                await db.execute(select(Source).where(Source.id == source_id))
+            ).scalar_one_or_none()
+            if source is None:
+                return False
+            return await self_heal_source_session(source, db, entry_url)
+    except Exception as exc:  # must never break the search
+        logger.warning("Session self-heal wrapper failed for %s: %s", source_id, exc)
+        return False
 
 
 async def connect_with_stored_session(

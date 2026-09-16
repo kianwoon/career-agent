@@ -192,6 +192,9 @@ class Source(Base):
     # Encrypted Playwright storage_state captured during the wizard login step.
     session_state: Mapped[str | None] = mapped_column(Text, nullable=True)
     captured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Earliest cookie expiry of the stored session (None for all session
+    # cookies). Drives the pre-search self-heal staleness check.
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Per-source capability profile (SiteProfile-shaped dict): probed at
     # registration, then written back reactively when a flow detects a
     # Cloudflare wall / SSO hand-off / login wall. Overrides the global

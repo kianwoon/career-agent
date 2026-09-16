@@ -304,6 +304,10 @@ async def _search_candidates_via_flow(
             "human_reason": f"{source.name}: no active find_candidates flow — record one from the Sources panel",
         }
 
+    # Pre-search self-heal: re-capture the session from the extension relay
+    # when the stored one is stale (best-effort; never aborts the search).
+    await _heal_stale_source_session(source, "find_candidates")
+
     flow_queries: list[str] = []
     for q in queries:
         fq = await build_boolean_keywords_async([q], excludes, limit=KEYWORD_LIMIT_FLOW)
@@ -634,6 +638,54 @@ async def _persist_agent_finding(source: Any, reason: str | None) -> None:
         logger.warning("Could not persist %s finding for source %s: %s", finding, getattr(source, "name", "?"), exc)
 
 
+async def _heal_stale_source_session(source: Any, flow_type: str | None) -> None:
+    """Best-effort pre-search session self-heal for a custom source.
+
+    If the stored session is stale, re-capture live cookies via the extension
+    relay and write them back onto the Source row AND the in-memory `source`
+    object (so the caller's subsequent execute_flow sees the fresh blob). The
+    caller's `source` is typically detached from its DB session, so this
+    re-fetches a live row, heals it, then copies the new session fields back.
+    Entry URL follows the candidate convention. Never raises — a heal failure
+    must not break a run.
+    """
+    from app.services.session import self_heal_source_session, session_is_stale
+
+    try:
+        if not session_is_stale(source):
+            return
+        entry = source.base_url
+        if flow_type == "find_candidates":
+            from app.services.site_profiles import profile_for_source
+
+            prof = profile_for_source(
+                source.domain or source.base_url, getattr(source, "profile", None)
+            )
+            if prof and prof.candidate_entry_url:
+                entry = prof.candidate_entry_url
+        from sqlalchemy import select
+
+        from app.db import async_session
+        from app.models.orm import Source
+
+        async with async_session() as db:
+            fresh = (
+                await db.execute(select(Source).where(Source.id == source.id))
+            ).scalar_one_or_none()
+            if fresh is None:
+                return
+            if await self_heal_source_session(fresh, db, entry):
+                source.session_state = fresh.session_state
+                source.captured_at = fresh.captured_at
+                source.expires_at = fresh.expires_at
+    except Exception as exc:  # healing is strictly best-effort
+        logger.warning(
+            "Pre-search session self-heal failed for %s: %s",
+            getattr(source, "name", "?"),
+            exc,
+        )
+
+
 async def _search_custom_sources(
     state: AgentState,
 ) -> tuple[list[dict[str, Any]], list[str], list[str], list[dict[str, str]]]:
@@ -684,6 +736,11 @@ async def _search_custom_sources(
             failed.append(f"{source.name}: no {flow_type} flow")
             issues.append({"source": source.name, "reason": f"no {flow_type} flow recorded"})
             return
+
+        # Pre-search self-heal: an expired stored session bounces the flow to a
+        # login wall. Re-capture from the extension relay first (best-effort —
+        # a missing relay or empty capture must NOT break the run).
+        await _heal_stale_source_session(source, flow_type)
 
         # Prefer the browser-extension agent (runs in the user's real browser
         # — sites never block it). Fall back to server-side Playwright.

@@ -29,15 +29,25 @@ class Base(DeclarativeBase):
 # a column to an already-existing table — so a newly-added ORM column would
 # break queries against an existing deployment. These idempotent ADD COLUMN
 # (IF NOT EXISTS) statements bridge that gap without introducing alembic.
-_SCHEMA_UPGRADES: tuple[str, ...] = (
-    "ALTER TABLE sources ADD COLUMN IF NOT EXISTS profile JSON",
+# (column, add-if-not-exists DDL, plain-add DDL fallback) per upgrade.
+_SCHEMA_UPGRADES: tuple[tuple[str, str, str], ...] = (
+    (
+        "profile",
+        "ALTER TABLE sources ADD COLUMN IF NOT EXISTS profile JSON",
+        "ALTER TABLE sources ADD COLUMN profile JSON",
+    ),
+    (
+        "expires_at",
+        "ALTER TABLE sources ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ",
+        "ALTER TABLE sources ADD COLUMN expires_at TIMESTAMPTZ",
+    ),
 )
 
 
 async def ensure_schema() -> None:
     """Apply idempotent column additions missing from an existing database."""
     async with engine.begin() as conn:
-        for ddl in _SCHEMA_UPGRADES:
+        for column, ddl, fallback in _SCHEMA_UPGRADES:
             try:
                 await conn.execute(text(ddl))
             except Exception:  # a non-Postgres backend may lack IF NOT EXISTS
@@ -46,8 +56,8 @@ async def ensure_schema() -> None:
                         c["name"] for c in inspect(sync_conn).get_columns("sources")
                     }
                 )
-                if "profile" not in existing:
-                    await conn.execute(text("ALTER TABLE sources ADD COLUMN profile JSON"))
+                if column not in existing:
+                    await conn.execute(text(fallback))
 
 
 async def get_db() -> AsyncSession:
