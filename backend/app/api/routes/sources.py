@@ -97,6 +97,32 @@ def _is_nav_noise_click(step: dict[str, Any]) -> bool:
     return not re.search(r"search|talent", text, re.IGNORECASE)
 
 
+def _prune_recorded_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop nav-noise clicks and collapse consecutive identical clicks.
+
+    A stale/older extension build — or an EXISTING stored flow recorded before
+    the prune shipped — can carry junk navbar clicks ("Malaysia Jobs", "Chats",
+    repeated Talent-search). After a user re-records, the verification probe
+    replays prefix+recorded+suffix live, so unpruned junk becomes visible
+    auto-clicks and is carried forward permanently. Only clicks are matched
+    (navigate/wait/fill/press pass through untouched).
+    """
+    pruned: list[dict[str, Any]] = []
+    for step in steps:
+        if _is_nav_noise_click(step):
+            continue
+        if step.get("action") == "click" and pruned:
+            prev = pruned[-1]
+            if (
+                prev.get("action") == "click"
+                and prev.get("selector") == step.get("selector")
+                and prev.get("text") == step.get("text")
+            ):
+                continue
+        pruned.append(step)
+    return pruned
+
+
 def _looks_like_card_click(step: dict[str, Any]) -> bool:
     """Heuristic: does a recorded click plausibly target a candidate result?
 
@@ -704,11 +730,10 @@ async def agent_record_manual_stop(
             continue
         step = _to_step(e)
         if step:
-            # Mirror the extension's pruneNavNoise: drop incidental navbar
-            # clicks server-side too (a stale extension build still sends them).
-            if _is_nav_noise_click(step):
-                continue
             recorded.append(step)
+    # Mirror the extension's pruneNavNoise server-side too (a stale extension
+    # build still sends them) and collapse repeated background clicks.
+    recorded = _prune_recorded_steps(recorded)
     if not recorded:
         raise HTTPException(
             422, "No usable events were recorded — click a result card, then press Stop"
@@ -742,6 +767,11 @@ async def agent_record_manual_stop(
             {"action": "navigate", "url": entry},
             {"action": "wait", "seconds": 3},
         ]
+
+    # Prune the reused prefix too: an existing flow recorded before the nav
+    # prune shipped carries junk navbar clicks that would otherwise be replayed
+    # by the verification probe and carried forward permanently.
+    prefix = _prune_recorded_steps(prefix)
 
     # Suffix: the extract step from the existing flow, if any.
     suffix: list[dict[str, Any]] = []

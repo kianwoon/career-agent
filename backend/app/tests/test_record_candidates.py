@@ -375,3 +375,81 @@ def test_record_stop_refuses_stale_card_without_card_click(client, monkeypatch):
         client.delete(f"/api/v1/sources/{sid}", headers=_headers())
 
 
+
+
+def test_record_stop_prunes_existing_prefix_nav_junk(client, monkeypatch):
+    """An existing flow whose PREFIX carries nav junk (from a pre-prune
+    recording) must be filtered out of the probe AND the saved flow, so the
+    verification probe can no longer replay Malaysia Jobs / Chats clicks."""
+    fake = _FakeRegistry()
+    monkeypatch.setattr("app.services.agent_relay.agent_registry", fake, raising=False)
+    sid = _make_source(client, "rec-prefixjunk.example")
+    try:
+        # 1) Create a flow so `existing` exists.
+        first = client.post(
+            f"/api/v1/sources/{sid}/agent_record/stop",
+            json={"flow_type": "find_candidates"},
+            headers=_headers(),
+        )
+        assert first.status_code == 200, first.text
+        flow_id = client.get(
+            f"/api/v1/sources/{sid}/flows", headers=_headers()
+        ).json()[0]["id"]
+
+        # 2) Poison the stored prefix with junk navbar clicks recorded before
+        #    the server-side prune shipped (Sep-15-style recording).
+        junk_prefix = [
+            {"action": "navigate", "url": MCF_TALENT_SEARCH_URL},
+            {"action": "click", "selector": "ul.navbar-nav > li > a", "text": "Malaysia Jobs"},
+            {"action": "click", "selector": "ul.navbar-nav > li > a", "text": "Chats"},
+            {"action": "click", "selector": "div.navbar-nav a", "text": "Talent search\n NEW"},
+            {"action": "click", "selector": "div.navbar-nav a", "text": "Talent search\n NEW"},
+            {"action": "fill", "selector": "#talent-search-input", "param": "query"},
+            {"action": "press", "key": "Enter"},
+            {"card": "div.talent-card", "fields": {}},
+        ]
+        upd = client.patch(
+            f"/api/v1/sources/{sid}/flows/{flow_id}",
+            json={"steps": junk_prefix},
+            headers=_headers(),
+        )
+        assert upd.status_code == 200, upd.text
+
+        # 3) Re-record: the reused prefix must be pruned before probe + save.
+        fake.calls.clear()
+        r = client.post(
+            f"/api/v1/sources/{sid}/agent_record/stop",
+            json={"flow_type": "find_candidates"},
+            headers=_headers(),
+        )
+        assert r.status_code == 200, r.text
+        saved = r.json()["steps"]
+
+        def _is_junk(s: dict) -> bool:
+            if s.get("action") != "click":
+                return False
+            sel = str(s.get("selector") or "")
+            txt = str(s.get("text") or "")
+            in_nav = "navbar-container" in sel or "navbar-nav" in sel
+            if not in_nav:
+                return False
+            return not ("search" in txt.lower() or "talent" in txt.lower())
+
+        assert not any(_is_junk(s) for s in saved), saved
+        blob = str(saved)
+        assert "Malaysia Jobs" not in blob
+        assert "Chats" not in blob
+        # The legit search/talent nav click survives.
+        assert any(s.get("text") == "Talent search\n NEW" for s in saved)
+
+        # 4) The probe itself must not have replayed the junk: inspect the
+        #    steps the extension was asked to run.
+        probe = next(p for c, p in fake.calls if c == "run_flow")
+        probe_steps = probe["steps"]
+        assert not any(_is_junk(s) for s in probe_steps), probe_steps
+        assert "Malaysia Jobs" not in str(probe_steps)
+        assert "Chats" not in str(probe_steps)
+        # Consecutive duplicate Talent-search clicks collapsed to one.
+        assert str(probe_steps).count("Talent search") == 1
+    finally:
+        client.delete(f"/api/v1/sources/{sid}", headers=_headers())
