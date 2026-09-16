@@ -1103,6 +1103,23 @@ async function cmdStartRecord(baseUrl) {
       const t = await chrome.tabs.get(agentTabId);
       if (!t || t.url === undefined || !t.url.includes("http")) {
         agentTabId = null;
+      } else if (baseUrl) {
+        // Reuse path: the tab exists but may be on another site and is almost
+        // certainly backgrounded. Navigate it to the source site (only when it
+        // isn't already there) and ALWAYS foreground it, so the user can
+        // actually click the filters the recorder is meant to capture.
+        try {
+          const host = new URL(baseUrl).hostname;
+          const cur = t.url || "";
+          if (!cur.includes(host)) {
+            const loadP = waitForComplete(agentTabId);
+            await chrome.tabs.update(agentTabId, { url: baseUrl });
+            await loadP;
+          }
+        } catch {
+          /* bad baseUrl — leave URL as-is, still activate below */
+        }
+        await activateTab(agentTabId);
       }
     } catch {
       agentTabId = null;
