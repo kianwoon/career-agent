@@ -285,3 +285,93 @@ def test_is_fastjobs_candidates_gate():
     assert not _is_fastjobs_candidates(_FakeSource("fastjobs.sg", "x"), "find_jobs")
     assert not _is_fastjobs_candidates(_FakeSource("other.com", "x"), "find_candidates")
 
+
+# --- backend-side nav-noise filtering (mirror of extension pruneNavNoise) ----
+
+
+def test_is_nav_noise_click_backend_rule():
+    from app.api.routes.sources import _is_nav_noise_click
+
+    # navbar selector + non-search text → noise (the FastJobs "Talent search\n NEW" case unless it matches search/talent)
+    assert _is_nav_noise_click({"action": "click", "selector": "ul.navbar-nav > li > a", "text": "Chats"})
+    assert _is_nav_noise_click({"action": "click", "selector": "div.navbar-container a", "text": "Home"})
+    # navbar but search/talent entry → kept
+    assert not _is_nav_noise_click({"action": "click", "selector": "div.navbar-nav a", "text": "Talent search\n NEW"})
+    assert not _is_nav_noise_click({"action": "click", "selector": "div.navbar-nav a", "text": "Search"})
+    # not navbar → kept
+    assert not _is_nav_noise_click({"action": "click", "selector": "div.candidate-card", "text": "Jane"})
+    # non-click steps never filtered
+    assert not _is_nav_noise_click({"action": "fill", "selector": "div.navbar-nav input"})
+
+
+def test_record_stop_drops_navbar_clicks(client, monkeypatch):
+    """A recorded navbar click is filtered out of the persisted steps."""
+    fake = _FakeRegistry(events=[
+        {"action": "click", "selector": "div.navbar-container a", "text": "Chats", "ts": 1},
+        {"action": "click", "selector": "div.navbar-nav a", "text": "Talent search\n NEW", "ts": 2},
+        {"action": "fill", "selector": "#talent-search-input", "ts": 3},
+        {"action": "press", "key": "Enter", "selector": "#talent-search-input", "ts": 4},
+    ])
+    monkeypatch.setattr("app.services.agent_relay.agent_registry", fake, raising=False)
+    sid = _make_source(client, "rec-nav.example")
+    try:
+        r = client.post(
+            f"/api/v1/sources/{sid}/agent_record/stop",
+            json={"flow_type": "find_candidates"},
+            headers=_headers(),
+        )
+        assert r.status_code == 200, r.text
+        blob = str(r.json()["steps"])
+        # The incidental navbar click is gone; the search/talent nav click stays.
+        assert "navbar-container" not in blob
+        assert "Chats" not in blob
+        assert "Talent search" in blob
+    finally:
+        client.delete(f"/api/v1/sources/{sid}", headers=_headers())
+
+
+def test_record_stop_refuses_stale_card_without_card_click(client, monkeypatch):
+    """Existing candidate flow, stored card rotted, auto-detect failed, and the
+    recording contains a candidate-ish click → must NOT silently keep the junk
+    suffix; it must raise a diagnosable 502 and leave the flow untouched."""
+    sid = _make_source(client, "rec-stale.example")
+    try:
+        # 1) First stop (card_found=True) creates the flow with a real card step.
+        ok = _FakeRegistry()
+        monkeypatch.setattr("app.services.agent_relay.agent_registry", ok, raising=False)
+        first = client.post(
+            f"/api/v1/sources/{sid}/agent_record/stop",
+            json={"flow_type": "find_candidates"},
+            headers=_headers(),
+        )
+        assert first.status_code == 200, first.text
+        original_steps = first.json()["steps"]
+        assert original_steps[-1]["card"] == "div.talent-card"
+
+        # 2) Re-record: stored card rots (extract→[]), auto-detect fails
+        #    (card_found=False), but the user DID click a candidate-ish card.
+        bad = _FakeRegistry(
+            card_found=False,
+            events=[
+                {"action": "fill", "selector": "#talent-search-input", "ts": 1},
+                {"action": "press", "key": "Enter", "selector": "#talent-search-input", "ts": 2},
+                {"action": "click", "selector": "div.candidate-card", "text": "Ahmad Rizal", "ts": 3},
+            ],
+        )
+        monkeypatch.setattr("app.services.agent_relay.agent_registry", bad, raising=False)
+        second = client.post(
+            f"/api/v1/sources/{sid}/agent_record/stop",
+            json={"flow_type": "find_candidates"},
+            headers=_headers(),
+        )
+        assert second.status_code == 502, second.text
+        assert "not updated" in second.json()["error"]["message"].lower()
+
+        # 3) The stored flow is unchanged — the junk suffix was not persisted.
+        flows = client.get(f"/api/v1/sources/{sid}/flows", headers=_headers()).json()
+        cand = next(f for f in flows if f["flow_type"] == "find_candidates")
+        assert cand["steps"] == original_steps
+    finally:
+        client.delete(f"/api/v1/sources/{sid}", headers=_headers())
+
+

@@ -1140,6 +1140,15 @@ async function cmdStartRecord(baseUrl) {
   if (agentTabId === null) {
     await ensureTab(baseUrl || "about:blank");
   }
+  // Whatever path selected the tab, guarantee the recorder runs in the tab the
+  // USER sees. The recorder injects into agentTabId, but the user clicks in
+  // whatever tab is FOREGROUNDED; if those differ (e.g. a backgrounded user
+  // tab picked by the query, or a stale agent tab) every click lands in a tab
+  // with no recorder and Stop reports "no clicks recorded" / a 422. Forcing
+  // agentTabId active (and its window focused) closes that gap.
+  if (agentTabId !== null) {
+    await activateTab(agentTabId);
+  }
   // A recording is active across navigations: flag it so the tabs.onUpdated
   // hook re-injects the capture listener after a hard reload (the recorder
   // lives in the page and dies when the document is replaced).

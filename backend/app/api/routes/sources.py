@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime
 from typing import Any
 
@@ -73,6 +74,49 @@ def _card_fields(flow_type: str | None) -> dict[str, str]:
     """Field map for a synthesized card step: name-bearing for candidates,
     legacy first-anchor for jobs."""
     return dict(CANDIDATE_CARD_FIELDS) if flow_type == "find_candidates" else {"title": "a"}
+
+
+# Backend mirror of the extension's pruneNavNoise rule: a recorded click whose
+# selector sits inside a top navbar is incidental UNLESS it is the site's
+# search/talent entry. The extension already prunes these, but a stale/older
+# extension build (or a worker that injected before the prune shipped) can
+# still hand the backend nav clicks — e.g. the FastJobs "Talent search\n NEW"
+# multiline label that replays as a dead-weight step, so filter them again
+# server-side before persisting.
+_NAV_NOISE_RE = re.compile(r"navbar-container|navbar-nav", re.IGNORECASE)
+
+
+def _is_nav_noise_click(step: dict[str, Any]) -> bool:
+    """True for a recorded navbar click that isn't the search/talent entry."""
+    if step.get("action") != "click":
+        return False
+    selector = str(step.get("selector") or "")
+    text = str(step.get("text") or "")
+    if not _NAV_NOISE_RE.search(selector):
+        return False
+    return not re.search(r"search|talent", text, re.IGNORECASE)
+
+
+def _looks_like_card_click(step: dict[str, Any]) -> bool:
+    """Heuristic: does a recorded click plausibly target a candidate result?
+
+    Used on the LAST-RESORT fallback path (stored card rotted + auto-detect
+    failed) to refuse silently persisting a known-bad card when the user never
+    clicked anything card-shaped. Matches a selector mentioning candidate/
+    profile/card/result OR a name-shaped text label (e.g. "Ahmad Rizal").
+    """
+    if step.get("action") != "click":
+        return False
+    selector = str(step.get("selector") or "")
+    text = str(step.get("text") or "").strip()
+    if re.search(r"candidate|profile|card|result", selector, re.IGNORECASE):
+        return True
+    # Name-shaped text: 2–4 Title-Case words, no digits, reasonable length.
+    return bool(
+        text
+        and len(text) <= 60
+        and re.fullmatch(r"(?:[A-Z][a-z'.-]+\s+){1,3}[A-Z][a-z'.-]+", text)
+    )
 
 
 def _is_mcf_candidates(source: Source, flow_type: str | None) -> bool:
@@ -660,6 +704,10 @@ async def agent_record_manual_stop(
             continue
         step = _to_step(e)
         if step:
+            # Mirror the extension's pruneNavNoise: drop incidental navbar
+            # clicks server-side too (a stale extension build still sends them).
+            if _is_nav_noise_click(step):
+                continue
             recorded.append(step)
     if not recorded:
         raise HTTPException(
@@ -775,6 +823,28 @@ async def agent_record_manual_stop(
             raise HTTPException(
                 502,
                 "Couldn't detect result cards — click a candidate card while recording, then press Done",
+            )
+        # Existing flow whose stored card rotted AND auto-detect failed: the
+        # old `suffix` is now KNOWN-BAD (the probe just proved it extracts
+        # nothing). Persisting it blindly is exactly the junk-card regression —
+        # it would keep the stale {"card":"div.candidate"} forever while the
+        # flow grows extra input steps. For candidates, refuse with a
+        # diagnosable error instead of silently saving the bad suffix; the
+        # message distinguishes "you never clicked a card" (the production
+        # symptom) from "your click didn't resolve to a card".
+        if req.flow_type == "find_candidates" and not healed and not extract_ok:
+            clicked_card = any(_looks_like_card_click(s) for s in recorded)
+            hint = (
+                "No candidate click was recorded in this session. "
+                if not clicked_card
+                else "The recorded click did not resolve to a usable result card. "
+            )
+            raise HTTPException(
+                502,
+                hint
+                + "The stored result card no longer matches the page, so the "
+                "flow was NOT updated. Open a candidate search, click an actual "
+                "candidate result card, then press Done.",
             )
         if not healed and not heal_note:
             heal_note = "stored card selector no longer matches — could not auto-detect a new one"
