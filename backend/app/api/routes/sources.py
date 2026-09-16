@@ -97,30 +97,76 @@ def _is_nav_noise_click(step: dict[str, Any]) -> bool:
     return not re.search(r"search|talent", text, re.IGNORECASE)
 
 
+# Login-wall detour clicks: recorded when the user's session lapsed mid-recording,
+# so the login page was showing and its login links/buttons got captured. On
+# replay (now logged in) those nodes don't exist -> every leg aborts. Scope: this
+# helper is ONLY applied by _prune_recorded_steps, which runs at stop-time merge
+# for find_candidates / job filter recordings — flows that never legitimately
+# include a login-page click. It is NOT used while RECORDING a fresh login flow,
+# so a real "Login" button there is unaffected.
+_LOGIN_WALL_SELECTOR_RE = re.compile(
+    r"#login\b|#login-form|login-card|login-form", re.IGNORECASE
+)
+_LOGIN_WALL_TEXT_RE = re.compile(r"^login( to manage|\s*$)", re.IGNORECASE)
+
+
+def _is_login_wall_click(step: dict[str, Any]) -> bool:
+    """True for a login-wall detour click (lapsed-session login page nodes)."""
+    if step.get("action") != "click":
+        return False
+    selector = str(step.get("selector") or "")
+    text = str(step.get("text") or "")
+    return bool(
+        _LOGIN_WALL_SELECTOR_RE.search(selector)
+        or _LOGIN_WALL_TEXT_RE.search(text)
+    )
+
+
 def _prune_recorded_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Drop nav-noise clicks and collapse consecutive identical clicks.
+    """Drop nav-noise + login-wall clicks, then dedupe repeated clicks globally.
 
     A stale/older extension build — or an EXISTING stored flow recorded before
     the prune shipped — can carry junk navbar clicks ("Malaysia Jobs", "Chats",
-    repeated Talent-search). After a user re-records, the verification probe
-    replays prefix+recorded+suffix live, so unpruned junk becomes visible
-    auto-clicks and is carried forward permanently. Only clicks are matched
-    (navigate/wait/fill/press pass through untouched).
+    repeated Talent-search) and login-wall detour clicks (recorded while the
+    session had lapsed). After a user re-records, the verification probe replays
+    prefix+recorded+suffix live, so unpruned junk becomes visible auto-clicks and
+    is carried forward permanently.
+
+    Only clicks are matched: navigate/wait/fill/press pass through untouched.
+    Consecutive identical clicks are collapsed first; then identical (selector+
+    text) clicks are collapsed GLOBALLY to their LAST occurrence so the first
+    "Talent search" entry click survives while later repeats are dropped (fills
+    are never deduped — repeated fills with param:query are meaningful legs).
     """
-    pruned: list[dict[str, Any]] = []
+    # 1) drop nav-noise + login-wall clicks, collapse consecutive identical clicks
+    consec: list[dict[str, Any]] = []
     for step in steps:
-        if _is_nav_noise_click(step):
+        if _is_nav_noise_click(step) or _is_login_wall_click(step):
             continue
-        if step.get("action") == "click" and pruned:
-            prev = pruned[-1]
+        if step.get("action") == "click" and consec:
+            prev = consec[-1]
             if (
                 prev.get("action") == "click"
                 and prev.get("selector") == step.get("selector")
                 and prev.get("text") == step.get("text")
             ):
                 continue
-        pruned.append(step)
-    return pruned
+        consec.append(step)
+
+    # 2) global dedupe of identical clicks -> keep LAST occurrence only.
+    # Walk backwards; first-seen while walking back == last in original order.
+    seen_clicks: set[tuple[Any, Any]] = set()
+    keep: list[bool] = [True] * len(consec)
+    for idx in range(len(consec) - 1, -1, -1):
+        step = consec[idx]
+        if step.get("action") != "click":
+            continue
+        key = (step.get("selector"), step.get("text"))
+        if key in seen_clicks:
+            keep[idx] = False
+        else:
+            seen_clicks.add(key)
+    return [step for idx, step in enumerate(consec) if keep[idx]]
 
 
 def _looks_like_card_click(step: dict[str, Any]) -> bool:

@@ -6,6 +6,7 @@ stop path that creates a find_candidates flow without a pre-existing card step.
 """
 
 import os
+import re
 
 import pytest
 from fastapi.testclient import TestClient
@@ -451,5 +452,102 @@ def test_record_stop_prunes_existing_prefix_nav_junk(client, monkeypatch):
         assert "Chats" not in str(probe_steps)
         # Consecutive duplicate Talent-search clicks collapsed to one.
         assert str(probe_steps).count("Talent search") == 1
+    finally:
+        client.delete(f"/api/v1/sources/{sid}", headers=_headers())
+
+
+# --- login-wall detour + global repeated-click pruning ----------------------
+
+
+def test_is_login_wall_click_backend_rule():
+    from app.api.routes.sources import _is_login_wall_click
+
+    # FastJobs login-page nodes recorded while the session had lapsed.
+    assert _is_login_wall_click(
+        {
+            "action": "click",
+            "selector": "#login > div.section-container > div.login-card:nth-of-type(4) > div.card-container",
+            "text": "Login to manage your job posti…",
+        }
+    )
+    assert _is_login_wall_click(
+        {"action": "click", "selector": "#login-form > fast-button", "text": "Login"}
+    )
+    # A bare "Login" text on a login-form selector is a login-wall detour.
+    assert _is_login_wall_click({"action": "click", "selector": "#login-form", "text": ""})
+    # Legit candidate click is untouched.
+    assert not _is_login_wall_click(
+        {"action": "click", "selector": "div.candidate-card", "text": "Jane"}
+    )
+    # Non-click steps never filtered.
+    assert not _is_login_wall_click({"action": "fill", "selector": "#login-form input"})
+
+
+def test_record_stop_drops_login_wall_clicks(client, monkeypatch):
+    """Login-page detour clicks (recorded mid-lapsed-session) must not be saved."""
+    fake = _FakeRegistry(events=[
+        {
+            "action": "click",
+            "selector": "#login > div.section-container > div.login-card:nth-of-type(4) > div.card-container",
+            "text": "Login to manage your job posti…",
+            "ts": 1,
+        },
+        {"action": "click", "selector": "#login-form > fast-button", "text": "Login", "ts": 2},
+        {"action": "fill", "selector": "#talent-search-input", "ts": 3},
+        {"action": "press", "key": "Enter", "selector": "#talent-search-input", "ts": 4},
+        {"action": "click", "selector": "div.candidate-card", "text": "Jane", "ts": 5},
+    ])
+    monkeypatch.setattr("app.services.agent_relay.agent_registry", fake, raising=False)
+    sid = _make_source(client, "rec-loginwall.example")
+    try:
+        r = client.post(
+            f"/api/v1/sources/{sid}/agent_record/stop",
+            json={"flow_type": "find_candidates"},
+            headers=_headers(),
+        )
+        assert r.status_code == 200, r.text
+        steps = r.json()["steps"]
+        assert not any(
+            s.get("action") == "click"
+            and re.search(r"login-card|login-form|#login", str(s.get("selector") or ""))
+            for s in steps
+        ), steps
+        assert "Login to manage" not in str(steps)
+        # The legit candidate click and param fill survive.
+        assert any(s.get("action") == "fill" and s.get("param") == "query" for s in steps)
+    finally:
+        client.delete(f"/api/v1/sources/{sid}", headers=_headers())
+
+
+def test_record_stop_global_dedupes_repeated_talent_clicks(client, monkeypatch):
+    """Repeated identical Talent-search navbar clicks separated by fill steps
+    collapse to a single (last-occurrence) step; fills are never deduped."""
+    fake = _FakeRegistry(events=[
+        {"action": "click", "selector": "div.navbar-nav a", "text": "Talent search", "ts": 1},
+        {"action": "fill", "selector": "#talent-search-input", "ts": 2},
+        {"action": "click", "selector": "div.navbar-nav a", "text": "Talent search", "ts": 3},
+        {"action": "fill", "selector": "#q2", "ts": 4},
+        {"action": "click", "selector": "div.navbar-nav a", "text": "Talent search", "ts": 5},
+    ])
+    monkeypatch.setattr("app.services.agent_relay.agent_registry", fake, raising=False)
+    sid = _make_source(client, "rec-repeatalent.example")
+    try:
+        r = client.post(
+            f"/api/v1/sources/{sid}/agent_record/stop",
+            json={"flow_type": "find_candidates"},
+            headers=_headers(),
+        )
+        assert r.status_code == 200, r.text
+        steps = r.json()["steps"]
+        talent_clicks = [
+            s for s in steps
+            if s.get("action") == "click" and s.get("text") == "Talent search"
+        ]
+        assert len(talent_clicks) == 1, steps
+        # The retained click is the LAST occurrence, after both fills.
+        talent_idx = steps.index(talent_clicks[0])
+        fill_idxs = [i for i, s in enumerate(steps) if s.get("action") == "fill"]
+        assert len(fill_idxs) == 2
+        assert talent_idx > fill_idxs[0]
     finally:
         client.delete(f"/api/v1/sources/{sid}", headers=_headers())
