@@ -186,10 +186,60 @@ async function cmdNavigate(url, { activate = false } = {}) {
   return { url };
 }
 
+// deepFind — shadow-DOM aware query, inlined inside each execOnTab callback
+// (MV3 CSP forbids eval/new Function; executeScript serializes the callback
+// source, so helpers must be declared INSIDE it). Tries the plain
+// document.querySelector fast path first, then BFS-walks the full element
+// tree (light DOM + every shadowRoot) matching with el.matches(). `fast-input`
+// and similar web-component hosts hold their <input> in shadowRoot, which
+// document.querySelector cannot pierce. Also tries selector variants:
+// (a) original, (b) `.hydrated` stripped, (c) last combinator segment.
 async function waitForElement(selector, timeoutMs = 10000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const found = await execOnTab((sel) => !!document.querySelector(sel), [selector]).catch(() => false);
+    const found = await execOnTab((sel) => {
+      const deepFind = (s) => {
+        const cands = (x) => {
+          const out = [];
+          const add = (v) => {
+            if (v && out.indexOf(v) < 0) out.push(v);
+          };
+          add(x);
+          add(String(x).replace(/\.hydrated\b/g, "").replace(/\s+/g, " ").trim());
+          const segs = String(x)
+            .split(">")
+            .map((t) => t.trim())
+            .filter(Boolean);
+          if (segs.length) add(segs[segs.length - 1]);
+          return out;
+        };
+        for (const c of cands(s)) {
+          try {
+            const fast = document.querySelector(c);
+            if (fast) return fast;
+          } catch (e) {}
+          const queue = [document.documentElement, document.body].filter(Boolean);
+          const seen = new Set();
+          while (queue.length) {
+            const n = queue.shift();
+            if (!n || seen.has(n)) continue;
+            seen.add(n);
+            let hit = false;
+            try {
+              hit = n.nodeType === 1 && n.matches(c);
+            } catch (e) {
+              hit = false;
+            }
+            if (hit) return n;
+            if (n.shadowRoot)
+              for (const k of Array.from(n.shadowRoot.children)) queue.push(k);
+            if (n.children) for (const k of Array.from(n.children)) queue.push(k);
+          }
+        }
+        return null;
+      };
+      return !!deepFind(sel);
+    }, [selector]).catch(() => false);
     if (found) return true;
     await sleep(300);
   }
@@ -202,7 +252,48 @@ async function cmdFill(selector, text) {
   // a second later.
   await waitForElement(selector);
   const r = await execOnTab((sel, txt) => {
-    const el = document.querySelector(sel);
+    // Shadow-DOM aware lookup (see waitForElement note). Inlined — MV3 CSP.
+    const deepFind = (s) => {
+      const cands = (x) => {
+        const out = [];
+        const add = (v) => {
+          if (v && out.indexOf(v) < 0) out.push(v);
+        };
+        add(x);
+        add(String(x).replace(/\.hydrated\b/g, "").replace(/\s+/g, " ").trim());
+        const segs = String(x)
+          .split(">")
+          .map((t) => t.trim())
+          .filter(Boolean);
+        if (segs.length) add(segs[segs.length - 1]);
+        return out;
+      };
+      for (const c of cands(s)) {
+        try {
+          const fast = document.querySelector(c);
+          if (fast) return fast;
+        } catch (e) {}
+        const queue = [document.documentElement, document.body].filter(Boolean);
+        const seen = new Set();
+        while (queue.length) {
+          const n = queue.shift();
+          if (!n || seen.has(n)) continue;
+          seen.add(n);
+          let hit = false;
+          try {
+            hit = n.nodeType === 1 && n.matches(c);
+          } catch (e) {
+            hit = false;
+          }
+          if (hit) return n;
+          if (n.shadowRoot)
+            for (const k of Array.from(n.shadowRoot.children)) queue.push(k);
+          if (n.children) for (const k of Array.from(n.children)) queue.push(k);
+        }
+      }
+      return null;
+    };
+    const el = deepFind(sel);
     if (!el) return { ok: false, error: "Element not found: " + sel };
     el.focus();
     el.scrollIntoView({ block: "center" });
@@ -223,7 +314,48 @@ async function cmdFill(selector, text) {
 async function cmdClick(selector) {
   await waitForElement(selector);
   const r = await execOnTab((sel) => {
-    const el = document.querySelector(sel);
+    // Shadow-DOM aware lookup (see waitForElement note). Inlined — MV3 CSP.
+    const deepFind = (s) => {
+      const cands = (x) => {
+        const out = [];
+        const add = (v) => {
+          if (v && out.indexOf(v) < 0) out.push(v);
+        };
+        add(x);
+        add(String(x).replace(/\.hydrated\b/g, "").replace(/\s+/g, " ").trim());
+        const segs = String(x)
+          .split(">")
+          .map((t) => t.trim())
+          .filter(Boolean);
+        if (segs.length) add(segs[segs.length - 1]);
+        return out;
+      };
+      for (const c of cands(s)) {
+        try {
+          const fast = document.querySelector(c);
+          if (fast) return fast;
+        } catch (e) {}
+        const queue = [document.documentElement, document.body].filter(Boolean);
+        const seen = new Set();
+        while (queue.length) {
+          const n = queue.shift();
+          if (!n || seen.has(n)) continue;
+          seen.add(n);
+          let hit = false;
+          try {
+            hit = n.nodeType === 1 && n.matches(c);
+          } catch (e) {
+            hit = false;
+          }
+          if (hit) return n;
+          if (n.shadowRoot)
+            for (const k of Array.from(n.shadowRoot.children)) queue.push(k);
+          if (n.children) for (const k of Array.from(n.children)) queue.push(k);
+        }
+      }
+      return null;
+    };
+    const el = deepFind(sel);
     if (!el) return { ok: false, error: "Element not found: " + sel };
     el.scrollIntoView({ block: "center" });
     el.click();
@@ -250,12 +382,80 @@ async function cmdPress(key) {
 async function cmdExtract(cardSelector, fields, maxItems) {
   return (
     (await execOnTab((card, fieldMap, max) => {
-      const cards = document.querySelectorAll(card);
+      // Shadow-DOM aware helpers (see waitForElement note). Inlined — MV3 CSP.
+      const cands = (x) => {
+        const out = [];
+        const add = (v) => {
+          if (v && out.indexOf(v) < 0) out.push(v);
+        };
+        add(x);
+        add(String(x).replace(/\.hydrated\b/g, "").replace(/\s+/g, " ").trim());
+        const segs = String(x)
+          .split(">")
+          .map((t) => t.trim())
+          .filter(Boolean);
+        if (segs.length) add(segs[segs.length - 1]);
+        return out;
+      };
+      const walk = (roots) => {
+        const queue = roots.filter(Boolean);
+        const seen = new Set();
+        const all = [];
+        while (queue.length) {
+          const n = queue.shift();
+          if (!n || seen.has(n)) continue;
+          seen.add(n);
+          if (n.nodeType === 1) all.push(n);
+          if (n.shadowRoot)
+            for (const k of Array.from(n.shadowRoot.children)) queue.push(k);
+          if (n.children) for (const k of Array.from(n.children)) queue.push(k);
+        }
+        return all;
+      };
+      const deepFindAll = (s) => {
+        for (const c of cands(s)) {
+          try {
+            const fast = document.querySelectorAll(c);
+            if (fast.length) return Array.from(fast);
+          } catch (e) {}
+          const hits = walk([document.documentElement, document.body]).filter((n) => {
+            try {
+              return n.matches(c);
+            } catch (e) {
+              return false;
+            }
+          });
+          if (hits.length) return hits;
+        }
+        return [];
+      };
+      const deepFindIn = (root, s) => {
+        if (!root) return null;
+        for (const c of cands(s)) {
+          try {
+            const fast = root.querySelector(c);
+            if (fast) return fast;
+          } catch (e) {}
+          const hits = walk([
+            root.shadowRoot || root,
+            ...(root.children ? Array.from(root.children) : []),
+          ]).filter((n) => {
+            try {
+              return n.matches && n.matches(c);
+            } catch (e) {
+              return false;
+            }
+          });
+          if (hits.length) return hits[0];
+        }
+        return null;
+      };
+      const cards = deepFindAll(card);
       const out = [];
       for (const c of Array.from(cards).slice(0, max || 30)) {
         const pick = (sel) => {
           if (!sel) return "";
-          const el = c.querySelector(sel);
+          const el = deepFindIn(c, sel);
           return el ? (el.textContent || "").trim().slice(0, 300) : "";
         };
         // URL pick: prefer deep links (profiles/candidates/jobs/<id>) over

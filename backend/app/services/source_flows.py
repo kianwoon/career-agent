@@ -1071,7 +1071,7 @@ async def _extract_page(page: Any, card_selectors: dict[str, str] | None) -> lis
                 // card's first substantial text line.
                 if (!out.title) {
                   const h = el.querySelector('h1,h2,h3,h4,[class*="title" i],[class*="name" i]');
-                  out.title = (h?.innerText || el.innerText || '').trim().split('\n')[0].slice(0, 200);
+                  out.title = (h?.innerText || el.innerText || '').trim().split('\\n')[0].slice(0, 200);
                 }
                 out.title = out.title || '';
                 if (!out.company) out.company = '';
