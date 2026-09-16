@@ -1376,11 +1376,21 @@ async function cmdFindResultCard() {
       }
       g.push(el);
     }
+    // Name-shaped first line: 2+ capitalized words, no digits — a person's
+    // name rather than a facet label ("Employment Status") or a date.
+    const nameShaped = (s) =>
+      !!s &&
+      s.length >= 5 &&
+      !/\d/.test(s) &&
+      /^[A-Z][A-Za-z'’-]+(?:\s+[A-Z][A-Za-z'’.-]+)+$/.test(s.trim());
+    const profileHref = (h) => /\/(candidate|profile|talent|\/p\/)/i.test(h || "");
+    const cardSig = /candidate|profile|card|result/i;
     let best = null;
     for (const [sig, els] of groups) {
       if (els.length < 3 || els.length > 60) continue;
       let good = 0;
       let linked = 0;
+      let bearing = 0; // rows that carry a profile link or a name-shaped line
       for (const el of els) {
         const text = (el.innerText || "").trim();
         if (text.length < 80 || !text.includes("\n")) continue;
@@ -1396,13 +1406,47 @@ async function cmdFindResultCard() {
           text.length > 200;
         if (!hasLink && !cardish) continue;
         good += 1;
+        // Candidate/profile-bearing evidence: a profile-ish anchor, OR the
+        // first substantial text line looking like a name.
+        const hasProfileLink = Array.from(el.querySelectorAll("a[href]")).some((a) =>
+          profileHref(a.getAttribute("href") || a.href)
+        );
+        const firstLine = (text.split("\n").map((l) => l.trim()).find((l) => l.length >= 3) || "");
+        if (hasProfileLink || nameShaped(firstLine)) bearing += 1;
       }
       if (good < 3 || good < els.length * 0.5) continue;
-      const score = good + linked * 0.1 + (/card/i.test(sig) ? 0.5 : 0);
+      // Tighten acceptance: the signature must have a majority of rows that
+      // are candidate/profile-bearing, OR its class signature is card-ish.
+      if (bearing < good * 0.5 && !cardSig.test(sig)) continue;
+      const score =
+        good +
+        linked * 0.1 +
+        (/card/i.test(sig) ? 0.5 : 0) +
+        (bearing > 0 ? 0.3 : 0);
       if (!best || score > best.score)
         best = { sig, good, score, sample: els[0] };
     }
     if (!best) return { found: false };
+    // Prefer a name-bearing title selector from the winning row: the first
+    // profile-ish anchor, else the element whose text is name-shaped. Kept
+    // alongside `card` for backward compat.
+    const sample = best.sample;
+    let titleSel = "";
+    const profAnchor = Array.from(sample.querySelectorAll("a[href]")).find((a) =>
+      profileHref(a.getAttribute("href") || a.href)
+    );
+    if (profAnchor) {
+      const p = profAnchor.parentElement;
+      titleSel = p && p.tagName.toLowerCase() === "a" ? "a" : "a[href]";
+    } else {
+      for (const el of sample.querySelectorAll("h1, h2, h3, h4, strong, b, span, div, p")) {
+        const t = (el.innerText || "").trim();
+        if (nameShaped(t) && el.children.length === 0) {
+          titleSel = `${el.tagName.toLowerCase()}${el.className && typeof el.className === "string" ? "." + el.className.trim().split(/\s+/)[0] : ""}`;
+          break;
+        }
+      }
+    }
     // Build a selector for the sample row: parent-id/#app prefix + signature.
     const parent = best.sample.parentElement;
     let prefix = "";
@@ -1419,8 +1463,62 @@ async function cmdFindResultCard() {
       }
       prefix = chain.length > 1 ? chain.join(" > ") + " > " : "";
     }
-    return { found: true, card: prefix + best.sig, count: best.good };
+    return { found: true, card: prefix + best.sig, count: best.good, title: titleSel || undefined };
   });
+}
+
+// Nav-noise pruning for recorded flows. The recorder captures EVERY left
+// click by design (extension/background.js `capture()`), so incidental nav
+// clicks ("Malaysia Jobs", "Chats", repeated "Talent search") become steps
+// that replay as dead weight. This is a small deterministic denylist + a
+// navbar heuristic + same-click dedupe — deliberately NOT semantic NLP.
+const NAV_NOISE_TEXT = new Set([
+  "malaysia jobs",
+  "chats",
+  "saved searches",
+  "notifications",
+  "profile",
+  "logout",
+  "sign out",
+  "home",
+  "menu",
+]);
+
+function isNavNoise(step) {
+  if (!step || step.action !== "click") return false;
+  const text = String(step.text || "").trim().toLowerCase();
+  const selector = String(step.selector || "");
+  if (NAV_NOISE_TEXT.has(text)) return true;
+  // Navbar heuristic: a click whose selector chain sits inside a top navbar is
+  // incidental UNLESS it is the site's search/talent entry (the search intent).
+  const inNavbar =
+    /navbar-container|navbar-nav/i.test(selector) ||
+    /(^|\s|>)nav\b/i.test(selector.split(">").pop() || "");
+  if (inNavbar && !/search|talent/i.test(text)) return true;
+  return false;
+}
+
+// Drop incidental nav clicks and collapse repeated identical (selector,text)
+// clicks to their LAST occurrence (the final, effective click stays in order).
+function pruneNavNoise(steps) {
+  const kept = [];
+  for (const s of steps) {
+    if (s && s.action === "click" && !isNavNoise(s)) kept.push(s);
+    else if (!s || s.action !== "click") kept.push(s);
+  }
+  // Collapse duplicates keeping the LAST: walk backwards, keep first seen.
+  const seen = new Set();
+  const out = [];
+  for (let i = kept.length - 1; i >= 0; i--) {
+    const s = kept[i];
+    if (s && s.action === "click") {
+      const key = `${s.selector}\u0000${s.text || ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+    }
+    out.unshift(s);
+  }
+  return out;
 }
 
 async function cmdStopRecord() {
@@ -1486,7 +1584,10 @@ async function cmdStopRecord() {
   } catch {
     /* best-effort */
   }
-  return { ok: true, events: cleaned, count: cleaned.length };
+  // Prune incidental nav clicks (capture-all by design) then dedupe identical
+  // clicks keeping the last. Terminal/nav/wait/fill/press steps untouched.
+  const pruned = pruneNavNoise(cleaned);
+  return { ok: true, events: pruned, count: pruned.length };
 }
 
 // --- dispatch -------------------------------------------------------------

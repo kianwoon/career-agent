@@ -104,6 +104,34 @@ def _candidate_adapters() -> dict[str, Any]:
 # "Tang Yee HennSenior QC Technician (Deputy Shift Lead) at ...").
 _NAME_DISPLAY_MAX = 120
 
+# Single-token facet/status words that are never a person's name — used by the
+# conservative NAME-SHAPE guard in _normalize_flow_candidate. Exact-token match
+# only (never substring) so a short word like "pr" cannot match a real name
+# such as "Pranav".
+_CHROME_NAME_WORDS = frozenset(
+    {
+        "pr",
+        "citizen",
+        "citizenship",
+        "singaporean",
+        "employment",
+        "status",
+        "salary",
+        "available",
+        "availability",
+        "active",
+        "male",
+        "female",
+        "permanent",
+        "resident",
+        "contract",
+        "full-time",
+        "part-time",
+        "internship",
+        "temporary",
+    }
+)
+
 
 def _normalize_flow_candidate(
     r: dict[str, Any], source_name: str, idx: int, base_url: str | None = None
@@ -195,6 +223,17 @@ def _normalize_flow_candidate(
         "sorted by",
         "previous",
         "next",
+        # Facet/status labels that leak when a card selector drifts onto a
+        # filter panel: the "name" becomes a facet value instead of a person.
+        "employment status",
+        "citizenship",
+        "singaporean",
+        "permanent resident",
+        "expected salary",
+        "date of birth",
+        "availability",
+        "last active",
+        "years of experience",
     )
     lowered = name.lower()
     if (
@@ -202,6 +241,13 @@ def _normalize_flow_candidate(
         or any(m in lowered for m in chrome_markers[6:])
         or (not str(r.get("title") or "").strip() and len(raw_text) > 400)
     ):
+        return None
+    # NAME-SHAPE guard (defense-in-depth): a single-token name that is a known
+    # facet/status word is chrome, not a person. Conservative on purpose —
+    # exact-token matches only, so real single-word and multi-word names
+    # (hyphens/apostrophes included) still pass.
+    name_tokens = re.findall(r"[A-Za-z][A-Za-z'-]*", name)
+    if len(name_tokens) == 1 and name_tokens[0].lower() in _CHROME_NAME_WORDS:
         return None
     headline = (
         str(r.get("summary") or "").strip()

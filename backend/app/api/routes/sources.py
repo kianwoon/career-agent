@@ -59,6 +59,21 @@ MCF_TALENT_SEARCH_INPUT = "#talent-search-input"
 FASTJOBS_EMPLOYER_HOST = "employer.fastjobs.sg"
 FASTJOBS_TALENT_SEARCH_URL = "https://employer.fastjobs.sg/p/talent/search/?coyid=22091"
 
+# Candidate cards carry a NAME, not a link label: a bare "a" title selector
+# picks the first anchor (nav/footer/facet) and yields junk like
+# "Employment Status". This selector prefers a profile-ish anchor, then any
+# heading/name element. FastJobs candidate cards are plain divs — the
+# heading/name fallbacks cover them. Jobs keep the legacy {"title": "a"}.
+CANDIDATE_CARD_FIELDS: dict[str, str] = {
+    "title": "a[href*='/candidate'], a[href*='/profile'], h1, h2, h3, .name, [class*='name']"
+}
+
+
+def _card_fields(flow_type: str | None) -> dict[str, str]:
+    """Field map for a synthesized card step: name-bearing for candidates,
+    legacy first-anchor for jobs."""
+    return dict(CANDIDATE_CARD_FIELDS) if flow_type == "find_candidates" else {"title": "a"}
+
 
 def _is_mcf_candidates(source: Source, flow_type: str | None) -> bool:
     """True for a MyCareersFuture find_candidates flow (needs the employer app)."""
@@ -750,7 +765,7 @@ async def agent_record_manual_stop(
             if found and found.get("found") and found.get("card"):
                 suffix = [{
                     "card": found["card"],
-                    "fields": {"title": "a"},
+                    "fields": _card_fields(req.flow_type),
                 }]
                 healed = True
         except Exception:
@@ -960,7 +975,7 @@ async def _agent_discover_fastjobs(source: Source) -> list[dict[str, Any]]:
         card = found["card"]
         if not is_root_selector(card):
             logger.info("agent_record: fastjobs card found: %s", card)
-            return prefix + [{"card": card, "fields": {"title": "a"}}]
+            return prefix + [{"card": card, "fields": _card_fields("find_candidates")}]
         logger.warning("agent_record: fastjobs rejected root card selector %s", card)
 
     # Last resort: probe candidate card selectors via extract.
@@ -980,7 +995,7 @@ async def _agent_discover_fastjobs(source: Source) -> list[dict[str, Any]]:
         real = [r for r in rows or [] if len(r.get("raw_text") or "") > 80]
         if len(real) >= 3:
             logger.info("agent_record: fastjobs fallback extract card: %s", cand)
-            return prefix + [{"card": cand, "fields": {"title": "a"}}]
+            return prefix + [{"card": cand, "fields": _card_fields("find_candidates")}]
 
     # Diagnosable failure: surface page state (title/bodyChars).
     try:
@@ -1071,7 +1086,7 @@ async def _agent_discover(source: Source, req: AgentRecordRequest) -> list[dict[
             card = found["card"]
             if not is_root_selector(card):
                 logger.info("agent_record: mcf card found: %s", card)
-                return prefix + [{"card": card, "fields": {"title": "a"}}]
+                return prefix + [{"card": card, "fields": _card_fields("find_candidates")}]
             logger.warning("agent_record: mcf rejected root card selector %s", card)
         # Last resort: probe candidate card selectors via extract.
         for cand in (
@@ -1091,7 +1106,7 @@ async def _agent_discover(source: Source, req: AgentRecordRequest) -> list[dict[
             real = [r for r in rows or [] if len(r.get("raw_text") or "") > 80]
             if len(real) >= 3:
                 logger.info("agent_record: mcf fallback extract card: %s", cand)
-                return prefix + [{"card": cand, "fields": {"title": "a"}}]
+                return prefix + [{"card": cand, "fields": _card_fields("find_candidates")}]
         # Diagnosable failure: surface page state (title/bodyChars/loginHint).
         try:
             state = await agent_registry.dispatch(
@@ -1190,7 +1205,7 @@ async def _agent_discover(source: Source, req: AgentRecordRequest) -> list[dict[
                 return [
                     {"action": "navigate", "url": search_url},
                     {"action": "wait", "seconds": 5},
-                    {"card": found["card"], "fields": {"title": "a"}},
+                    {"card": found["card"], "fields": _card_fields(req.flow_type)},
                 ]
             # Last resort: probe candidate card selectors via extract and
             # pick the first with 3+ text-rich rows.
@@ -1214,7 +1229,7 @@ async def _agent_discover(source: Source, req: AgentRecordRequest) -> list[dict[
                     return [
                         {"action": "navigate", "url": search_url},
                         {"action": "wait", "seconds": 5},
-                        {"card": cand, "fields": {"title": "a"}},
+                        {"card": cand, "fields": _card_fields(req.flow_type)},
                     ]
             logger.warning("agent_record: seek no card detected: %s", found)
             try:

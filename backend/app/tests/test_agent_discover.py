@@ -2,7 +2,7 @@
 
 import pytest
 
-from app.api.routes.sources import _agent_discover
+from app.api.routes.sources import CANDIDATE_CARD_FIELDS, _agent_discover
 
 
 class _FakeRegistry:
@@ -78,7 +78,7 @@ async def test_seek_discover_searches_via_url_param(monkeypatch):
         s.get("action") == "navigate" and "uncoupledFreeText={query}" in s["url"]
         for s in steps
     )
-    assert steps[-1] == {"card": "div[data-card]", "fields": {"title": "a"}}
+    assert steps[-1] == {"card": "div[data-card]", "fields": CANDIDATE_CARD_FIELDS}
     assert run_flow["query"] == "Tang Yee Henn"
     # First try found the card — no extra wait-only run_flow, no extract probe.
     assert not any(c == "extract" for c, _ in fake.calls)
@@ -97,7 +97,7 @@ async def test_seek_discover_falls_back_to_extract_probe(monkeypatch):
     assert any(c == "extract" for c, _ in fake.calls)
     assert steps[-1] == {
         "card": "[data-testid*='card']",
-        "fields": {"title": "a"},
+        "fields": CANDIDATE_CARD_FIELDS,
     }
     # Extra wait-only run_flow happened before the retry.
     waits = [

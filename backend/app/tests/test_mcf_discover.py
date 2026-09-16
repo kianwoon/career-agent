@@ -3,6 +3,7 @@
 import pytest
 
 from app.api.routes.sources import (
+    CANDIDATE_CARD_FIELDS,
     MCF_TALENT_SEARCH_URL,
     _agent_discover,
     _is_mcf_candidates,
@@ -76,7 +77,7 @@ async def test_mcf_discover_targets_employer_talent_search(monkeypatch):
     )
     # Replay steps lead with navigate to the employer URL and carry the card.
     assert steps[0] == {"action": "navigate", "url": MCF_TALENT_SEARCH_URL}
-    assert steps[-1] == {"card": "div.talent-card", "fields": {"title": "a"}}
+    assert steps[-1] == {"card": "div.talent-card", "fields": CANDIDATE_CARD_FIELDS}
 
 
 async def test_mcf_discover_rejects_root_card_then_probes(monkeypatch):

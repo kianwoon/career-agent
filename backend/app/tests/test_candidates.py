@@ -89,6 +89,34 @@ def test_normalize_flow_candidate_drops_ui_junk_names():
     assert _normalize_flow_candidate({"title": junk, "raw_text": junk}, "jobstreet - candidate", 0) is None
 
 
+def test_normalize_flow_candidate_drops_facet_labels():
+    """A drifted card selector can land on a filter panel; the "name" then
+    becomes a facet label/value rather than a person. Both must be dropped."""
+    for junk in ("Employment Status", "Singaporean", "Citizenship"):
+        assert (
+            _normalize_flow_candidate({"title": junk, "raw_text": junk}, "fastjobs - candidate", 0)
+            is None
+        ), junk
+
+
+def test_normalize_flow_candidate_drops_single_facet_word():
+    """Single-token facet/status words are chrome, not a name."""
+    for word in ("PR", "Available", "Salary", "Contract"):
+        assert (
+            _normalize_flow_candidate({"title": word, "raw_text": word}, "fastjobs - candidate", 0)
+            is None
+        ), word
+
+
+def test_normalize_flow_candidate_keeps_real_names():
+    """Legitimate names must survive the facet guard — 2+ words, hyphens,
+    apostrophes, and single non-facet tokens."""
+    for name in ("Tang Yee Henn", "Kwong-Meng Chow", "O'Brien Tan", "Pranav", "Chen Wei"):
+        out = _normalize_flow_candidate({"title": name, "raw_text": name}, "fastjobs - candidate", 0)
+        assert out is not None, name
+        assert out["name"] == name, f"{name} -> {out['name']}"
+
+
 def test_deduplicate_collapses_seek_search_and_profile_rows():
     from app.agent.nodes import deduplicate
 
