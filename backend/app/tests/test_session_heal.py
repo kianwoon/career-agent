@@ -17,7 +17,7 @@ from app.services.session import (
 
 class _FakeSource:
     def __init__(self, domain, base_url=None, profile=None, session_state=None,
-                 captured_at=None, expires_at=None, name="src"):
+                 captured_at=None, expires_at=None, name="src", login_credentials=None):
         self.domain = domain
         self.base_url = base_url or f"https://{domain}/"
         self.profile = profile
@@ -25,6 +25,7 @@ class _FakeSource:
         self.captured_at = captured_at
         self.expires_at = expires_at
         self.name = name
+        self.login_credentials = login_credentials
 
 
 # --- cookie filtering -------------------------------------------------------
@@ -197,6 +198,92 @@ async def test_self_heal_empty_cookies_proceeds(monkeypatch):
     assert healed is False
     assert src.session_state == "old-blob"
     assert db.committed is False
+
+
+# --- credential auto re-login fallback --------------------------------------
+
+
+def _stale_with_creds(**kw):
+    from app.services.encryption import encrypt_credentials
+
+    return _FakeSource(
+        "example.test",
+        session_state="old-blob",
+        captured_at=datetime.now(UTC) - timedelta(hours=30),
+        expires_at=None,
+        login_credentials=encrypt_credentials("user@example.test", "hunter2"),
+        **kw,
+    )
+
+
+async def test_self_heal_falls_back_to_credential_relogin(monkeypatch):
+    """Relay has no cookies -> saved credentials drive a headless re-login,
+    whose fresh session is committed (auto re-login path, acceptance gate b)."""
+    from app.services import session as sess
+    from app.services import source_flows
+
+    src = _stale_with_creds()
+    monkeypatch.setattr(
+        "app.services.agent_relay.agent_registry", _FakeRegistry(cookies=[]), raising=False
+    )
+
+    async def _fake_relogin(source):
+        source.session_state = "fresh-blob"
+        source.captured_at = datetime.now(UTC)
+        source.expires_at = datetime.now(UTC) + timedelta(days=7)
+        return True, "re-login succeeded"
+
+    monkeypatch.setattr(source_flows, "attempt_credential_relogin", _fake_relogin)
+    db = _FakeDb()
+    assert await self_heal_source_session(src, db, "https://example.test/") is True
+    assert src.session_state == "fresh-blob"
+    assert db.committed is True
+    assert sess.session_is_stale(src) is False
+
+
+async def test_self_heal_credential_failure_preserves_manual_path(monkeypatch):
+    """A failed auto re-login leaves the stale session in place and commits
+    nothing, so the existing manual re-login banner still triggers."""
+    from app.services import source_flows
+
+    src = _stale_with_creds()
+    monkeypatch.setattr(
+        "app.services.agent_relay.agent_registry", _FakeRegistry(cookies=[]), raising=False
+    )
+
+    async def _fail(source):
+        return False, "MFA/verification challenge"
+
+    monkeypatch.setattr(source_flows, "attempt_credential_relogin", _fail)
+    db = _FakeDb()
+    assert await self_heal_source_session(src, db, "https://example.test/") is False
+    assert src.session_state == "old-blob"
+    assert db.committed is False
+
+
+async def test_self_heal_no_credentials_no_relogin(monkeypatch):
+    """Without saved credentials no re-login is attempted (banner path only)."""
+    from app.services import source_flows
+
+    src = _FakeSource(
+        "example.test",
+        session_state="old-blob",
+        captured_at=datetime.now(UTC) - timedelta(hours=30),
+        expires_at=None,
+    )
+    called = []
+
+    async def _spy(source):
+        called.append(source)
+        return True, "should not run"
+
+    monkeypatch.setattr(
+        "app.services.agent_relay.agent_registry", _FakeRegistry(cookies=[]), raising=False
+    )
+    monkeypatch.setattr(source_flows, "attempt_credential_relogin", _spy)
+    db = _FakeDb()
+    assert await self_heal_source_session(src, db, "https://example.test/") is False
+    assert called == []
 
 
 async def test_self_heal_skips_fresh_session(monkeypatch):

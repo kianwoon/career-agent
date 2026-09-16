@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import logging
 import os
 import secrets
@@ -87,3 +88,39 @@ def decrypt_session_state(blob: str) -> str:
     aesgcm = AESGCM(key)
     plaintext = aesgcm.decrypt(nonce, ciphertext, None)
     return plaintext.decode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Source login credentials (auto re-login)
+# ---------------------------------------------------------------------------
+# Same AES-256-GCM envelope as session state (base64(nonce || ciphertext ||
+# tag)), so operators get one key + one threat model for both secrets. The
+# plaintext is a JSON object {"username": ..., "password": ...} — secrets are
+# NEVER logged and NEVER echoed back through the API (SourceView exposes only
+# `has_credentials`).
+
+def encrypt_credentials(username: str, password: str) -> str:
+    """Encrypt a source login credential pair into a base64 blob.
+
+    Format: base64(nonce || ciphertext || tag). Never log the return value.
+    """
+    payload = json.dumps({"username": username, "password": password})
+    return encrypt_session_state(payload)
+
+
+def decrypt_credentials(blob: str) -> tuple[str, str]:
+    """Decrypt a credentials blob into (username, password).
+
+    Raises ValueError when the blob is not a well-formed credential pair so the
+    caller can fall back to the manual re-login banner instead of crashing.
+    """
+    raw = decrypt_session_state(blob)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Stored credentials blob is not valid JSON") from exc
+    username = data.get("username")
+    password = data.get("password")
+    if not isinstance(username, str) or not isinstance(password, str):
+        raise ValueError("Stored credentials blob is missing username/password")
+    return username, password

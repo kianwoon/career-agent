@@ -40,6 +40,11 @@ export interface SourceView {
   domain: string;
   enabled: boolean;
   has_session: boolean;
+  /** Encrypted login credentials are stored server-side for auto re-login. */
+  has_credentials: boolean;
+  /** Session is stale/expired — self-heal will try credential re-login, else
+   *  the user must use the manual Re-login path. */
+  needs_relogin: boolean;
   flows: Record<string, string>;
   created_at: string;
 }
@@ -214,6 +219,30 @@ export async function clearSession(id: string): Promise<SourceView> {
     headers,
   });
   if (!res.ok) throw new Error(`Clear session failed with status ${res.status}`);
+  return res.json();
+}
+
+/** Save (or replace) encrypted login credentials for auto re-login. The
+ *  password is sent once over the API and never echoed back. */
+export async function saveSourceCredentials(
+  id: string,
+  creds: { username: string; password: string }
+): Promise<SourceView> {
+  const base = await resolveApiBase();
+  return postJson<SourceView>(`${base}/api/v1/sources/${id}/credentials`, creds);
+}
+
+/** Forget stored credentials — auto re-login falls back to the manual banner. */
+export async function clearSourceCredentials(id: string): Promise<SourceView> {
+  const base = await resolveApiBase();
+  const headers: Record<string, string> = {};
+  const key = await resolveApiKey();
+  if (key) headers["X-API-Key"] = key;
+  const res = await fetch(`${base}/api/v1/sources/${id}/credentials`, {
+    method: "DELETE",
+    headers,
+  });
+  if (!res.ok) throw new Error(`Clear credentials failed with status ${res.status}`);
   return res.json();
 }
 

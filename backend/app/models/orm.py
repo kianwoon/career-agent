@@ -195,6 +195,15 @@ class Source(Base):
     # Earliest cookie expiry of the stored session (None for all session
     # cookies). Drives the pre-search self-heal staleness check.
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Optional operator-supplied login credentials for AUTO re-login when the
+    # captured session expires. Single AES-256-GCM blob (same envelope + key as
+    # session_state) holding JSON {"username": ..., "password": ...}. NEVER
+    # plaintext, never returned by the API (SourceView exposes only
+    # has_credentials). Null means "no auto re-login; use the manual banner".
+    login_credentials: Mapped[str | None] = mapped_column(Text, nullable=True)
+    credentials_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # Per-source capability profile (SiteProfile-shaped dict): probed at
     # registration, then written back reactively when a flow detects a
     # Cloudflare wall / SSO hand-off / login wall. Overrides the global

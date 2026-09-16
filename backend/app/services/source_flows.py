@@ -25,7 +25,7 @@ from playwright.async_api import async_playwright
 
 from app.services.encryption import decrypt_session_state
 from app.services.proxy import proxy_config as _proxy_config
-from app.services.site_profiles import apply_finding, profile_for
+from app.services.site_profiles import apply_finding, profile_for, profile_for_source
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +74,143 @@ async def _persist_finding_to_source(source_id: str | None, reason: str | None) 
     except Exception as exc:
         logger.warning("Could not persist %s finding for source %s: %s", finding, source_id, exc)
 
+
+
+# ---------------------------------------------------------------------------
+# Shared login-form filler (wizard + headless auto re-login)
+# ---------------------------------------------------------------------------
+
+# Login-form field probes, tried in order. LinkedIn's authwall ids come FIRST —
+# the generic probes can miss its custom markup. Same list the wizard used.
+_LOGIN_USER_SELECTORS: tuple[str, ...] = (
+    "#session_key",
+    "input[name='session_key']",
+    "input[type='email']",
+    "input[type='text'][name*='user' i]",
+    "input[type='text'][id*='user' i]",
+    "input[type='text'][name*='email' i]",
+    "input[type='text'][id*='email' i]",
+    "input[type='text']:not([name*='search' i])",
+    "input[type='tel']",
+)
+_LOGIN_PASS_SELECTORS: tuple[str, ...] = (
+    "#session_password",
+    "input[name='session_password']",
+    "input[type='password']",
+)
+_LOGIN_SUBMIT_SELECTORS: tuple[str, ...] = (
+    "button[type='submit']",
+    "input[type='submit']",
+    "button:has-text('Sign in')",
+    "button:has-text('Log in')",
+    "button:has-text('Login')",
+)
+
+
+async def _find_visible(page: Any, selectors: tuple[str, ...] | list[str], retries: int = 3) -> str | None:
+    """Probe for a visible field, retrying — SPA forms render late."""
+    from app.services.pacing import pacing
+
+    for attempt in range(retries):
+        for sel in selectors:
+            try:
+                el = page.locator(sel).first
+                if await el.count() > 0 and await el.is_visible():
+                    return sel
+            except Exception as exc:
+                logger.debug("selector probe failed for %s: %s", sel, exc)
+        if attempt < retries - 1:
+            # LinkedIn's authwall form is client-rendered; give it time.
+            await pacing.human_pause_reading((1.5, 2.5))
+    return None
+
+
+async def _fill_login_form(
+    page: Any, username: str, password: str, submit: bool = True
+) -> dict[str, Any]:
+    """Type credentials into the best-matching fields on the CURRENT page.
+
+    Shared by the operator-driven wizard (WizardSession.fill_credentials) and
+    the headless auto re-login path, so both honour the same selector strategy
+    and human pacing. Never logs the credential values. Caller must have
+    already navigated to the page containing the login form.
+    """
+    from app.services.pacing import pacing
+
+    user_sel = await _find_visible(page, _LOGIN_USER_SELECTORS)
+    pass_sel = await _find_visible(page, _LOGIN_PASS_SELECTORS)
+
+    # If we have LinkedIn's known login fields by id but they don't report
+    # visible (off-screen variant), still use them — Playwright can fill
+    # offscreen inputs, and submitting works.
+    if not (user_sel and pass_sel):
+        fallback_user = await page.locator("#session_key, input[name='session_key']").first.count()
+        fallback_pass = await page.locator("#session_password, input[name='session_password']").first.count()
+        if fallback_user and fallback_pass:
+            user_sel = user_sel or "#session_key"
+            pass_sel = pass_sel or "#session_password"
+
+    # Landing on a sign-UP page (e.g. LinkedIn /authwall "Join LinkedIn")?
+    # The login form is behind a "Sign in" link — click it, then re-probe.
+    if not (user_sel and pass_sel):
+        sign_in_link = await _find_visible(
+            page,
+            (
+                "a[data-testid='sign-in-link']",
+                "a:has-text('Sign in')",
+                "a:has-text('Log in')",
+                "a:has-text('Already on LinkedIn')",
+            ),
+            retries=1,
+        )
+        if sign_in_link:
+            await pacing.human_delay("commit")
+            await page.click(sign_in_link, timeout=5_000)
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=10_000)
+            except Exception:
+                pass
+            await pacing.human_pause_reading((1.5, 3.0))
+            user_sel = await _find_visible(page, _LOGIN_USER_SELECTORS)
+            pass_sel = await _find_visible(page, _LOGIN_PASS_SELECTORS)
+
+    if not user_sel or not pass_sel:
+        # Diagnostic: what does the page actually show? (No credential values.)
+        try:
+            probe = await page.evaluate(
+                """() => ({
+                  url: location.href.slice(0, 120),
+                  title: document.title.slice(0, 60),
+                  inputs: Array.from(document.querySelectorAll('input')).slice(0, 8).map(i => ({
+                    id: i.id, name: i.name, type: i.type,
+                    visible: !!(i.offsetWidth || i.offsetHeight),
+                  })),
+                })"""
+            )
+            logger.warning("fill_credentials failed. Page: %s", probe)
+        except Exception:
+            pass
+        return {
+            "ok": False,
+            "reason": "No username/password fields visible on the page — "
+                      "navigate to the login form first (or use click to get there).",
+        }
+    # Human-paced: pause between fields, type with jittered keystrokes.
+    await pacing.human_delay("commit")
+    await pacing.human_type(page, user_sel, username)
+    await pacing.human_delay("mechanical")
+    await pacing.human_type(page, pass_sel, password)
+    if not submit:
+        return {"ok": True, "submitted": False}
+    # Click a plausible submit button, else press Enter in the password box.
+    submit_sel = await _find_visible(page, _LOGIN_SUBMIT_SELECTORS)
+    await pacing.human_delay("commit")
+    if submit_sel:
+        await page.click(submit_sel, timeout=5_000)
+    else:
+        await page.press(pass_sel, "Enter", timeout=5_000)
+    await pacing.human_pause_reading((2.5, 4.5))
+    return {"ok": True, "submitted": True}
 
 
 # ---------------------------------------------------------------------------
@@ -287,132 +424,13 @@ class WizardSession:
     async def fill_credentials(self, username: str, password: str, submit: bool = True) -> dict[str, Any]:
         """Type credentials into the best-matching fields on the current page."""
         assert self.page, "wizard not started"
-        from app.services.pacing import pacing
-
-        async def _find(selectors: list[str], retries: int = 3) -> str | None:
-            """Probe for a visible field, retrying — SPA forms render late."""
-            for attempt in range(retries):
-                for sel in selectors:
-                    try:
-                        el = self.page.locator(sel).first
-                        if await el.count() > 0 and await el.is_visible():
-                            return sel
-                    except Exception as exc:
-                        logger.debug("selector probe failed for %s: %s", sel, exc)
-                if attempt < retries - 1:
-                    # LinkedIn's authwall form is client-rendered; give it time.
-                    await pacing.human_pause_reading((1.5, 2.5))
-            return None
-
-        # LinkedIn's authwall login form uses stable ids — probe them FIRST
-        # (the generic name/type probes can miss its custom markup).
-        user_sel = await _find([
-            "#session_key",
-            "input[name='session_key']",
-            "input[type='email']",
-            "input[type='text'][name*='user' i]",
-            "input[type='text'][id*='user' i]",
-            "input[type='text'][name*='email' i]",
-            "input[type='text'][id*='email' i]",
-            "input[type='text']:not([name*='search' i])",
-            "input[type='tel']",
-        ])
-        pass_sel = await _find([
-            "#session_password",
-            "input[name='session_password']",
-            "input[type='password']",
-        ])
-
-        # If we have LinkedIn's known login fields by id but they don't report
-        # visible (off-screen variant), still use them — Playwright can fill
-        # offscreen inputs, and submitting works.
-        if not (user_sel and pass_sel):
-            fallback_user = await self.page.locator("#session_key, input[name='session_key']").first.count()
-            fallback_pass = await self.page.locator("#session_password, input[name='session_password']").first.count()
-            if fallback_user and fallback_pass:
-                user_sel = user_sel or "#session_key"
-                pass_sel = pass_sel or "#session_password"
-
-        # Landing on a sign-UP page (e.g. LinkedIn /authwall "Join LinkedIn")?
-        # The login form is behind a "Sign in" link — click it, wait for the
-        # login form to render, then re-probe.
-        if not (user_sel and pass_sel):
-            sign_in_link = await _find([
-                "a[data-testid='sign-in-link']",
-                "a:has-text('Sign in')",
-                "a:has-text('Log in')",
-                "a:has-text('Already on LinkedIn')",
-            ], retries=1)
-            if sign_in_link:
-                await pacing.human_delay("commit")
-                await self.page.click(sign_in_link, timeout=5_000)
-                try:
-                    await self.page.wait_for_load_state("domcontentloaded", timeout=10_000)
-                except Exception:
-                    pass
-                await pacing.human_pause_reading((1.5, 3.0))
-                user_sel = await _find([
-                    "#session_key",
-                    "input[name='session_key']",
-                    "input[type='email']",
-                    "input[type='text'][name*='user' i]",
-                    "input[type='text'][name*='email' i]",
-                    "input[type='text']:not([name*='search' i])",
-                ])
-                pass_sel = await _find([
-                    "#session_password",
-                    "input[name='session_password']",
-                    "input[type='password']",
-                ])
-
-        if not user_sel or not pass_sel:
-            # Diagnostic: what does the page actually show?
-            try:
-                probe = await self.page.evaluate(
-                    """() => ({
-                      url: location.href.slice(0, 120),
-                      title: document.title.slice(0, 60),
-                      inputs: Array.from(document.querySelectorAll('input')).slice(0, 8).map(i => ({
-                        id: i.id, name: i.name, type: i.type,
-                        visible: !!(i.offsetWidth || i.offsetHeight),
-                      })),
-                    })"""
-                )
-                logger.warning("fill_credentials failed. Page: %s", probe)
-            except Exception:
-                pass
-            return {
-                "ok": False,
-                "reason": "No username/password fields visible on the page — "
-                          "navigate to the login form first (or use click to get there).",
-            }
-        # Human-paced: pause between fields, type with jittered keystrokes.
-        from app.services.pacing import pacing
-
-        await pacing.human_delay("commit")
-        await pacing.human_type(self.page, user_sel, username)
-        await pacing.human_delay("mechanical")
-        await pacing.human_type(self.page, pass_sel, password)
+        result = await _fill_login_form(self.page, username, password, submit)
         self.touch()
-        if not submit:
-            return {"ok": True, "submitted": False}
-        # Click a plausible submit button, else press Enter in the password box.
-        submit_sel = await _find([
-            "button[type='submit']",
-            "input[type='submit']",
-            "button:has-text('Sign in')",
-            "button:has-text('Log in')",
-            "button:has-text('Login')",
-        ])
-        await pacing.human_delay("commit")
-        if submit_sel:
-            await self.page.click(submit_sel, timeout=5_000)
-        else:
-            await self.page.press(pass_sel, "Enter", timeout=5_000)
-        await pacing.human_pause_reading((2.5, 4.5))
-        self.touch()
-        st = await self.status()
-        return {"ok": True, "submitted": True, **st}
+        if result.get("ok") and result.get("submitted"):
+            # Preserve the wizard's post-submit page status (url/title/logged_in).
+            st = await self.status()
+            return {**result, **st}
+        return result
 
     async def submit_mfa(self, code: str) -> dict[str, Any]:
         """Submit an OTP/MFA code into the first visible short text input."""
@@ -820,6 +838,158 @@ def _sanitize_storage_state(storage_state_encrypted: str | None) -> dict[str, An
                 "lax": "Lax",
             }.get(ss if isinstance(ss, str) else "", "Lax")
     return state
+
+
+# ---------------------------------------------------------------------------
+# Headless auto re-login with saved credentials
+# ---------------------------------------------------------------------------
+
+# Redirect/login-wall markers reused for the post-submit "did we land back on a
+# login page?" check. Kept local so this module stays importable without the
+# wizard stack.
+_RELOGIN_MFA_MARKERS = ("verification code", "one-time", "two-factor", "2fa", "authenticator")
+
+
+def resolve_login_url(source: Any) -> str:
+    """Best login-form URL for a source (mirrors the /agent_login mapping).
+
+    Sites with a dedicated login route (LinkedIn, MCF, FastJobs employer host)
+    must be hit there; everything else falls back to base_url.
+    """
+    domain = (getattr(source, "domain", "") or "").lower()
+    base_url = getattr(source, "base_url", "") or ""
+    prof = profile_for_source(domain or base_url, getattr(source, "profile", None))
+    if "linkedin.com" in domain:
+        return "https://www.linkedin.com/login"
+    if "mycareersfuture.gov.sg" in domain:
+        return "https://www.mycareersfuture.gov.sg/sign-in"
+    if prof and prof.candidate_entry_url:
+        from urllib.parse import urlparse
+
+        host = urlparse(prof.candidate_entry_url).hostname
+        if host:
+            return f"https://{host}/site/login/"
+    if "fastjobs." in domain or "fastjobs." in base_url:
+        return "https://employer.fastjobs.sg/site/login/"
+    return base_url
+
+
+def _relogin_blocker(page: Any, reason: str | None) -> str | None:
+    """Classify a post-submit failure that credentials alone cannot solve.
+
+    MFA/CAPTCHA walls are reported explicitly so the operator knows why the
+    auto attempt stopped and the manual banner is required.
+    """
+    del page  # page kept for API symmetry / future marker probes
+    low = (reason or "").lower()
+    if any(m in low for m in _RELOGIN_MFA_MARKERS):
+        return "MFA/verification challenge"
+    if "cloudflare" in low or "anti-bot" in low or "captcha" in low:
+        return "CAPTCHA / bot challenge"
+    return reason
+
+
+async def attempt_credential_relogin(source: Any) -> tuple[bool, str]:
+    """Headless re-login using the source's SAVED (decrypted) credentials.
+
+    Returns (ok, detail). On success the caller is expected to persist the
+    fresh session blob; this function performs the browser work and writes the
+    new storage_state onto `source` (in memory) plus captured_at/expires_at.
+    It does NOT commit — the caller owns the DB session.
+
+    Never logs username/password. Failures return an explanatory detail
+    (login form not found, MFA required, still logged out, browser/network
+    error) so self-heal can fall back to the manual re-login banner.
+    """
+    from datetime import UTC, datetime
+
+    from app.services.encryption import decrypt_credentials, encrypt_session_state
+    from app.services.session import _earliest_expiry
+
+    blob = getattr(source, "login_credentials", None)
+    if not blob:
+        return False, "no saved credentials"
+    try:
+        username, password = decrypt_credentials(blob)
+    except Exception as exc:
+        # Corrupt/foreign-key blob: treat as "no credentials" and let the
+        # manual banner handle it.
+        logger.warning(
+            "Auto re-login: stored credentials unreadable for %s: %s",
+            getattr(source, "name", "?"),
+            exc,
+        )
+        return False, "stored credentials unreadable"
+
+    target_url = resolve_login_url(source)
+    if not target_url:
+        return False, "no login URL for source"
+
+    pw = await async_playwright().start()
+    browser = None
+    try:
+        browser = await pw.chromium.launch(headless=True, proxy=_proxy_config())
+        ctx = await browser.new_context()
+        page = await ctx.new_page()
+        await page.goto(target_url, timeout=45_000, wait_until="domcontentloaded")
+        await _wait_for_ready(page)
+
+        blocked = await _looks_blocked(page)
+        if blocked:
+            return False, _relogin_blocker(page, blocked) or blocked
+
+        filled = await _fill_login_form(page, username, password, submit=True)
+        if not filled.get("ok"):
+            return False, "login form not found"
+
+        # Post-submit: still on a login-shaped page => creds rejected or an
+        # MFA/CAPTCHA step is in the way.
+        await _wait_for_ready(page)
+        redirected = await _looks_logged_out(page, domain_of(target_url))
+        if redirected is not None:
+            reason = _relogin_blocker(page, redirected)
+            logger.info(
+                "Auto re-login failed for %s: %s",
+                getattr(source, "name", "?"),
+                reason,
+            )
+            return False, reason or "still logged out after submit"
+
+        state = await ctx.storage_state()
+        domain = (getattr(source, "domain", "") or "").lower()
+        if domain:
+            state["cookies"] = [
+                c for c in state.get("cookies", []) if domain in (c.get("domain") or "")
+            ]
+            state.setdefault("origins", [])
+
+        if not state.get("cookies"):
+            return False, "no cookies captured after login"
+
+        source.session_state = encrypt_session_state(json.dumps(state))
+        source.captured_at = datetime.now(UTC)
+        source.expires_at = _earliest_expiry(state)
+        logger.info(
+            "Auto re-login succeeded for %s (%d cookies)",
+            getattr(source, "name", "?"),
+            len(state["cookies"]),
+        )
+        return True, "re-login succeeded"
+    except Exception as exc:  # browser/network failure -> banner fallback
+        logger.warning(
+            "Auto re-login error for %s: %s", getattr(source, "name", "?"), exc
+        )
+        return False, f"auto re-login error: {str(exc)[:120]}"
+    finally:
+        try:
+            if browser is not None:
+                await browser.close()
+        except Exception:
+            pass
+        try:
+            await pw.stop()
+        except Exception:
+            pass
 
 
 async def _wait_for_ready(page: Any) -> None:

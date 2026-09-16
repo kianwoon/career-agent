@@ -303,6 +303,11 @@ class SourceView(BaseModel):
     domain: str
     enabled: bool
     has_session: bool = False
+    # Auto re-login state (never exposes the stored secret, only its presence).
+    has_credentials: bool = False
+    # True when the stored session is missing/old/near-expiry, i.e. self-heal
+    # (extension re-capture or credential auto re-login) will run on next use.
+    needs_relogin: bool = False
     flows: dict[str, str] = Field(default_factory=dict, description="flow_type -> status")
     # Per-source capability profile (probed/learned). None until first probe.
     profile: dict | None = None

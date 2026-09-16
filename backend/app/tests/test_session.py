@@ -3,7 +3,14 @@
 import json
 from datetime import UTC, datetime, timedelta
 
-from app.services.encryption import decrypt_session_state, encrypt_session_state
+import pytest
+
+from app.services.encryption import (
+    decrypt_credentials,
+    decrypt_session_state,
+    encrypt_credentials,
+    encrypt_session_state,
+)
 from app.services.session import _earliest_expiry, _filter_state, session_needs_refresh
 
 
@@ -96,3 +103,30 @@ def test_session_needs_refresh_far_future():
 def test_session_needs_refresh_near_expiry():
     exp = datetime.now(UTC) + timedelta(days=2)
     assert session_needs_refresh(_FakeSession(session_state="blob", expires_at=exp)) is True
+
+
+# --- source login credentials (auto re-login) -------------------------------
+
+
+def test_credentials_round_trip():
+    """encrypt_credentials/decrypt_credentials round-trip the pair, and the
+    blob carries neither the username nor the password in plaintext."""
+    blob = encrypt_credentials("ops@example.test", "s3cret-pw")
+    assert "ops@example.test" not in blob
+    assert "s3cret-pw" not in blob
+    assert decrypt_credentials(blob) == ("ops@example.test", "s3cret-pw")
+
+
+def test_credentials_blob_uses_random_nonce():
+    b1 = encrypt_credentials("u", "p")
+    b2 = encrypt_credentials("u", "p")
+    assert b1 != b2
+    assert decrypt_credentials(b1) == decrypt_credentials(b2) == ("u", "p")
+
+
+def test_credentials_reject_non_credential_blob():
+    """A valid session-state blob is not a credential pair -> ValueError, so
+    self-heal falls back to the manual banner instead of crashing."""
+    blob = encrypt_session_state(json.dumps({"cookies": []}))
+    with pytest.raises(ValueError):
+        decrypt_credentials(blob)

@@ -41,6 +41,16 @@ _SCHEMA_UPGRADES: tuple[tuple[str, str, str], ...] = (
         "ALTER TABLE sources ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ",
         "ALTER TABLE sources ADD COLUMN expires_at TIMESTAMPTZ",
     ),
+    (
+        "login_credentials",
+        "ALTER TABLE sources ADD COLUMN IF NOT EXISTS login_credentials TEXT",
+        "ALTER TABLE sources ADD COLUMN login_credentials TEXT",
+    ),
+    (
+        "credentials_updated_at",
+        "ALTER TABLE sources ADD COLUMN IF NOT EXISTS credentials_updated_at TIMESTAMPTZ",
+        "ALTER TABLE sources ADD COLUMN credentials_updated_at TIMESTAMPTZ",
+    ),
 )
 
 

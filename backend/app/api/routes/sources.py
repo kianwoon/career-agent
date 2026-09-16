@@ -25,10 +25,11 @@ from app.models.schemas import (
     WizardStartRequest,
     WizardStartResponse,
 )
-from app.services.encryption import encrypt_session_state
+from app.services.encryption import encrypt_credentials, encrypt_session_state
 from app.services.session import (
     prepare_source_cookies,
     self_heal_source_session,
+    session_is_stale,
 )
 from app.services.site_probe import probe_site
 from app.services.site_profiles import profile_for_source
@@ -281,7 +282,13 @@ def _source_view(source: Source, flows: list[SourceFlow]) -> SourceView:
         base_url=source.base_url,
         domain=source.domain,
         enabled=bool(source.enabled),
-        has_session=bool(source.session_state),
+            has_session=bool(source.session_state),
+            # Auto re-login state. `has_credentials` is a BOOLEAN only — the
+            # encrypted blob (and never the plaintext) stays server-side.
+            has_credentials=bool(getattr(source, "login_credentials", None)),
+            # session_is_stale already covers missing state / old capture /
+            # near-expiry, i.e. exactly the cases self-heal will act on.
+            needs_relogin=session_is_stale(source),
         flows={f.flow_type: f.status for f in flows},
         profile=getattr(source, "profile", None),
         created_at=source.created_at,
@@ -420,6 +427,11 @@ async def clear_source_session(
     has_session flips false and the wizard opens a clean, logged-out login
     page for fresh credentials. Also clears expires_at so the staleness
     self-heal never sees an orphaned expiry.
+
+    Saved auto re-login CREDENTIALS are deliberately KEPT: wiping the session
+    is the "session went bad" path, and the stored credentials are exactly what
+    lets the next search re-authenticate headlessly. Use
+    DELETE /{source_id}/credentials to forget them.
     """
     source = await _get_source(source_id, db)
     if (
@@ -432,6 +444,55 @@ async def clear_source_session(
         source.expires_at = None
         await db.commit()
         await db.refresh(source)
+    flows = (
+        await db.execute(select(SourceFlow).where(SourceFlow.source_id == source.id))
+    ).scalars().all()
+    return _source_view(source, list(flows))
+
+
+# ---------------------------------------------------------------------------
+# Auto re-login credentials (encrypted at rest; never echoed back)
+# ---------------------------------------------------------------------------
+
+
+class SourceCredentials(BaseModel):
+    username: str = Field(..., min_length=1, max_length=320)
+    password: str = Field(..., min_length=1, max_length=1024)
+
+
+@router.post("/{source_id}/credentials", response_model=SourceView)
+async def save_source_credentials(
+    source_id: str, req: SourceCredentials, db: AsyncSession = Depends(get_db)
+) -> SourceView:
+    """Store (or replace) the encrypted login credentials for auto re-login.
+
+    Only the AES-256-GCM blob is persisted — the plaintext never lands in the
+    DB and is never returned. The response reports `has_credentials` only.
+    """
+    source = await _get_source(source_id, db)
+    source.login_credentials = encrypt_credentials(req.username, req.password)
+    source.credentials_updated_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(source)
+    logger.info("Stored auto re-login credentials for %s", source_id)
+    flows = (
+        await db.execute(select(SourceFlow).where(SourceFlow.source_id == source.id))
+    ).scalars().all()
+    return _source_view(source, list(flows))
+
+
+@router.delete("/{source_id}/credentials", response_model=SourceView)
+async def clear_source_credentials(
+    source_id: str, db: AsyncSession = Depends(get_db)
+) -> SourceView:
+    """Forget the saved credentials (auto re-login falls back to the banner)."""
+    source = await _get_source(source_id, db)
+    if source.login_credentials is not None or source.credentials_updated_at is not None:
+        source.login_credentials = None
+        source.credentials_updated_at = None
+        await db.commit()
+        await db.refresh(source)
+        logger.info("Cleared auto re-login credentials for %s", source_id)
     flows = (
         await db.execute(select(SourceFlow).where(SourceFlow.source_id == source.id))
     ).scalars().all()

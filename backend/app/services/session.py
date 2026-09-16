@@ -329,17 +329,19 @@ def session_is_stale(source: Any) -> bool:
 async def self_heal_source_session(
     source: Any, db: Any, entry_url: str | None = None
 ) -> bool:
-    """Best-effort re-capture of a stale source session via the extension relay.
+    """Best-effort re-capture of a stale source session, then credential re-login.
 
-    Runs BEFORE a recorded flow. If the session is stale and the source is not
-    anonymous, ask the extension for its live cookies for `entry_url` (falling
-    back to the source base_url), filter them, and store the blob
-    (session_state/captured_at/expires_at) on the row. Returns True if a fresh
-    capture was stored.
+    Runs BEFORE a recorded flow. Order of attempts:
+      1. extension relay get_cookies for `entry_url` (live signed-in browser);
+      2. if that yields nothing AND the source has saved login credentials, a
+         headless credential re-login (source_flows.attempt_credential_relogin)
+         writes a fresh storage_state + captured_at + expires_at;
+      3. otherwise give up — the downstream login-wall/Cloudflare handling
+         raises the manual re-login banner.
 
     Never raises and NEVER breaks a passing flow: a missing extension
-    (RuntimeError), empty capture, or DB error just logs and returns False so the
-    existing downstream login-wall/Cloudflare handling still applies.
+    (RuntimeError), empty capture, bad credentials, or DB error just logs and
+    returns False. Credential values are never logged.
     """
     if not session_is_stale(source):
         return False
@@ -362,40 +364,81 @@ async def self_heal_source_session(
             getattr(source, "name", "?"),
             exc,
         )
-        return False
+        cookies = None
     except Exception as exc:  # never let heal break the flow
         logger.warning(
             "Session self-heal dispatch failed for %s: %s",
             getattr(source, "name", "?"),
             exc,
         )
-        return False
-    if not cookies:
+        cookies = None
+    if cookies:
+        try:
+            filtered, expires_at = prepare_source_cookies(cookies, source)
+            source.session_state = encrypt_session_state(
+                json.dumps({"cookies": filtered, "origins": []})
+            )
+            source.captured_at = datetime.now(UTC)
+            source.expires_at = expires_at
+            await db.commit()
+        except Exception as exc:  # a DB hiccup must not abort the search
+            logger.warning(
+                "Session self-heal store failed for %s: %s",
+                getattr(source, "name", "?"),
+                exc,
+            )
+            return False  # extension capture failed
+
         logger.info(
-            "Session self-heal: no cookies returned for %s — proceeding with stored session",
+            "Session self-heal re-captured %d cookies for %s (expires %s)",
+            len(filtered),
             getattr(source, "name", "?"),
+            expires_at,
         )
-        return False
-    try:
-        filtered, expires_at = prepare_source_cookies(cookies, source)
-        source.session_state = encrypt_session_state(
-            json.dumps({"cookies": filtered, "origins": []})
-        )
-        source.captured_at = datetime.now(UTC)
-        source.expires_at = expires_at
-        await db.commit()
-    except Exception as exc:  # a DB hiccup must not abort the search
-        logger.warning(
-            "Session self-heal store failed for %s: %s", getattr(source, "name", "?"), exc
-        )
-        return False
+        return True
     logger.info(
-        "Session self-heal re-captured %d cookies for %s (expires %s)",
-        len(filtered),
+        "Session self-heal: no cookies returned for %s — trying saved credentials",
         getattr(source, "name", "?"),
-        expires_at,
     )
-    return True
+    # Fallback: headless re-login with the operator's saved (encrypted)
+    # credentials. On success the blob was written onto `source` in memory —
+    # commit here so the fresh session is durable for the flow about to run.
+    if getattr(source, "login_credentials", None):
+        try:
+            from app.services.source_flows import attempt_credential_relogin
+
+            ok, detail = await attempt_credential_relogin(source)
+        except Exception as exc:  # never let heal break the flow
+            logger.warning(
+                "Session self-heal credential re-login raised for %s: %s",
+                getattr(source, "name", "?"),
+                exc,
+            )
+            return False
+        if not ok:
+            logger.info(
+                "Session self-heal: auto re-login failed for %s (%s) — "
+                "manual re-login banner applies",
+                getattr(source, "name", "?"),
+                detail,
+            )
+            return False
+        try:
+            await db.commit()
+        except Exception as exc:
+            logger.warning(
+                "Session self-heal credential store failed for %s: %s",
+                getattr(source, "name", "?"),
+                exc,
+            )
+            return False
+        logger.info(
+            "Session self-heal: auto re-login stored a fresh session for %s (%s)",
+            getattr(source, "name", "?"),
+            detail,
+        )
+        return True
+    return False
 
 
 async def heal_source_session(source_id: str, entry_url: str | None = None) -> bool:

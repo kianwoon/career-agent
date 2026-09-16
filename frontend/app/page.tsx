@@ -23,6 +23,8 @@ import {
   updateSourceEnabled,
   wizardStart,
   clearSession,
+  saveSourceCredentials,
+  clearSourceCredentials,
   wizardStatus,
   wizardCredentials,
   wizardMfa,
@@ -151,6 +153,12 @@ export default function Home() {
   const [shotLoading, setShotLoading] = useState(false);
   const [reloginNeeded, setReloginNeeded] = useState<string | null>(null);
   const [shotError, setShotError] = useState(false);
+  // Auto re-login credential editor (per-source). Keyed by source id so only
+  // one card opens at a time; the password field is write-only and cleared
+  // after a successful save (the backend never returns it).
+  const [credSourceId, setCredSourceId] = useState<string | null>(null);
+  const [credUser, setCredUser] = useState("");
+  const [credPass, setCredPass] = useState("");
   // Structured sourcing plan (candidate mode) — mirrors the external
   // analysis panel: platform, boolean queries, excludes, salary, location,
   // employment type. Queries/excludes are newline-separated in the UI.
@@ -689,6 +697,60 @@ export default function Home() {
     } catch (e) {
       setTimeline((prev) =>
         addEvent(prev, "warn", `Could not remove flow: ${e instanceof Error ? e.message : e}`)
+      );
+    }
+  }
+
+  /** Store encrypted credentials so the session self-heals (auto re-login). */
+  async function handleSaveCredentials(source: SourceView) {
+    if (!credUser.trim() || !credPass) return;
+    try {
+      const updated = await saveSourceCredentials(source.id, {
+        username: credUser.trim(),
+        password: credPass,
+      });
+      setCustomSources((prev) =>
+        prev.map((s) => (s.id === source.id ? { ...s, ...updated } : s))
+      );
+      // Clear the write-only password immediately — it is never re-displayed.
+      setCredPass("");
+      setCredSourceId(null);
+      setTimeline((prev) =>
+        addEvent(prev, "success", `Auto re-login enabled for ${source.name}.`)
+      );
+    } catch (e) {
+      setTimeline((prev) =>
+        addEvent(
+          prev,
+          "warn",
+          `Could not save credentials for ${source.name}: ${e instanceof Error ? e.message : e}`
+        )
+      );
+    }
+  }
+
+  /** Forget stored credentials — auto re-login falls back to manual Re-login. */
+  async function handleClearCredentials(source: SourceView) {
+    try {
+      const updated = await clearSourceCredentials(source.id);
+      setCustomSources((prev) =>
+        prev.map((s) => (s.id === source.id ? { ...s, ...updated } : s))
+      );
+      if (credSourceId === source.id) {
+        setCredSourceId(null);
+        setCredPass("");
+        setCredUser("");
+      }
+      setTimeline((prev) =>
+        addEvent(prev, "info", `Auto re-login disabled for ${source.name} — credentials forgotten.`)
+      );
+    } catch (e) {
+      setTimeline((prev) =>
+        addEvent(
+          prev,
+          "warn",
+          `Could not clear credentials for ${source.name}: ${e instanceof Error ? e.message : e}`
+        )
       );
     }
   }
@@ -1396,6 +1458,84 @@ export default function Home() {
                         </span>
                       </div>
                       {!ready && <span className="source-warn">Setup needed for {mode === "jobs" ? "job" : "candidate"} search</span>}
+                      {/* Auto re-login: encrypted credentials stored server-side
+                          let the session self-heal without a manual sign-in. */}
+                      <div className="wizard-cred-row">
+                        <span
+                          className={`status-pill ${s.has_credentials ? "ok" : "off"}`}
+                          title={
+                            s.has_credentials
+                              ? "Login credentials are saved (encrypted) — the session will re-login automatically when it expires."
+                              : "No saved credentials — you must sign in manually when the session expires."
+                          }
+                        >
+                          Auto re-login: {s.has_credentials ? "on" : "off"}
+                        </span>
+                        {s.has_credentials ? (
+                          <button
+                            className="btn small"
+                            disabled={isRunning}
+                            onClick={(e) => {
+                              e.preventDefault();
+                              handleClearCredentials(s);
+                            }}
+                            title="Forget the saved credentials (auto re-login stops)"
+                          >
+                            Forget
+                          </button>
+                        ) : (
+                          <button
+                            className="btn small"
+                            disabled={isRunning}
+                            onClick={(e) => {
+                              e.preventDefault();
+                              setCredSourceId(credSourceId === s.id ? null : s.id);
+                              setCredUser("");
+                              setCredPass("");
+                            }}
+                            title="Save credentials so an expired session can re-login by itself"
+                          >
+                            {credSourceId === s.id ? "Cancel" : "Save credentials"}
+                          </button>
+                        )}
+                      </div>
+                      {s.needs_relogin && (
+                        <span className="source-warn">
+                          Session expired — auto re-login will try
+                          {s.has_credentials ? "" : " (no saved credentials — use Login / Re-login)"}.
+                        </span>
+                      )}
+                      {credSourceId === s.id && !s.has_credentials && (
+                        <div className="wizard-cred-row">
+                          <input
+                            type="text"
+                            value={credUser}
+                            onChange={(e) => setCredUser(e.target.value)}
+                            placeholder="Username / email"
+                            aria-label={`Username for ${s.name}`}
+                            autoComplete="off"
+                          />
+                          <input
+                            type="password"
+                            value={credPass}
+                            onChange={(e) => setCredPass(e.target.value)}
+                            placeholder="Password"
+                            aria-label={`Password for ${s.name}`}
+                            autoComplete="new-password"
+                          />
+                          <button
+                            className="btn small primary"
+                            disabled={isRunning || !credUser.trim() || !credPass}
+                            onClick={(e) => {
+                              e.preventDefault();
+                              handleSaveCredentials(s);
+                            }}
+                            title="Encrypt and store these credentials for auto re-login"
+                          >
+                            Save
+                          </button>
+                        </div>
+                      )}
                       {/* Only offer capture while the session is still missing —
                           once has_session flips true (e.g. captured, or restored
                           from an earlier run) the button would be a dead end. */}
