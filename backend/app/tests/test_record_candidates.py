@@ -14,6 +14,7 @@ from app.api.routes.sources import (
     FASTJOBS_TALENT_SEARCH_URL,
     MCF_TALENT_SEARCH_URL,
     _candidate_entry_url,
+    _session_capture_urls,
 )
 from app.config import get_settings
 from app.main import app
@@ -36,6 +37,21 @@ def test_candidate_entry_url_fastjobs():
     assert _candidate_entry_url(src) == FASTJOBS_TALENT_SEARCH_URL
     assert "employer.fastjobs.sg" in FASTJOBS_TALENT_SEARCH_URL
     assert "coyid=22091" in FASTJOBS_TALENT_SEARCH_URL
+
+
+def test_candidate_entry_url_fastjobs_io():
+    """Regional TLD resolves the employer talent-search entry, not base_url."""
+    src = _FakeSource("fastjobs.io", "https://www.fastjobs.io/")
+    assert _candidate_entry_url(src) == FASTJOBS_TALENT_SEARCH_URL
+    assert "employer.fastjobs.sg" in _candidate_entry_url(src)
+
+
+def test_session_capture_urls_fastjobs_io():
+    """.io captures both its base host and the employer host."""
+    src = _FakeSource("fastjobs.io", "https://www.fastjobs.io/")
+    urls = _session_capture_urls(src)
+    assert src.base_url in urls
+    assert FASTJOBS_TALENT_SEARCH_URL in urls
 
 
 def test_candidate_entry_url_other_source_falls_back_to_base():

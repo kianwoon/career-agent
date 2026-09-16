@@ -64,12 +64,20 @@ def _is_mcf_candidates(source: Source, flow_type: str | None) -> bool:
     )
 
 
+def _is_fastjobs(source_or_domain: Any) -> bool:
+    """True for any FastJobs TLD (fastjobs.sg, fastjobs.io, …).
+
+    FastJobs serves regional accounts from the same employer portal
+    (employer.fastjobs.sg), so host/login derivation must be tolerant of the
+    source's TLD rather than matching the literal ".sg" domain.
+    """
+    domain = getattr(source_or_domain, "domain", source_or_domain) or ""
+    return "fastjobs." in domain
+
+
 def _is_fastjobs_candidates(source: Source, flow_type: str | None) -> bool:
     """True for a FastJobs find_candidates flow (needs the employer talent search)."""
-    return (
-        flow_type == "find_candidates"
-        and "fastjobs.sg" in (source.domain or "")
-    )
+    return flow_type == "find_candidates" and _is_fastjobs(source)
 
 
 def _candidate_entry_url(source: Source) -> str:
@@ -87,7 +95,7 @@ def _candidate_entry_url(source: Source) -> str:
         return prof.candidate_entry_url
     if "mycareersfuture.gov.sg" in domain:
         return MCF_TALENT_SEARCH_URL
-    if "fastjobs.sg" in domain:
+    if _is_fastjobs(domain):
         return FASTJOBS_TALENT_SEARCH_URL
     return source.base_url
 
@@ -110,7 +118,7 @@ def _session_capture_urls(source: Source) -> list[str]:
         return urls
     if "mycareersfuture.gov.sg" in (source.domain or ""):
         urls.append(MCF_TALENT_SEARCH_URL)
-    if "fastjobs.sg" in (source.domain or ""):
+    if _is_fastjobs(source):
         urls.append(FASTJOBS_TALENT_SEARCH_URL)
     return urls
 
@@ -398,6 +406,9 @@ async def agent_login(source_id: str, db: AsyncSession = Depends(get_db)) -> dic
 
         host = urlparse(prof.candidate_entry_url).hostname or FASTJOBS_EMPLOYER_HOST
         login_url = f"https://{host}/site/login/"
+    elif _is_fastjobs(source):
+        # Any FastJobs TLD (profile-less included) signs in via the employer host.
+        login_url = f"https://{FASTJOBS_EMPLOYER_HOST}/site/login/"
 
     # Re-login = switch accounts. Best-effort wipe the browser's cookies for
     # this site so the login page starts clean. Never fail login on this.
