@@ -61,6 +61,11 @@ async def lifespan(app: FastAPI):
 
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+        # create_all ignores columns added to EXISTING tables; apply the
+        # explicit ADD COLUMN upgrades (e.g. sources.profile) idempotently.
+        from app.db import ensure_schema
+
+        await ensure_schema()
         logger.info("Database tables ensured")
         # Seed built-in sources (LinkedIn, MyCareersFuture, FastJobs) as real
         # rows so they appear as cards, can be disabled, and hold sessions.

@@ -85,3 +85,62 @@ def test_create_source_rejects_dotless_url(client):
     )
     assert r.status_code == 400
     assert "not a valid site URL" in r.json()["error"]["message"]
+
+
+def test_create_source_probes_and_exposes_profile(client, monkeypatch):
+    """Registration runs the site probe once and stores the result on the row;
+    SourceView exposes it (default None)."""
+    fake = {
+        "auth_model": "portal",
+        "cloudflare_protected": False,
+        "login_url_patterns": ["/site/login"],
+        "probed": True,
+    }
+
+    async def fake_probe(_url):
+        return fake
+
+    monkeypatch.setattr("app.api.routes.sources.probe_site", fake_probe)
+
+    # Clean up any leftover row from a previous run.
+    for row in client.get("/api/v1/sources", headers=_headers()).json():
+        if row["domain"] == "probed.example":
+            client.delete(f"/api/v1/sources/{row['id']}", headers=_headers())
+
+    r = client.post(
+        "/api/v1/sources",
+        json={"name": "ProbedBoard", "base_url": "https://probed.example/jobs"},
+        headers=_headers(),
+    )
+    assert r.status_code == 201, r.text
+    src = r.json()
+    assert src["profile"] == fake
+
+    # Also exposed via the list endpoint.
+    listing = client.get("/api/v1/sources", headers=_headers()).json()
+    row = next(s for s in listing if s["id"] == src["id"])
+    assert row["profile"] == fake
+
+    client.delete(f"/api/v1/sources/{src['id']}", headers=_headers())
+
+
+def test_create_source_probe_failure_still_registers(client, monkeypatch):
+    """A raising probe must never fail registration; profile stores None."""
+
+    async def boom(_url):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr("app.api.routes.sources.probe_site", boom)
+
+    for row in client.get("/api/v1/sources", headers=_headers()).json():
+        if row["domain"] == "probe-fail.example":
+            client.delete(f"/api/v1/sources/{row['id']}", headers=_headers())
+
+    r = client.post(
+        "/api/v1/sources",
+        json={"name": "ProbeFail", "base_url": "https://probe-fail.example/"},
+        headers=_headers(),
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["profile"] is None
+    client.delete(f"/api/v1/sources/{r.json()['id']}", headers=_headers())

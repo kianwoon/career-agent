@@ -25,10 +25,55 @@ from playwright.async_api import async_playwright
 
 from app.services.encryption import decrypt_session_state
 from app.services.proxy import proxy_config as _proxy_config
+from app.services.site_profiles import apply_finding, profile_for
 
 logger = logging.getLogger(__name__)
 
 FLOW_TYPES = ("find_jobs", "find_candidates")
+
+
+def _finding_for_reason(reason: str | None) -> str | None:
+    """Map a human_reason to a profile finding key, or None if unrecognised.
+
+    Detection logic is unchanged — this only classifies an existing reason so
+    the reactive write-back knows which profile field to set.
+    """
+    if not reason:
+        return None
+    low = reason.lower()
+    if "cloudflare" in low:
+        return "cloudflare"
+    if any(m in low for m in ("singpass", "corppass", "sso", "openid")):
+        return "sso"
+    if "login" in low or "sign-in" in low or "sign in" in low or "logged out" in low:
+        return "login_wall"
+    return None
+
+
+async def _persist_finding_to_source(source_id: str | None, reason: str | None) -> None:
+    """Best-effort write-back of a detected finding onto the Source row.
+
+    Lazy-imports the DB layer to avoid import cycles (same pattern as
+    nodes.py). A persistence failure must never affect the flow result, so all
+    exceptions are swallowed with a warning.
+    """
+    if not source_id:
+        return
+    finding = _finding_for_reason(reason)
+    if not finding:
+        return
+    try:
+        from app.db import async_session
+        from app.models.orm import Source
+
+        async with async_session() as db:
+            source = await db.get(Source, source_id)
+            if source is not None:
+                source.profile = apply_finding(source.profile, finding)
+                await db.commit()
+    except Exception as exc:
+        logger.warning("Could not persist %s finding for source %s: %s", finding, source_id, exc)
+
 
 
 # ---------------------------------------------------------------------------
@@ -681,7 +726,10 @@ async def _looks_logged_out(page: Any, base_domain: str) -> str | None:
               const pw = document.querySelector("input[type='password']");
               const pwVisible = !!(pw && (pw.offsetWidth || pw.offsetHeight));
               return { len: t.length, pwVisible,
-                       head: t.slice(0, 400).toLowerCase() };
+                       head: t.slice(0, 400).toLowerCase(),
+                       // Full-body lowercase slice for site-specific expiry
+                       // marker scans (the site's blurb lives below the fold).
+                       full: t.slice(0, 4000).toLowerCase() };
             }"""
         )
         if probe.get("pwVisible"):
@@ -690,6 +738,18 @@ async def _looks_logged_out(page: Any, base_domain: str) -> str | None:
             p in probe.get("head", "") for p in _LOGIN_TEXT_PATTERNS
         ):
             return f"Session expired: {base_domain} is showing a sign-in prompt"
+        # Site-specific checks: exact expiry phrases / login-wall URL patterns
+        # come from the central profile registry so a new site's quirk lives
+        # there, not as another `if "domain" in url` branch.
+        prof = profile_for(base_domain or url)
+        if prof and prof.session_expired_markers:
+            for marker in prof.session_expired_markers:
+                if marker in probe.get("full", ""):
+                    return f"Session expired: {marker}"
+        if prof and prof.login_url_patterns:
+            for pat in prof.login_url_patterns:
+                if pat in url:
+                    return f"Session expired: {base_domain} redirected to a login page"
     except Exception as exc:
         logger.debug("login-probe failed: %s", exc)
     return None
@@ -714,6 +774,22 @@ async def _looks_blocked(page: Any) -> str | None:
         return None
     if any(p in text for p in _BOT_TEXT_PATTERNS):
         return "anti-bot challenge: the site presented a bot-detection / verification wall"
+    # Cloudflare interstitial ("Just a moment…" / "Checking your browser" /
+    # "Attention Required" / cf-challenge) — profile-agnostic because any site
+    # can be put behind CF. This is distinct from FastJobs' own _check_blocker,
+    # which never runs on the flow-executor path; catching it here means the
+    # search reports an actionable reason instead of "0 results".
+    try:
+        title = (await page.title()).lower()
+    except Exception:
+        title = ""
+    if "just a moment" in title:
+        return "Cloudflare challenge: the site requires a real browser session"
+    if any(
+        p in text
+        for p in ("checking your browser", "attention required", "cf-challenge")
+    ):
+        return "Cloudflare challenge: the site requires a real browser session"
     return None
 
 
@@ -768,8 +844,35 @@ async def execute_flow(
     query: str,
     storage_state_encrypted: str | None = None,
     card_selectors: dict[str, str] | None = None,
+    source_id: str | None = None,
 ) -> dict[str, Any]:
     """Replay a templatized flow and extract results.
+
+    Thin wrapper over `_execute_flow_inner` that also does the reactive profile
+    write-back: a Cloudflare/SSO/login-wall reason is folded onto the Source
+    row's profile (best-effort) so future method choices know about the wall.
+    When `source_id` is None the persistence step is skipped (old behaviour).
+    """
+    result = await _execute_flow_inner(
+        base_url,
+        steps,
+        query,
+        storage_state_encrypted=storage_state_encrypted,
+        card_selectors=card_selectors,
+    )
+    if source_id and result.get("human_reason"):
+        await _persist_finding_to_source(source_id, result.get("human_reason"))
+    return result
+
+
+async def _execute_flow_inner(
+    base_url: str,
+    steps: list[dict[str, Any]],
+    query: str,
+    storage_state_encrypted: str | None = None,
+    card_selectors: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Replay a templatized flow and extract results (no profile write-back).
 
     Returns {"results": [...], "needs_human": bool, "human_reason": str|None}.
     If the site bounces us to a login page (expired cookies), the reason

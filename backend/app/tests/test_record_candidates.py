@@ -23,6 +23,7 @@ class _FakeSource:
     def __init__(self, domain: str, base_url: str):
         self.domain = domain
         self.base_url = base_url
+        self.name = f"rec-{domain}"
 
 
 def test_candidate_entry_url_mcf():
@@ -72,7 +73,7 @@ def _headers():
 class _FakeRegistry:
     """Canned extension: records dispatch calls, returns recorded events."""
 
-    def __init__(self, events=None, card_found=True):
+    def __init__(self, events=None, card_found=True, page_state=None):
         self.calls = []
         self.events = events if events is not None else [
             {"action": "fill", "selector": "#talent-search-input", "ts": 1},
@@ -80,6 +81,7 @@ class _FakeRegistry:
             {"action": "click", "selector": "div.candidate-card", "text": "Jane", "ts": 3},
         ]
         self.card_found = card_found
+        self.page_state = page_state if page_state is not None else {}
 
     async def dispatch(self, cmd, params, timeout_s=30):
         self.calls.append((cmd, params))
@@ -91,6 +93,8 @@ class _FakeRegistry:
             return {"found": self.card_found, "card": "div.talent-card" if self.card_found else None}
         if cmd == "extract":
             return []
+        if cmd == "page_state":
+            return self.page_state
         return {}
 
 
@@ -214,3 +218,54 @@ def test_record_stop_never_stores_typed_text(client, monkeypatch):
         assert "secret query" not in blob
     finally:
         client.delete(f"/api/v1/sources/{sid}", headers=_headers())
+
+
+# --- FastJobs candidate branch (coyid capture + login wall) -----------------
+
+
+def _fastjobs_source():
+    return _FakeSource(
+        "fastjobs.sg", "https://www.fastjobs.sg/"
+    )
+
+
+async def test_fastjobs_branch_uses_resolved_url(monkeypatch):
+    """A page_state URL with a different coyid must replace the default."""
+    from app.api.routes import sources as sources_mod
+
+    resolved = "https://employer.fastjobs.sg/p/talent/search/?coyid=99999"
+    fake = _FakeRegistry(page_state={"url": resolved, "counts": {}, "bodyChars": 5000})
+    monkeypatch.setattr("app.services.agent_relay.agent_registry", fake, raising=False)
+
+    steps = await sources_mod._agent_discover_fastjobs(_fastjobs_source())
+    assert steps[0]["action"] == "navigate"
+    assert steps[0]["url"] == resolved
+    # find_result_card returned a card → final step present.
+    assert steps[-1]["card"] == "div.talent-card"
+
+
+async def test_fastjobs_branch_login_wall_raises_502(monkeypatch):
+    from fastapi import HTTPException
+
+    from app.api.routes import sources as sources_mod
+
+    fake = _FakeRegistry(
+        page_state={"url": "https://employer.fastjobs.sg/site/login/", "counts": {"input[type='password']": 1}}
+    )
+    monkeypatch.setattr("app.services.agent_relay.agent_registry", fake, raising=False)
+
+    try:
+        await sources_mod._agent_discover_fastjobs(_fastjobs_source())
+        raise AssertionError("expected HTTPException 502")
+    except HTTPException as exc:
+        assert exc.status_code == 502
+        assert "session expired" in exc.detail.lower()
+
+
+def test_is_fastjobs_candidates_gate():
+    from app.api.routes.sources import _is_fastjobs_candidates
+
+    assert _is_fastjobs_candidates(_FakeSource("fastjobs.sg", "x"), "find_candidates")
+    assert not _is_fastjobs_candidates(_FakeSource("fastjobs.sg", "x"), "find_jobs")
+    assert not _is_fastjobs_candidates(_FakeSource("other.com", "x"), "find_candidates")
+

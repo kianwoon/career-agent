@@ -304,6 +304,8 @@ class SourceView(BaseModel):
     enabled: bool
     has_session: bool = False
     flows: dict[str, str] = Field(default_factory=dict, description="flow_type -> status")
+    # Per-source capability profile (probed/learned). None until first probe.
+    profile: dict | None = None
     created_at: datetime
 
 

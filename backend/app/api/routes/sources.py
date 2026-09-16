@@ -25,6 +25,8 @@ from app.models.schemas import (
     WizardStartResponse,
 )
 from app.services.encryption import encrypt_session_state
+from app.services.site_probe import probe_site
+from app.services.site_profiles import profile_for_source
 from app.services.source_flows import (
     FLOW_TYPES,
     WizardSession,
@@ -80,6 +82,9 @@ def _candidate_entry_url(source: Source) -> str:
     source.
     """
     domain = source.domain or ""
+    prof = profile_for_source(domain, getattr(source, "profile", None))
+    if prof and prof.candidate_entry_url:
+        return prof.candidate_entry_url
     if "mycareersfuture.gov.sg" in domain:
         return MCF_TALENT_SEARCH_URL
     if "fastjobs.sg" in domain:
@@ -93,9 +98,16 @@ def _session_capture_urls(source: Source) -> list[str]:
     MCF splits its public site (www) from the employer talent-search app
     (employer host) — capturing only base_url would leave the candidate flow
     unauthorized, so both hosts are captured and merged. FastJobs employer
-    talent search is likewise captured alongside the login/base URL.
+    talent search is likewise captured alongside the login/base URL. The
+    profile registry is the primary source; the hardcoded checks remain as a
+    fallback for sites without a profile.
     """
     urls = [source.base_url]
+    prof = profile_for_source(source.domain or "", getattr(source, "profile", None))
+    entry = prof.candidate_entry_url if prof else None
+    if entry and entry not in urls:
+        urls.append(entry)
+        return urls
     if "mycareersfuture.gov.sg" in (source.domain or ""):
         urls.append(MCF_TALENT_SEARCH_URL)
     if "fastjobs.sg" in (source.domain or ""):
@@ -128,6 +140,7 @@ def _source_view(source: Source, flows: list[SourceFlow]) -> SourceView:
         enabled=bool(source.enabled),
         has_session=bool(source.session_state),
         flows={f.flow_type: f.status for f in flows},
+        profile=getattr(source, "profile", None),
         created_at=source.created_at,
     )
 
@@ -182,6 +195,16 @@ async def create_source(
     db.add(source)
     await db.commit()
     await db.refresh(source)
+    # Probe the site once so unknown sources start with a capability profile
+    # (auth model, Cloudflare, login patterns). Best-effort: a probe failure
+    # must never fail registration — store None and move on.
+    try:
+        source.profile = await probe_site(source.base_url)
+        await db.commit()
+        await db.refresh(source)
+    except Exception as exc:
+        logger.warning("Site probe failed for %s: %s", domain, exc)
+        source.profile = None
     return _source_view(source, [])
 
 
@@ -362,12 +385,19 @@ async def agent_login(source_id: str, db: AsyncSession = Depends(get_db)) -> dic
     from app.services.agent_relay import agent_registry
 
     login_url = source.base_url
+    prof = profile_for_source(source.domain or "", getattr(source, "profile", None))
     if "linkedin.com" in source.domain:
         login_url = "https://www.linkedin.com/login"
     elif "mycareersfuture.gov.sg" in source.domain:
         login_url = "https://www.mycareersfuture.gov.sg/sign-in"
-    elif "fastjobs.sg" in source.domain:
-        login_url = f"https://{FASTJOBS_EMPLOYER_HOST}/site/login/"
+    elif prof and prof.candidate_entry_url:
+        # Portal sites with a dedicated employer host (FastJobs): derive the
+        # login host from the profile's candidate entry URL so a host change
+        # lives in one place, not as another domain literal here.
+        from urllib.parse import urlparse
+
+        host = urlparse(prof.candidate_entry_url).hostname or FASTJOBS_EMPLOYER_HOST
+        login_url = f"https://{host}/site/login/"
 
     # Re-login = switch accounts. Best-effort wipe the browser's cookies for
     # this site so the login page starts clean. Never fail login on this.
@@ -825,6 +855,139 @@ def _linkedin_card_spec(flow_type: str) -> tuple[str, dict[str, str]]:
     return card, fields
 
 
+async def _agent_discover_fastjobs(source: Source) -> list[dict[str, Any]]:
+    """FastJobs employer talent-search discovery (Cloudflare + coyid aware).
+
+    Mirrors the MCF branch: navigate the employer talent route, detect a
+    result card, probe fallbacks. FastJobs is Cloudflare-protected and its
+    talent URL carries a per-account ``coyid`` — a second employer account (or
+    an account change) has a different coyid, so the ACTUAL url the extension
+    lands on is preferred over the hardcoded default. A login wall surfaces a
+    502 with re-login guidance instead of an empty flow.
+    """
+    from app.services.agent_relay import agent_registry
+
+    logger.info("agent_record: fastjobs candidate discovery for %s starting", source.name)
+    default_url = _candidate_entry_url(source)
+    prefix: list[dict[str, Any]] = [
+        {"action": "navigate", "url": default_url},
+        {"action": "wait", "seconds": 6},
+    ]
+
+    # Landing + login-wall / coyid probe.
+    try:
+        await agent_registry.dispatch(
+            "run_flow",
+            {"baseUrl": default_url, "steps": prefix},
+            timeout_s=120,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(502, f"Agent discovery failed: {exc}")
+    try:
+        page_state = await agent_registry.dispatch(
+            "page_state",
+            {
+                "selectors": [
+                    "input[type='password']",
+                    "[data-testid*='candidate']",
+                    "[data-testid*='card']",
+                    "table tbody tr",
+                ]
+            },
+            timeout_s=60,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(502, f"Agent discovery failed: {exc}")
+    state = page_state if isinstance(page_state, dict) else {}
+
+    report_url = (state.get("url") or "").strip()
+    counts = state.get("counts") or {}
+    login_wall = bool(state.get("loginHint")) or counts.get("input[type='password']", 0) > 0
+    if login_wall:
+        raise HTTPException(
+            502,
+            "FastJobs employer session expired — re-login via the wizard, "
+            "then retry recording",
+        )
+
+    # Prefer the resolved URL (a different coyid / extra params) so a second
+    # account's talent search replays correctly; fall back to the constant.
+    resolved_url = report_url if report_url else default_url
+    prefix = [
+        {"action": "navigate", "url": resolved_url},
+        {"action": "wait", "seconds": 5},
+    ]
+
+    found = await agent_registry.dispatch("find_result_card", {}, timeout_s=30)
+    logger.info("agent_record: fastjobs find_result_card → %s", found)
+    if not (isinstance(found, dict) and found.get("found") and found.get("card")):
+        # CF/SPA can paint results slowly — wait and retry once.
+        await agent_registry.dispatch(
+            "run_flow",
+            {"baseUrl": resolved_url, "steps": [{"action": "wait", "seconds": 10}]},
+            timeout_s=60,
+        )
+        found = await agent_registry.dispatch("find_result_card", {}, timeout_s=30)
+    if isinstance(found, dict) and found.get("found") and found.get("card"):
+        card = found["card"]
+        if not is_root_selector(card):
+            logger.info("agent_record: fastjobs card found: %s", card)
+            return prefix + [{"card": card, "fields": {"title": "a"}}]
+        logger.warning("agent_record: fastjobs rejected root card selector %s", card)
+
+    # Last resort: probe candidate card selectors via extract.
+    for cand in (
+        "[data-testid*='candidate']",
+        "[data-testid*='card']",
+        "div[class*='Card']",
+        "table tbody tr",
+    ):
+        try:
+            rows = await agent_registry.dispatch(
+                "extract", {"card": cand, "fields": {}, "maxItems": 10}, timeout_s=60
+            )
+        except Exception as exc:
+            logger.debug("agent_record: fastjobs extract probe failed: %s", exc)
+            continue
+        real = [r for r in rows or [] if len(r.get("raw_text") or "") > 80]
+        if len(real) >= 3:
+            logger.info("agent_record: fastjobs fallback extract card: %s", cand)
+            return prefix + [{"card": cand, "fields": {"title": "a"}}]
+
+    # Diagnosable failure: surface page state (title/bodyChars).
+    try:
+        diag = await agent_registry.dispatch(
+            "page_state",
+            {
+                "selectors": [
+                    "input[type='password']",
+                    "[data-testid*='candidate']",
+                    "[data-testid*='card']",
+                    "table tbody tr",
+                ]
+            },
+            timeout_s=30,
+        )
+    except Exception as exc:
+        logger.debug("agent_record: fastjobs page_state failed: %s", exc)
+        diag = {}
+    diag = diag if isinstance(diag, dict) else {}
+    logger.warning("agent_record: fastjobs page_state → %s", json.dumps(diag)[:500])
+    if diag.get("loginHint") or (diag.get("counts") or {}).get("input[type='password']", 0) > 0:
+        raise HTTPException(
+            502,
+            "FastJobs employer session expired — re-login via the wizard, "
+            "then retry recording",
+        )
+    body_chars = diag.get("bodyChars", 0)
+    title = diag.get("title", "?")
+    raise HTTPException(
+        502,
+        f"FastJobs talent-search loaded (title '{title}', {body_chars} chars) but no "
+        "candidate rows — run a search returning visible candidates first.",
+    )
+
+
 async def _agent_discover(source: Source, req: AgentRecordRequest) -> list[dict[str, Any]]:
     """Extension-driven discovery for non-LinkedIn sites.
 
@@ -936,6 +1099,9 @@ async def _agent_discover(source: Source, req: AgentRecordRequest) -> list[dict[
             "candidate rows — run a search returning visible candidates first "
             f"(query '{query}' may match nothing; try broader).",
         )
+
+    if _is_fastjobs_candidates(source, req.flow_type):
+        return await _agent_discover_fastjobs(source)
 
     if "seek.com" in (source.domain or ""):
         logger.info("agent_record: seek discovery for %s starting", source.name)
@@ -1346,6 +1512,7 @@ async def test_flow(
         query=query,
         storage_state_encrypted=source.session_state,
         card_selectors=flow.steps[-1] if flow.steps and flow.steps[-1].get("card") else None,
+        source_id=source.id,
     )
     if result["results"]:
         flow.status = "active"

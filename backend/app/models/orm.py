@@ -192,6 +192,11 @@ class Source(Base):
     # Encrypted Playwright storage_state captured during the wizard login step.
     session_state: Mapped[str | None] = mapped_column(Text, nullable=True)
     captured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Per-source capability profile (SiteProfile-shaped dict): probed at
+    # registration, then written back reactively when a flow detects a
+    # Cloudflare wall / SSO hand-off / login wall. Overrides the global
+    # site_profiles registry field-wise (see site_profiles.profile_for_source).
+    profile: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

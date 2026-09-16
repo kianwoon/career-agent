@@ -380,6 +380,7 @@ async def _search_candidates_via_flow(
             query=flow_query,
             storage_state_encrypted=source.session_state,
             card_selectors=flow.steps[-1] if flow.steps and flow.steps[-1].get("card") else None,
+            source_id=source.id,
         )
         if result.get("needs_human") or not result.get("results"):
             reason = result.get("human_reason", "no results")
@@ -600,6 +601,39 @@ async def _safe_search(
         }
 
 
+async def _persist_agent_finding(source: Any, reason: str | None) -> None:
+    """Best-effort write-back of an extension-reported wall onto the Source profile.
+
+    Maps Cloudflare/login keywords in the extension's error text to a finding
+    and folds it into source.profile so later method choices see the wall.
+    Never raises — persistence is advisory only.
+    """
+    if not reason:
+        return
+    from app.services.site_profiles import apply_finding
+
+    low = reason.lower()
+    if "cloudflare" in low:
+        finding = "cloudflare"
+    elif any(m in low for m in ("singpass", "corppass", "sso", "openid")):
+        finding = "sso"
+    elif "login" in low or "sign in" in low or "sign-in" in low:
+        finding = "login_wall"
+    else:
+        return
+    try:
+        from app.db import async_session
+        from app.models.orm import Source
+
+        async with async_session() as db:
+            row = await db.get(Source, getattr(source, "id", None))
+            if row is not None:
+                row.profile = apply_finding(row.profile, finding)
+                await db.commit()
+    except Exception as exc:
+        logger.warning("Could not persist %s finding for source %s: %s", finding, getattr(source, "name", "?"), exc)
+
+
 async def _search_custom_sources(
     state: AgentState,
 ) -> tuple[list[dict[str, Any]], list[str], list[str], list[dict[str, str]]]:
@@ -675,6 +709,7 @@ async def _search_custom_sources(
                 # expired so the search pauses for human re-login.
                 if isinstance(data, dict) and data.get("needs_human"):
                     wall_reason = data.get("error") or "site showing a login page"
+                    await _persist_agent_finding(source, wall_reason)
                     issues.append({"source": source.name, "reason": f"session expired: {wall_reason}"})
                     failed.append(f"{source.name}: session expired ({wall_reason})")
                     return
@@ -696,12 +731,38 @@ async def _search_custom_sources(
                 reason = str(exc)
                 results = None
 
+        # Cloudflare-protected sites (FastJobs) serve a JS challenge that
+        # headless server-side Playwright cannot pass — attempting execute_flow
+        # just burns ~45s and returns a bogus "0 results". The extension runs
+        # in the user's real browser, so when IT was unavailable/errored
+        # there's no viable fallback: report the missing extension instead.
+        # The per-source profile (probed/learned) overrides the global registry
+        # so a site that turned out to be CF-protected is caught here too.
+        from app.services.site_profiles import profile_for_source
+
+        _prof = profile_for_source(
+            source.domain or source.base_url, getattr(source, "profile", None)
+        )
+        if _prof and _prof.cloudflare_protected:
+            failed.append(
+                f"{source.name}: Cloudflare-protected site requires the browser "
+                "extension (agent not connected)"
+            )
+            issues.append(
+                {
+                    "source": source.name,
+                    "reason": "Cloudflare-protected site requires the browser extension",
+                }
+            )
+            return
+
         result = await execute_flow(
             base_url=source.base_url,
             steps=flow.steps,
             query=flow_query,
             storage_state_encrypted=source.session_state,
             card_selectors=flow.steps[-1] if flow.steps and flow.steps[-1].get("card") else None,
+            source_id=source.id,
         )
         results = result.get("results", [])
         if result.get("needs_human") or not results:

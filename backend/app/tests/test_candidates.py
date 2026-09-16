@@ -479,3 +479,163 @@ async def test_offline_only_still_pauses_with_actionable_message(monkeypatch):
     assert result["needs_human"] is True
     assert "re-open the app" in result["human_reason"]
     assert result["source_issues"][0]["source"] == "linkedin"
+
+
+async def test_cloudflare_source_skips_execute_flow_when_agent_down(monkeypatch):
+    """A Cloudflare-protected source (FastJobs) must NOT fall back to headless
+    Playwright when the extension agent is unavailable — that fallback cannot
+    pass the CF challenge and just wastes ~45s. The failure names the missing
+    extension instead."""
+    pytest.importorskip("sqlalchemy")
+    import app.agent.nodes as nodes_mod
+
+    async def fail_execute_flow(**kwargs):
+        raise AssertionError("execute_flow must not run for a CF-protected source")
+
+    # execute_flow is imported lazily inside _search_custom_sources, so patch
+    # it at its definition site.
+    monkeypatch.setattr("app.services.source_flows.execute_flow", fail_execute_flow)
+
+    class _CFSource:
+        id = 1
+        name = "fastjobs - candidate"
+        domain = "fastjobs.sg"
+        base_url = "https://employer.fastjobs.sg/"
+        session_state = None
+        enabled = True
+
+    class _Flow:
+        id = 7
+        source_id = 1
+        steps = [{"action": "navigate", "url": "https://employer.fastjobs.sg/"}]
+        status = "active"
+        flow_type = "find_candidates"
+
+    class _FakeScalars:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class _FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def scalars(self):
+            return _FakeScalars(self._rows)
+
+    class _FakeDb:
+        def __init__(self):
+            self._calls = 0
+
+        async def execute(self, *a, **k):
+            # First call → sources, second → active flows.
+            self._calls += 1
+            return _FakeResult([_CFSource()] if self._calls == 1 else [_Flow()])
+
+        async def get(self, *a, **k):
+            return None
+
+    class _FakeCtx:
+        async def __aenter__(self):
+            return _FakeDb()
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr("app.db.async_session", lambda: _FakeCtx())
+
+    # Agent reports disconnected → run_flow is never attempted.
+    class _OfflineRegistry:
+        connected = False
+
+        async def dispatch(self, *a, **k):
+            raise AssertionError("dispatch must not happen when disconnected")
+
+    monkeypatch.setattr("app.services.agent_relay.agent_registry", _OfflineRegistry())
+
+    raw, ok, failed, issues = await nodes_mod._search_custom_sources(
+        {"type": nodes_mod.SearchType.candidates, "query": "engineer"}
+    )
+    assert raw == []
+    assert any("Cloudflare-protected" in f for f in failed)
+    assert any("browser extension" in i["reason"] for i in issues)
+
+
+async def test_stored_profile_cloudflare_fail_fasts_without_registry_entry(monkeypatch):
+    """A source with NO built-in registry entry but a STORED profile marking it
+    Cloudflare-protected must still fail-fast — proves the per-source profile
+    (not just the global registry) drives the method-choice decision."""
+    pytest.importorskip("sqlalchemy")
+    import app.agent.nodes as nodes_mod
+
+    async def fail_execute_flow(**kwargs):
+        raise AssertionError("execute_flow must not run for a stored-CF source")
+
+    monkeypatch.setattr("app.services.source_flows.execute_flow", fail_execute_flow)
+
+    class _StoredCFSource:
+        id = 2
+        name = "unknownboard"
+        domain = "unknownboard.example"  # no registry entry
+        base_url = "https://unknownboard.example/"
+        session_state = None
+        enabled = True
+        profile = {"auth_model": "portal", "cloudflare_protected": True}
+
+    class _Flow:
+        id = 8
+        source_id = 2
+        steps = [{"action": "navigate", "url": "https://unknownboard.example/"}]
+        status = "active"
+        flow_type = "find_candidates"
+
+    class _FakeScalars:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class _FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def scalars(self):
+            return _FakeScalars(self._rows)
+
+    class _FakeDb:
+        def __init__(self):
+            self._calls = 0
+
+        async def execute(self, *a, **k):
+            self._calls += 1
+            return _FakeResult([_StoredCFSource()] if self._calls == 1 else [_Flow()])
+
+        async def get(self, *a, **k):
+            return None
+
+    class _FakeCtx:
+        async def __aenter__(self):
+            return _FakeDb()
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr("app.db.async_session", lambda: _FakeCtx())
+
+    class _OfflineRegistry:
+        connected = False
+
+        async def dispatch(self, *a, **k):
+            raise AssertionError("dispatch must not happen when disconnected")
+
+    monkeypatch.setattr("app.services.agent_relay.agent_registry", _OfflineRegistry())
+
+    raw, ok, failed, issues = await nodes_mod._search_custom_sources(
+        {"type": nodes_mod.SearchType.candidates, "query": "engineer"}
+    )
+    assert raw == []
+    assert any("Cloudflare-protected" in f for f in failed)
+

@@ -252,3 +252,161 @@ async def test_build_boolean_keywords_async_default_limit_compacts(monkeypatch):
     out = await build_boolean_keywords_async(queries, [])
     assert calls == [KEYWORD_LIMIT]
     assert len(out) <= KEYWORD_LIMIT
+
+
+# --- Cloudflare challenge detection (profile-agnostic) ----------------------
+
+
+class _FakePage:
+    """Minimal Playwright page stub for the block/login detectors."""
+
+    def __init__(self, text="", title="", url="https://employer.fastjobs.sg/"):
+        self._text = text
+        self._title = title
+        self.url = url
+
+    async def title(self):
+        return self._title
+
+    async def evaluate(self, _script):
+        if "innerText" in _script and "return" not in _script.lower():
+            return self._text
+        return self._text
+
+
+async def test_looks_blocked_detects_cloudflare_title():
+    from app.services.source_flows import _looks_blocked
+
+    page = _FakePage(text="some interstitial", title="Just a moment...")
+    reason = await _looks_blocked(page)
+    assert reason is not None
+    assert "cloudflare" in reason.lower()
+
+
+async def test_looks_blocked_detects_checking_your_browser():
+    from app.services.source_flows import _looks_blocked
+
+    page = _FakePage(text="checking your browser before accessing", title="")
+    reason = await _looks_blocked(page)
+    assert reason is not None
+    assert "cloudflare" in reason.lower()
+
+
+async def test_looks_blocked_none_on_normal_page():
+    from app.services.source_flows import _looks_blocked
+
+    page = _FakePage(text="candidate results", title="Talent search")
+    assert await _looks_blocked(page) is None
+
+
+# --- Reactive profile write-back -------------------------------------------
+
+
+def _install_fake_playwright(monkeypatch, sf):
+    """Patch async_playwright + proxy so execute_flow runs against a fake page
+    that trips the Cloudflare detector."""
+
+    class _BlockedPage(_FakePage):
+        def __init__(self):
+            # url must stay on the probed domain, else _looks_logged_out fires
+            # first (redirected-away) and masks the Cloudflare signal.
+            super().__init__(
+                text="checking your browser",
+                title="Just a moment...",
+                url="https://cf.example.com/",
+            )
+
+        async def goto(self, *a, **k):
+            return None
+
+    class _Ctx:
+        async def new_page(self):
+            return _BlockedPage()
+
+    class _Browser:
+        async def new_context(self, **k):
+            return _Ctx()
+
+        async def close(self):
+            return None
+
+    class _Chromium:
+        async def launch(self, **k):
+            return _Browser()
+
+    class _Pw:
+        chromium = _Chromium()
+
+        async def stop(self):
+            return None
+
+    class _PwManager:
+        async def start(self):
+            return _Pw()
+
+    monkeypatch.setattr(sf, "async_playwright", lambda: _PwManager())
+    monkeypatch.setattr(sf, "_proxy_config", lambda: None)
+
+
+async def test_execute_flow_persists_cloudflare_finding(monkeypatch):
+    """A Cloudflare-blocked run with a source_id writes cloudflare_protected=True
+    onto the Source row's profile (best-effort persistence)."""
+    import app.services.source_flows as sf
+
+    _install_fake_playwright(monkeypatch, sf)
+
+    class _Source:
+        def __init__(self):
+            self.profile = None
+
+    persisted = _Source()
+    committed = {"done": False}
+
+    class _FakeDb:
+        async def get(self, model, pk):
+            return persisted
+
+        async def commit(self):
+            committed["done"] = True
+
+    class _FakeCtx:
+        async def __aenter__(self):
+            return _FakeDb()
+
+        async def __aexit__(self, *a):
+            return False
+
+    import app.db as db_mod
+
+    monkeypatch.setattr(db_mod, "async_session", lambda: _FakeCtx())
+
+    result = await sf.execute_flow(
+        base_url="https://cf.example.com/",
+        steps=[],
+        query="dev",
+        source_id="src-1",
+    )
+    assert result["needs_human"] is True
+    assert "cloudflare" in (result["human_reason"] or "").lower()
+    assert committed["done"] is True
+    assert persisted.profile and persisted.profile.get("cloudflare_protected") is True
+
+
+async def test_execute_flow_no_source_id_skips_persistence(monkeypatch):
+    """Without a source_id, no DB write is attempted (old behaviour)."""
+    import app.services.source_flows as sf
+
+    _install_fake_playwright(monkeypatch, sf)
+
+    def boom():
+        raise AssertionError("no DB access expected without source_id")
+
+    import app.db as db_mod
+
+    monkeypatch.setattr(db_mod, "async_session", boom)
+
+    result = await sf.execute_flow(
+        base_url="https://cf.example.com/", steps=[], query="dev"
+    )
+    assert result["needs_human"] is True
+
