@@ -299,6 +299,84 @@ def _normalize_flow_candidate(
     }
 
 
+def _diag_sample_row(r: dict[str, Any]) -> dict[str, str]:
+    """Bounded sample of one raw extracted row for drop diagnostics.
+
+    Truncated hard (title<=80, raw_text<=200, url<=120) so the payload
+    stays well under 1KB; carries no more PII than extraction already
+    holds and no cookies."""
+    return {
+        "title": str(r.get("title") or "")[:80],
+        "raw_text": str(r.get("raw_text") or "")[:200],
+        "url": str(r.get("url") or "")[:120],
+    }
+
+
+def _finalize_diag_legs(
+    legs: list[dict[str, Any]],
+    source_name: str,
+    base_url: str | None,
+    excludes: list[str] | None,
+) -> list[dict[str, Any]]:
+    """Turn per-leg raw rows into raw/kept/dropped counts (+ samples).
+
+    Pure instrumentation: runs the SAME filter_excluded_results +
+    _normalize_flow_candidate used on the merged rows, so a 0-result leg
+    shows exactly how many rows were lost after extraction. Never changes
+    result semantics. Samples are captured for the FIRST leg only to bound
+    payload size."""
+    from app.services.source_flows import filter_excluded_results
+
+    out: list[dict[str, Any]] = []
+    for i, leg in enumerate(legs):
+        rows = leg.get("_rows") or []
+        filtered = filter_excluded_results(rows, excludes or None)
+        kept = [
+            normalized
+            for j, r in enumerate(filtered)
+            if (normalized := _normalize_flow_candidate(r, source_name, j, base_url))
+        ]
+        entry: dict[str, Any] = {
+            "q": leg.get("q"),
+            "raw": len(rows),
+            "kept": len(kept),
+            "dropped": len(rows) - len(kept),
+        }
+        if leg.get("note"):
+            entry["note"] = leg["note"]
+        if i == 0:
+            entry["samples"] = [
+                _diag_sample_row(r) for r in rows[:3] if isinstance(r, dict)
+            ]
+        out.append(entry)
+    return out
+
+
+def _diag_compact(diag: dict[str, Any] | None, limit: int = 300) -> str | None:
+    """Render a diag dict as a compact string for plan_detail.
+
+    Format: "lab tec…:20->0 (drop 20); <sample title 1>; <sample title 2>".
+    Bounded so the merged plan_detail payload stays well under 1KB."""
+    legs = (diag or {}).get("legs") or []
+    if not legs:
+        return None
+    parts: list[str] = []
+    for leg in legs:
+        q = str(leg.get("q") or "?").strip()
+        seg = f"{q[:16]}:{leg.get('raw', 0)}->{leg.get('kept', 0)}"
+        if leg.get("dropped"):
+            seg += f" (drop {leg['dropped']})"
+        if leg.get("note"):
+            seg += f" [{leg['note']}]"
+        parts.append(seg)
+        for s in (leg.get("samples") or [])[:2]:
+            t = str(s.get("title") or s.get("raw_text") or "").strip()
+            if t:
+                parts.append(t[:60])
+    text = "; ".join(parts)
+    return text[:limit] if len(text) > limit else text
+
+
 async def _search_candidates_via_flow(
     source_name: str,
     queries: list[str],
@@ -366,6 +444,7 @@ async def _search_candidates_via_flow(
     from app.services.agent_relay import agent_registry
 
     results: list[dict[str, Any]] = []
+    diag_legs: list[dict[str, Any]] = []
     if use_agent and agent_registry.connected:
         leg_counts: list[str] = []
         needs_human_leg: str | None = None
@@ -398,25 +477,43 @@ async def _search_candidates_via_flow(
                 # miss: record and continue with remaining legs.
                 logger.warning("Agent run_flow failed for %s: %s", source.name, exc)
                 leg_counts.append(f"{q[:8]}…: dispatch failed")
+                diag_legs.append({"q": q[:80], "_rows": [], "note": "dispatch failed"})
                 continue
             if isinstance(data, dict) and data.get("needs_human"):
                 needs_human_leg = f"{source.name}: {data.get('error') or 'site showing a login page'}"
                 leg_counts.append(f"{q[:8]}…: needs human")
+                diag_legs.append({"q": q[:80], "_rows": [], "note": "needs human"})
                 continue
             leg_results = (data.get("results") if isinstance(data, dict) else data) or []
             results.extend(leg_results)
             leg_counts.append(f"{q[:8]}…: {len(leg_results)}")
+            diag_legs.append({"q": q[:80], "_rows": list(leg_results)})
         detail = "; ".join(leg_counts)
         if needs_human_leg and not results:
             return {
                 "raw_results": [],
                 "needs_human": True,
                 "human_reason": needs_human_leg,
+                "diag": {
+                    "legs": _finalize_diag_legs(
+                        diag_legs, source.name, source.base_url, excludes or None
+                    )
+                },
             }
         detail = f"{source.name} - candidate: {detail}"
         plan_detail = detail if len(detail) <= 200 else detail[:197] + "…"
         if not results and all(c.endswith(("failed", "human")) for c in leg_counts) and leg_counts:
-            return {"raw_results": [], "needs_human": False, "human_reason": None, "plan_detail": plan_detail}
+            return {
+                "raw_results": [],
+                "needs_human": False,
+                "human_reason": None,
+                "plan_detail": plan_detail,
+                "diag": {
+                    "legs": _finalize_diag_legs(
+                        diag_legs, source.name, source.base_url, excludes or None
+                    )
+                },
+            }
         agent_results: list[dict[str, Any]] | None = results or None
     else:
         agent_results = None
@@ -458,11 +555,19 @@ async def _search_candidates_via_flow(
         if (normalized := _normalize_flow_candidate(r, source.name, i, source.base_url))
     ]
     final_detail = plan_detail if plan_detail else f"{source.name} flow: {len(results)} results"
+    diag = None
+    if diag_legs:
+        diag = {
+            "legs": _finalize_diag_legs(
+                diag_legs, source.name, source.base_url, excludes or None
+            )
+        }
     return {
         "raw_results": results,
         "needs_human": False,
         "human_reason": None,
         "plan_detail": final_detail,
+        **({"diag": diag} if diag else {}),
     }
 
 
@@ -1124,6 +1229,7 @@ async def run_search(state: AgentState) -> AgentState:
         needs_human = False
         human_reason: str | None = None
         plan_details: list[str] = []
+        diag_notes: list[str] = []
         # Per-platform fatal errors (e.g. BrowserError "extension went
         # offline mid-search" raised by an adapter). Recorded so the run can
         # still return partial results from earlier legs instead of dropping
@@ -1221,6 +1327,12 @@ async def run_search(state: AgentState) -> AgentState:
                     continue
                 p_raw = result.get("raw_results", [])
                 raw.extend(p_raw)
+                # Per-leg drop diagnostics (extract -> normalize/score gate).
+                # Compact string appended to plan_detail so a 0-result leg is
+                # debuggable from GET /tasks/{id} without Koyeb logs.
+                _diag_s = _diag_compact(result.get("diag"))
+                if _diag_s and not p_raw:
+                    diag_notes.append(f"{platform} diag: {_diag_s}")
                 if result.get("needs_human"):
                     needs_human = True
                     if result.get("human_reason"):
@@ -1243,6 +1355,8 @@ async def run_search(state: AgentState) -> AgentState:
                     result.get("plan_detail") or f"{platform}: {len(p_raw)} results"
                 )
             plan_detail = " | ".join(plan_details) if plan_details else "No queries"
+            if diag_notes:
+                plan_detail = f"{plan_detail} | {' | '.join(diag_notes)}"
             detail = (
                 f"Plan search ({', '.join(platforms)}) — {plan_detail}; {len(raw)} candidates"
                 if not needs_human

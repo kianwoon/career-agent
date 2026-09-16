@@ -360,6 +360,102 @@ async def test_flow_search_runs_per_query_legs(monkeypatch):
     assert ": 1" in result["plan_detail"]
 
 
+async def test_flow_search_reports_per_leg_diag(monkeypatch):
+    """A leg returning raw rows but 0 survivors must surface per-leg
+    raw->kept drop counts (+ first-leg samples) via result['diag'], so a
+    0-result run is debuggable from the task payload without Koyeb logs."""
+    import app.agent.nodes as nodes_mod
+    import app.db as db_mod
+    import app.services.agent_relay as relay_mod
+
+    # Leg 1: 3 raw rows, one of which _normalize_flow_candidate drops
+    # (page-chrome "Skip to content" is not a person) -> kept=2, dropped=1.
+    rows = [
+        {"title": "Jane Doe", "raw_text": "Jane Doe\nEngineer", "url": "https://x/1"},
+        {"title": "Skip to content", "raw_text": ""},  # chrome → dropped
+        {"title": "John Smith", "raw_text": "John Smith\nAnalyst"},
+    ]
+
+    class _RowsRegistry:
+        def __init__(self):
+            self.calls = []
+
+        @property
+        def connected(self):
+            return True
+
+        async def dispatch(self, cmd, params, timeout_s=30):
+            self.calls.append((cmd, params))
+            return {"results": rows}
+
+    registry = _RowsRegistry()
+
+    class _FakeResult:
+        def scalar_one_or_none(self):
+            return _FakeFlowSource()
+
+        def scalars(self):
+            return _FakeScalars()
+
+    class _FakeScalars:
+        def first(self):
+            return _FakeFlow()
+
+    class _FakeDb:
+        async def execute(self, *a, **k):
+            return _FakeResult()
+
+        async def get(self, *a, **k):
+            return None
+
+    class _FakeSessionCtx:
+        async def __aenter__(self):
+            return _FakeDb()
+
+        async def __aexit__(self, *a):
+            return False
+
+    def fake_session():
+        return _FakeSessionCtx()
+
+    async def fake_build(qs, excludes, limit=500):
+        from app.services.source_flows import build_boolean_keywords
+        return build_boolean_keywords(qs, excludes, truncate=False) or (qs[0] if qs else "")
+
+    monkeypatch.setattr(db_mod, "async_session", fake_session)
+    monkeypatch.setattr(relay_mod, "agent_registry", registry)
+
+    async def _noop_heal(*a, **k):
+        return None
+
+    monkeypatch.setattr(nodes_mod, "_heal_stale_source_session", _noop_heal, raising=False)
+    monkeypatch.setattr(
+        "app.services.source_flows.build_boolean_keywords_async", fake_build, raising=False
+    )
+
+    result = await nodes_mod._search_candidates_via_flow(
+        "jobstreet - candidate", ["python developer"], excludes=["recruiter"]
+    )
+
+    assert len(result["raw_results"]) == 2  # 1 of 3 dropped by normalize
+    legs = result["diag"]["legs"]
+    assert len(legs) == 1
+    leg = legs[0]
+    assert leg["raw"] == 3
+    assert leg["kept"] == 2
+    assert leg["dropped"] == 1
+    # First (only) leg carries bounded samples.
+    assert len(leg["samples"]) == 3
+    assert all(len(s["title"]) <= 80 and len(s["raw_text"]) <= 200 for s in leg["samples"])
+    assert all(len(s["url"]) <= 120 for s in leg["samples"])
+
+    # Compact render used by run_search's plan_detail.
+    compact = nodes_mod._diag_compact(result["diag"])
+    assert "3->2" in compact
+    assert "drop 1" in compact
+    assert "Jane Doe" in compact
+
+
 async def test_budget_exhaustion_returns_partial_results(monkeypatch):
     """When the candidate-search time budget is already expired, run_search
     completes normally with partial (empty) results and a budget source_issue
