@@ -555,7 +555,7 @@ async def test_cloudflare_source_skips_execute_flow_when_agent_down(monkeypatch)
 
     monkeypatch.setattr("app.services.agent_relay.agent_registry", _OfflineRegistry())
 
-    raw, ok, failed, issues = await nodes_mod._search_custom_sources(
+    raw, _ok, failed, issues = await nodes_mod._search_custom_sources(
         {"type": nodes_mod.SearchType.candidates, "query": "engineer"}
     )
     assert raw == []
@@ -633,7 +633,7 @@ async def test_stored_profile_cloudflare_fail_fasts_without_registry_entry(monke
 
     monkeypatch.setattr("app.services.agent_relay.agent_registry", _OfflineRegistry())
 
-    raw, ok, failed, issues = await nodes_mod._search_custom_sources(
+    raw, _ok, failed, _issues = await nodes_mod._search_custom_sources(
         {"type": nodes_mod.SearchType.candidates, "query": "engineer"}
     )
     assert raw == []

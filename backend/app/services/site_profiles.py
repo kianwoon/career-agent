@@ -217,9 +217,10 @@ def profile_for(domain_or_url: str) -> SiteProfile | None:
         return None
     best_suffix: str | None = None
     for suffix in _PROFILES:
-        if host == suffix or host.endswith("." + suffix):
-            if best_suffix is None or len(suffix) > len(best_suffix):
-                best_suffix = suffix
+        if (host == suffix or host.endswith("." + suffix)) and (
+            best_suffix is None or len(suffix) > len(best_suffix)
+        ):
+            best_suffix = suffix
     if best_suffix is None:
         return None
     return _PROFILES[best_suffix]
