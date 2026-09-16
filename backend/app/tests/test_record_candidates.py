@@ -90,7 +90,7 @@ def _headers():
 class _FakeRegistry:
     """Canned extension: records dispatch calls, returns recorded events."""
 
-    def __init__(self, events=None, card_found=True, page_state=None):
+    def __init__(self, events=None, card_found=True, page_state=None, extract_rows=None, card="div.talent-card"):
         self.calls = []
         self.events = events if events is not None else [
             {"action": "fill", "selector": "#talent-search-input", "ts": 1},
@@ -99,6 +99,8 @@ class _FakeRegistry:
         ]
         self.card_found = card_found
         self.page_state = page_state if page_state is not None else {}
+        self.extract_rows = extract_rows
+        self.card = card
 
     async def dispatch(self, cmd, params, timeout_s=30):
         self.calls.append((cmd, params))
@@ -107,8 +109,10 @@ class _FakeRegistry:
         if cmd == "start_record":
             return {"ok": True, "recording": True}
         if cmd == "find_result_card":
-            return {"found": self.card_found, "card": "div.talent-card" if self.card_found else None}
+            return {"found": self.card_found, "card": self.card if self.card_found else None}
         if cmd == "extract":
+            if self.extract_rows is not None:
+                return self.extract_rows
             return []
         if cmd == "page_state":
             return self.page_state
@@ -372,6 +376,76 @@ def test_record_stop_refuses_stale_card_without_card_click(client, monkeypatch):
         flows = client.get(f"/api/v1/sources/{sid}/flows", headers=_headers()).json()
         cand = next(f for f in flows if f["flow_type"] == "find_candidates")
         assert cand["steps"] == original_steps
+    finally:
+        client.delete(f"/api/v1/sources/{sid}", headers=_headers())
+
+
+def _seed_flow_with_card(client, monkeypatch, sid, card):
+    """Create a find_candidates flow whose stored extract step uses `card`."""
+    seed = _FakeRegistry(card=card, card_found=True)
+    monkeypatch.setattr("app.services.agent_relay.agent_registry", seed, raising=False)
+    r = client.post(
+        f"/api/v1/sources/{sid}/agent_record/stop",
+        json={"flow_type": "find_candidates"},
+        headers=_headers(),
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["steps"][-1]["card"] == card
+
+
+def _probe_row(title):
+    return {"title": title, "raw_text": (title + " ") * 20}
+
+
+def test_record_stop_refuses_uniform_title_probe_rows(client, monkeypatch):
+    """Prod: saved card {"card":"div.candidate"} extracted 20 rows ALL titled
+    "Employment Status" (a filter facet). The stop path must NOT save that card
+    again — it either heals to a different card or refuses with a 502."""
+    sid = _make_source(client, "rec-uniform.example")
+    try:
+        _seed_flow_with_card(client, monkeypatch, sid, "div.candidate")
+        # Re-record: the stored card now matches a facet panel (uniform titles),
+        # but find_result_card locates the real card.
+        bad = _FakeRegistry(
+            card="div.talent-card",
+            card_found=True,
+            extract_rows=[_probe_row("Employment Status") for _ in range(5)],
+        )
+        monkeypatch.setattr("app.services.agent_relay.agent_registry", bad, raising=False)
+        r = client.post(
+            f"/api/v1/sources/{sid}/agent_record/stop",
+            json={"flow_type": "find_candidates"},
+            headers=_headers(),
+        )
+        if r.status_code == 200:
+            assert r.json()["steps"][-1]["card"] != "div.candidate"
+        else:
+            assert r.status_code == 502, r.text
+    finally:
+        client.delete(f"/api/v1/sources/{sid}", headers=_headers())
+
+
+def test_record_stop_accepts_distinct_name_probe_rows(client, monkeypatch):
+    """The inverse: probe rows with distinct, name-shaped titles verify fine and
+    the stored card is saved unchanged."""
+    sid = _make_source(client, "rec-distinct.example")
+    try:
+        _seed_flow_with_card(client, monkeypatch, sid, "div.candidate")
+        good = _FakeRegistry(
+            extract_rows=[
+                _probe_row("Jane Tan"),
+                _probe_row("Ahmad Rizal"),
+                _probe_row("Wei Ling"),
+            ]
+        )
+        monkeypatch.setattr("app.services.agent_relay.agent_registry", good, raising=False)
+        r = client.post(
+            f"/api/v1/sources/{sid}/agent_record/stop",
+            json={"flow_type": "find_candidates"},
+            headers=_headers(),
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["steps"][-1]["card"] == "div.candidate"
     finally:
         client.delete(f"/api/v1/sources/{sid}", headers=_headers())
 

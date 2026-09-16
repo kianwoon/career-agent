@@ -876,6 +876,42 @@ async def agent_record_manual_stop(
                 and len(r.get("raw_text") or "") > 60
             ]
             extract_ok = len(real) >= 2
+            # A card selector that drifts onto a filter-facet panel extracts N
+            # identical rows all titled with the facet label (production: 20
+            # rows all "Employment Status"). Real result rows never share a
+            # single title — treat a uniform-title extract as dead so the
+            # existing heal/refuse machinery re-detects or refuses.
+            if extract_ok:
+                norm_titles = {
+                    (r.get("title") or "").strip().lower().rstrip("…")
+                    for r in real
+                }
+                if len(norm_titles) == 1:
+                    extract_ok = False
+                    heal_note = (
+                        f"extracted rows all share one title "
+                        f"({real[0].get('title')!r}) — card matches a filter "
+                        "panel, not result rows"
+                    )
+            # Second guard: if the normalizer would drop EVERY row (facet/
+            # chrome/page-blob junk), the card extracts no real candidates.
+            if extract_ok:
+                try:
+                    from app.agent.nodes import _normalize_flow_candidate
+
+                    kept = [
+                        _normalize_flow_candidate(r, source.name, i, source.base_url)
+                        for i, r in enumerate(real)
+                    ]
+                    if not any(k is not None for k in kept):
+                        extract_ok = False
+                        heal_note = (
+                            "extracted rows all fail candidate normalization "
+                            "(facet/chrome text) — card matches a filter panel, "
+                            "not result rows"
+                        )
+                except Exception:
+                    pass  # normalizer unavailable — keep the row-count verdict
     except Exception as exc:
         extract_ok = False
         heal_note = heal_note or str(exc)[:120]
