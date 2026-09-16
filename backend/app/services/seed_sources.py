@@ -41,8 +41,8 @@ BUILTIN_SOURCES: list[dict[str, str]] = [
     },
     {
         "name": "FastJobs",
-        "domain": "fastjobs.io",
-        "base_url": "https://www.fastjobs.io/",
+        "domain": "fastjobs.sg",
+        "base_url": "https://www.fastjobs.sg/",
     },
 ]
 

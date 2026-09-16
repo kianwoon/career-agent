@@ -1103,7 +1103,7 @@ async def run_search(state: AgentState) -> AgentState:
         # test DB), so an empty sources table never silently kills search.
         li_on = "linkedin.com" not in disabled_domains
         mcf_on = "mycareersfuture.gov.sg" not in disabled_domains
-        fj_on = "fastjobs.io" not in disabled_domains
+        fj_on = "fastjobs.sg" not in disabled_domains
 
         li_result, mcf_result, fj_result = await asyncio.gather(
             _safe_search(search_linkedin_jobs, query, location, use_agent=use_agent) if li_on else _noop_search("disabled"),
