@@ -410,6 +410,34 @@ async def update_source(
     return _source_view(source, list(flows))
 
 
+@router.delete("/{source_id}/session", response_model=SourceView)
+async def clear_source_session(
+    source_id: str, db: AsyncSession = Depends(get_db)
+) -> SourceView:
+    """Drop the stored login session (Re-login path).
+
+    Mirrors the agent_login wipe: clears session_state/captured_at so
+    has_session flips false and the wizard opens a clean, logged-out login
+    page for fresh credentials. Also clears expires_at so the staleness
+    self-heal never sees an orphaned expiry.
+    """
+    source = await _get_source(source_id, db)
+    if (
+        source.session_state is not None
+        or source.captured_at is not None
+        or source.expires_at is not None
+    ):
+        source.session_state = None
+        source.captured_at = None
+        source.expires_at = None
+        await db.commit()
+        await db.refresh(source)
+    flows = (
+        await db.execute(select(SourceFlow).where(SourceFlow.source_id == source.id))
+    ).scalars().all()
+    return _source_view(source, list(flows))
+
+
 # ---------------------------------------------------------------------------
 # Guided wizard: login -> record -> complete
 # ---------------------------------------------------------------------------
@@ -435,7 +463,10 @@ async def wizard_start(
         await old.close()
 
     storage_state = None
-    if source.session_state:
+    # Login mode starts a CLEAN, logged-out browser so the user can enter
+    # fresh credentials (Re-login = switch accounts). Other modes reuse the
+    # stored session so recording happens as the authenticated user.
+    if source.session_state and req.mode != "login":
         import json
 
         from app.services.encryption import decrypt_session_state

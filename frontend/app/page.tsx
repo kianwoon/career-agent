@@ -22,6 +22,7 @@ import {
   deleteFlow,
   updateSourceEnabled,
   wizardStart,
+  clearSession,
   wizardStatus,
   wizardCredentials,
   wizardMfa,
@@ -307,6 +308,19 @@ export default function Home() {
     const key = `${source.id}:${mode}:${flowType ?? ""}`;
     setWizardBusy(key);
     try {
+      // Re-login = switch accounts: wipe the stored session first so the
+      // wizard opens a clean, logged-out login page for fresh credentials.
+      // Best-effort — if the clear fails, still start the wizard.
+      if (mode === "login" && source.has_session) {
+        try {
+          const cleared = await clearSession(source.id);
+          setCustomSources((prev) =>
+            prev.map((x) => (x.id === source.id ? { ...x, has_session: cleared.has_session } : x))
+          );
+        } catch {
+          /* best-effort: proceed to wizard with whatever state exists */
+        }
+      }
       await wizardStart(source.id, mode, flowType);
       const stepLabel =
         mode === "login"

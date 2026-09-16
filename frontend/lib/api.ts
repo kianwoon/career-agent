@@ -202,6 +202,21 @@ export async function deleteFlow(sourceId: string, flowType: string): Promise<vo
   }
 }
 
+/** Drop the stored login session for a source (Re-login path): clears the
+ *  session cookie blob so the wizard opens a clean, logged-out login page. */
+export async function clearSession(id: string): Promise<SourceView> {
+  const base = await resolveApiBase();
+  const headers: Record<string, string> = {};
+  const key = await resolveApiKey();
+  if (key) headers["X-API-Key"] = key;
+  const res = await fetch(`${base}/api/v1/sources/${id}/session`, {
+    method: "DELETE",
+    headers,
+  });
+  if (!res.ok) throw new Error(`Clear session failed with status ${res.status}`);
+  return res.json();
+}
+
 export async function wizardStart(
   sourceId: string,
   mode: "login" | "record",
