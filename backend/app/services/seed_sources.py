@@ -6,9 +6,13 @@ disable or re-authenticate. Seeding them as regular Source rows gives them
 cards in the UI (favicon, status pills, checkbox), stored sessions, and makes
 the agent respect the enabled flag.
 
-Idempotent: rows are matched by domain, so an existing user-created source for
-the same domain is adopted rather than duplicated. Never overwrites
-user-visible fields (name) on subsequent boots.
+Idempotent: rows are matched by domain OR name, so an existing user-created
+source for the same domain (or an earlier seed whose domain has since changed)
+is adopted rather than duplicated. Never overwrites user-visible fields (name)
+on subsequent boots. Concurrent restarts are additionally tolerated: each
+insert runs in its own savepoint and an IntegrityError on the unique
+``ix_sources_name`` constraint is caught and skipped rather than aborting the
+whole seed (the unique index remains the last-resort backstop).
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ from __future__ import annotations
 import logging
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.orm import Source
@@ -48,21 +53,32 @@ async def seed_builtin_sources(db: AsyncSession) -> None:
     Committing is left to the caller so this can share a transaction with
     other startup work if needed.
     """
-    existing_domains = set(
-        (await db.execute(select(Source.domain))).scalars().all()
-    )
+    # match on either domain or name so a pre-existing row (e.g. an old seed or
+    # a user-created source) is never duplicated.
+    rows = (await db.execute(select(Source.domain, Source.name))).all()
+    existing_domains = {domain for domain, _ in rows}
+    existing_names = {name for _, name in rows}
     created = 0
     for spec in BUILTIN_SOURCES:
-        if spec["domain"] in existing_domains:
+        if spec["domain"] in existing_domains or spec["name"] in existing_names:
             continue
-        db.add(
-            Source(
-                name=spec["name"],
-                domain=spec["domain"],
-                base_url=spec["base_url"],
-                enabled=True,
-            )
-        )
+        # Each insert in its own savepoint so a concurrent restart that beat us
+        # to a row (unique ix_sources_name) only rolls back that one row.
+        try:
+            async with db.begin_nested():
+                db.add(
+                    Source(
+                        name=spec["name"],
+                        domain=spec["domain"],
+                        base_url=spec["base_url"],
+                        enabled=True,
+                    )
+                )
+        except IntegrityError:
+            logger.info("Source %r already present; skipping", spec["name"])
+            continue
+        existing_domains.add(spec["domain"])
+        existing_names.add(spec["name"])
         created += 1
     if created:
         await db.commit()
