@@ -313,10 +313,12 @@ async function cmdFill(selector, text) {
 
 // autofill — fill a login form with SAVED credentials (from the backend relay).
 // Re-login opens the site's sign-in page in the user's browser; the backend
-// then hands the decrypted pair here so the form arrives pre-filled. Fill
-// ONLY — never submit; a CAPTCHA/MFA step (if present) is left for the user.
-// Returns booleans only (never echoes the credentials). Polls for the form
-// first because SPAs/302 redirects render the inputs late.
+// then hands the decrypted pair here so the form arrives pre-filled. When the
+// page shows NO CAPTCHA/MFA blocker we click the submit control ONCE so the
+// sign-in proceeds; when a blocker is present we fill only and leave the
+// challenge + submit to the user. Returns booleans only (never echoes the
+// credentials). Polls for the form first because SPAs/302 redirects render the
+// inputs late.
 async function cmdAutofillLogin(username, password) {
   const userSels = [
     "#session_key",
@@ -386,9 +388,68 @@ async function cmdAutofillLogin(username, password) {
         } catch (e) {
           return { ok: false, filled: false, blocked, reason: "fill-failed" };
         }
+        const filled = !!(uEl && pEl);
+        // Auto-submit ONLY when the fill succeeded and no blocker is present.
+        // Click the submit control at most once; a click failure still reports
+        // the fill so the user can submit manually.
+        let submitted = false;
+        if (filled && !blocked) {
+          const submitSels = [
+            "button[type='submit']",
+            "input[type='submit']",
+            "input[type='button'][value*='sign in' i]",
+            "input[type='button'][value*='log in' i]",
+          ];
+          let btn = null;
+          for (const s of submitSels) {
+            const c = deepFind([s]);
+            if (c) { btn = c; break; }
+          }
+          if (!btn) {
+            // Text-matching submit buttons (deep, shadow-aware, visible).
+            const wantSignin = /^(sign\s*in|log\s*in|login|continue|submit)$/i;
+            const queue = [document.documentElement, document.body].filter(Boolean);
+            const seen2 = new Set();
+            while (queue.length && !btn) {
+              const n = queue.shift();
+              if (!n || seen2.has(n)) continue;
+              seen2.add(n);
+              if (
+                n.nodeType === 1 &&
+                n.matches("button, input[type='button'], input[type='submit'], [role='button']") &&
+                visible(n) &&
+                wantSignin.test((n.innerText || n.value || "").trim())
+              ) {
+                btn = n;
+                break;
+              }
+              if (n.shadowRoot)
+                for (const k of Array.from(n.shadowRoot.children)) queue.push(k);
+              if (n.children) for (const k of Array.from(n.children)) queue.push(k);
+            }
+          }
+          if (!btn && pEl && pEl.form) {
+            const fbtn = pEl.form.querySelector(
+              "button[type='submit'], input[type='submit']"
+            );
+            if (fbtn && visible(fbtn)) btn = fbtn;
+          }
+          try {
+            if (btn) {
+              btn.click();
+              submitted = true;
+            } else if (pEl && pEl.form) {
+              pEl.form.requestSubmit
+                ? pEl.form.requestSubmit()
+                : pEl.form.submit();
+              submitted = true;
+            }
+          } catch (e) {}
+        }
         return {
           ok: true,
-          filled: !!(uEl && pEl),
+          filled,
+          submitted,
           user: !!uEl,
           pass: !!pEl,
           blocked,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -46,6 +47,11 @@ from app.services.source_flows import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/sources", dependencies=[])
+
+# Post-login settle time before auto-capturing a freshly re-logged-in session.
+# Gives SPAs time to complete the redirect + set the session cookie. Module
+# constant so tests can monkeypatch it to 0.
+_AUTO_SAVE_SETTLE_S = 6.0
 
 # MCF splits public job search (www) from the logged-in EMPLOYER talent search
 # (employer host). Candidate discovery + cookie capture must target the latter:
@@ -557,19 +563,27 @@ async def wizard_start(
     # a CAPTCHA/MFA present; a blocker only stops auto-submit (which we never
     # do anyway). Secrets never leave the backend.
     if req.mode == "login":
-        await _autofill_login_wizard(source, wiz)
+        await _autofill_login_wizard(source, wiz, db)
 
     _wizards[wizard_id] = wiz
     return WizardStartResponse(wizard_id=wizard_id, mode=req.mode, start_url=start_url)
 
 
-async def _autofill_login_wizard(source: Source, wiz: WizardSession) -> None:
+async def _autofill_login_wizard(
+    source: Source, wiz: WizardSession, db: AsyncSession
+) -> None:
     """Fill the wizard login form with the source's SAVED credentials (backend).
 
     Purely best-effort: a missing/unreadable blob, no login form within the
     poll window, or a browser error all fall back silently to the current
     empty-form behaviour (the operator types manually). Never logs or returns
     the username/password.
+
+    When the fill ALSO auto-submitted (no CAPTCHA/MFA blocker), the wizard's
+    post-login session is captured and persisted automatically so the operator
+    needn't click Capture. A capture failure just degrades to `submitted-unsaved`
+    (manual capture path unchanged). The status + blocker is stashed on the
+    wizard for the status endpoint; secrets never appear here.
     """
     from app.services.encryption import decrypt_credentials
 
@@ -586,11 +600,69 @@ async def _autofill_login_wizard(source: Source, wiz: WizardSession) -> None:
     except Exception as exc:
         logger.warning("wizard auto-fill: failed (%s)", exc)
         return
+
+    if status == "submitted":
+        # Auto-submitted: wait for the post-login redirect, then capture the
+        # wizard's storage_state and persist it (same shape as wizard_complete).
+        saved = await _auto_save_wizard_session(source, wiz, db)
+        status = "submitted-saved" if saved else "submitted-unsaved"
+
     logger.info(
         "wizard auto-fill: %s%s",
         status,
         " (blocker-present)" if blocker else "",
     )
+    # Surface the derived status to the UI (status strings only, never creds).
+    wiz.autofill_status = status
+    wiz.autofill_blocker = blocker
+
+
+async def _auto_save_wizard_session(
+    source: Source, wiz: WizardSession, db: AsyncSession
+) -> bool:
+    """Capture + persist the wizard's post-login storage_state (no user action).
+
+    Uses the wizard page's own context. Returns True on success, False on any
+    failure (page closed/navigated, empty state, DB error). Never logs/returns
+    cookie values — status only.
+    """
+    from app.services.encryption import encrypt_session_state
+    from app.services.session import _earliest_expiry
+
+    if _AUTO_SAVE_SETTLE_S:
+        await asyncio.sleep(_AUTO_SAVE_SETTLE_S)  # let the redirect/cookie settle
+    try:
+        if wiz.page is None or wiz.context is None:
+            return False
+        captured = await wiz.capture_state()
+    except Exception as exc:
+        logger.warning(
+            "Auto-save after wizard re-login failed for %s: %s",
+            getattr(source, "name", "?"),
+            exc,
+        )
+        return False
+    storage_state = captured.get("storage_state") or {}
+    if not storage_state.get("cookies"):
+        logger.info(
+            "Auto-save after wizard re-login for %s: empty capture",
+            getattr(source, "name", "?"),
+        )
+        return False
+    try:
+        source.session_state = encrypt_session_state(json.dumps(storage_state))
+        source.captured_at = datetime.utcnow()
+        source.expires_at = _earliest_expiry({"cookies": storage_state.get("cookies", [])})
+        await db.commit()
+    except Exception as exc:
+        logger.warning(
+            "Auto-save store failed for %s: %s",
+            getattr(source, "name", "?"),
+            exc,
+        )
+        return False
+    logger.info("Auto-saved session after wizard re-login for %s", getattr(source, "id", "?"))
+    return True
 
 
 
@@ -714,10 +786,66 @@ async def agent_login(source_id: str, db: AsyncSession = Depends(get_db)) -> dic
 
     # Re-login should land on a PRE-FILLED sign-in form when creds are saved.
     # The page lives in the USER's browser via the extension relay, so the
-    # fill is a second relay command (never a backend Playwright page). Fill
-    # only — the extension never submits; CAPTCHA/MFA stay manual.
+    # fill is a second relay command (never a backend Playwright page).
+    # No CAPTCHA/MFA blocker => the extension submits once; blocker present =>
+    # fill only and the user solves the challenge + submits manually.
     autofill = await _autofill_agent_login(source)
+    if autofill == "submitted":
+        # The extension auto-submitted; the freshly signed-in cookies live in
+        # the user's browser. Capture them via the SAME relay (no user action)
+        # so the next run reuses this session. Failure is non-fatal — the user
+        # is still logged in and can capture manually.
+        saved = await _auto_save_agent_session(source, db)
+        autofill = "submitted-saved" if saved else "submitted-unsaved"
     return {"ok": True, "login_url": login_url, "autofill": autofill}
+
+
+async def _auto_save_agent_session(source: Source, db: AsyncSession) -> bool:
+    """Capture the just-logged-in browser session via the extension relay.
+
+    Only called right after a rel="noopener" auto-submit succeeded. Waits for the
+    post-login redirect to settle, then dispatches `get_cookies` for every host a
+    flow touches (same relay used by /agent_session/capture) and stores the
+    merged, filtered, encrypted blob on the source with a fresh captured_at /
+    earliest-cookie expires_at. Returns True on a stored session, False on any
+    failure (page closed, extension gone, empty capture, DB hiccup) so the
+    caller reports `submitted-unsaved` and the manual capture path stays intact.
+    Never logs or returns cookie values — status only.
+    """
+    if _AUTO_SAVE_SETTLE_S:
+        await asyncio.sleep(_AUTO_SAVE_SETTLE_S)  # let the redirect/cookie settle
+    from app.services.agent_relay import agent_registry
+
+    cookies: list[dict[str, Any]] = []
+    try:
+        for url in _session_capture_urls(source):
+            part = await agent_registry.dispatch("get_cookies", {"url": url}, timeout_s=20)
+            cookies = _merge_cookies([cookies, part])
+    except Exception as exc:
+        logger.warning(
+            "Auto-save after agent re-login failed for %s: %s",
+            getattr(source, "name", "?"),
+            exc,
+        )
+        return False
+    if not cookies:
+        logger.info(
+            "Auto-save after agent re-login for %s: empty capture",
+            getattr(source, "name", "?"),
+        )
+        return False
+    try:
+        _store_agent_cookies(source, cookies)
+        await db.commit()
+    except Exception as exc:
+        logger.warning(
+            "Auto-save store failed for %s: %s",
+            getattr(source, "name", "?"),
+            exc,
+        )
+        return False
+    logger.info("Auto-saved session after agent re-login for %s", getattr(source, "id", "?"))
+    return True
 
 
 async def _autofill_agent_login(source: Source) -> str:
@@ -760,7 +888,10 @@ async def _autofill_agent_login(source: Source) -> str:
         return "empty-form"
     if result.get("blocked"):
         return "filled-blocker-present" if result.get("filled") else "blocked"
-    return "filled" if result.get("filled") else "empty-form"
+    if not result.get("filled"):
+        return "empty-form"
+    # Fill succeeded and no blocker: the extension auto-clicked submit once.
+    return "submitted" if result.get("submitted") else "filled"
 
 
 class AgentSessionPayload(BaseModel):

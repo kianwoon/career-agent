@@ -193,12 +193,14 @@ class _FakeWizard:
     """Stand-in for WizardSession so wizard_start runs without a browser."""
 
     instances: list["_FakeWizard"] = []
+    capture_cookies: list[dict] = [{"name": "sid", "value": "x"}]
 
     def __init__(self, source_id, flow_type, domain=None):
         self.source_id = source_id
         self.flow_type = flow_type
         self.domain = domain
         self.page = object()
+        self.context = object()
         self.started = False
         self.closed = False
         _FakeWizard.instances.append(self)
@@ -214,6 +216,19 @@ class _FakeWizard:
 
     async def fill_credentials(self, username, password, submit=True):
         return {"ok": True}
+
+    async def capture_state(self):
+        cookies = getattr(_FakeWizard, "capture_cookies", [{"name": "sid", "value": "x"}])
+        return {"storage_state": {"cookies": cookies, "origins": []}, "url": "https://s/", "title": "t"}
+
+    async def status(self):
+        return {
+            "url": "https://s/",
+            "title": "t",
+            "logged_in": False,
+            "autofill_status": getattr(self, "autofill_status", None),
+            "autofill_blocker": getattr(self, "autofill_blocker", None),
+        }
 
 
 def test_wizard_start_login_autofills_saved_credentials(client, monkeypatch):
@@ -245,6 +260,7 @@ def test_wizard_start_login_autofills_saved_credentials(client, monkeypatch):
     _FakeWizard.instances = []
     monkeypatch.setattr(routes, "WizardSession", _FakeWizard)
     monkeypatch.setattr(routes, "autofill_wizard_login", fake_autofill)
+    monkeypatch.setattr(routes, "_AUTO_SAVE_SETTLE_S", 0)
 
     r = client.post(
         f"/api/v1/sources/{src['id']}/wizard/start",
@@ -260,6 +276,51 @@ def test_wizard_start_login_autofills_saved_credentials(client, monkeypatch):
     assert set(r.json().keys()) == {"wizard_id", "mode", "start_url"}
 
     client.delete(f"/api/v1/sources/{src['id']}", headers=_headers())
+
+
+def test_wizard_start_login_autosaves_after_submit(client, monkeypatch):
+    """A no-blocker 'submitted' auto-fill captures + persists the session."""
+    import app.api.routes.sources as routes
+
+    for row in client.get("/api/v1/sources", headers=_headers()).json():
+        if row["domain"] == "wizsave.example":
+            client.delete(f"/api/v1/sources/{row['id']}", headers=_headers())
+
+    src = client.post(
+        "/api/v1/sources",
+        json={"name": "WizSave", "base_url": "https://wizsave.example/"},
+        headers=_headers(),
+    ).json()
+    client.post(
+        f"/api/v1/sources/{src['id']}/credentials",
+        json={"username": "ops@wizsave.example", "password": "s3cret-pw"},
+        headers=_headers(),
+    )
+
+    async def fake_autofill(page, username, password, timeout_s=10.0):
+        return "submitted", None
+
+    _FakeWizard.instances = []
+    _FakeWizard.capture_cookies = [{"name": "sid", "value": "abc", "domain": "wizsave.example"}]
+    monkeypatch.setattr(routes, "WizardSession", _FakeWizard)
+    monkeypatch.setattr(routes, "autofill_wizard_login", fake_autofill)
+    monkeypatch.setattr(routes, "_AUTO_SAVE_SETTLE_S", 0)
+
+    r = client.post(
+        f"/api/v1/sources/{src['id']}/wizard/start",
+        json={"mode": "login"},
+        headers=_headers(),
+    )
+    assert r.status_code == 201, r.text
+
+    stored = client.get(f"/api/v1/sources/{src['id']}/wizard/status", headers=_headers())
+    # wizard status carries the derived autofill outcome (never creds/cookies)
+    assert stored.status_code == 200, stored.text
+    assert stored.json()["autofill_status"] == "submitted-saved"
+    assert "sid" not in r.text  # cookie values never in the response
+
+    client.delete(f"/api/v1/sources/{src['id']}", headers=_headers())
+    _FakeWizard.capture_cookies = [{"name": "sid", "value": "x"}]
 
 
 def test_wizard_start_login_no_creds_skips_autofill(client, monkeypatch):
@@ -341,6 +402,137 @@ def test_agent_login_autofills_saved_credentials(client, monkeypatch):
     assert "s3cret-pw" not in r.text
     assert "ops@agentfill.example" not in r.text
     assert r.json()["autofill"] == "filled"
+
+    client.delete(f"/api/v1/sources/{src['id']}", headers=_headers())
+
+
+def test_agent_login_surfaces_submitted_status(client, monkeypatch):
+    """A no-blocker auto-submit triggers an automatic get_cookies relay capture
+    and reports 'submitted-saved'; the response never carries credential/cookie
+    material."""
+    import app.api.routes.sources as routes
+    import app.services.agent_relay as relay
+
+    for row in client.get("/api/v1/sources", headers=_headers()).json():
+        if row["domain"] == "agentsubmit.example":
+            client.delete(f"/api/v1/sources/{row['id']}", headers=_headers())
+
+    src = client.post(
+        "/api/v1/sources",
+        json={"name": "AgentSubmit", "base_url": "https://agentsubmit.example/"},
+        headers=_headers(),
+    ).json()
+    client.post(
+        f"/api/v1/sources/{src['id']}/credentials",
+        json={"username": "ops@agentsubmit.example", "password": "s3cret-pw"},
+        headers=_headers(),
+    )
+
+    calls = []
+
+    class _FakeRegistry:
+        async def dispatch(self, action, params, timeout_s=180):
+            calls.append(action)
+            if action == "autofill_login":
+                return {"ok": True, "filled": True, "submitted": True, "blocked": False}
+            if action == "get_cookies":
+                return [{"name": "sid", "value": "cookieval", "domain": "agentsubmit.example"}]
+            return {"ok": True}
+
+    monkeypatch.setattr(relay, "agent_registry", _FakeRegistry())
+    monkeypatch.setattr(routes, "_AUTO_SAVE_SETTLE_S", 0)
+
+    r = client.post(f"/api/v1/sources/{src['id']}/agent_login", headers=_headers())
+    assert r.status_code == 200, r.text
+    assert r.json()["autofill"] == "submitted-saved"
+    assert "get_cookies" in calls  # auto-capture actually dispatched
+    assert "s3cret-pw" not in r.text
+    assert "ops@agentsubmit.example" not in r.text
+    assert "cookieval" not in r.text
+    stored = next(
+        row for row in client.get("/api/v1/sources", headers=_headers()).json()
+        if row["id"] == src["id"]
+    )
+    assert stored["has_session"] is True
+
+    client.delete(f"/api/v1/sources/{src['id']}", headers=_headers())
+
+
+def test_agent_login_save_failure_reports_unsaved(client, monkeypatch):
+    """A get_cookies failure after auto-submit degrades to 'submitted-unsaved'
+    (manual capture path stays intact); no exception leaks."""
+    import app.api.routes.sources as routes
+    import app.services.agent_relay as relay
+
+    for row in client.get("/api/v1/sources", headers=_headers()).json():
+        if row["domain"] == "agentsavefail.example":
+            client.delete(f"/api/v1/sources/{row['id']}", headers=_headers())
+
+    src = client.post(
+        "/api/v1/sources",
+        json={"name": "AgentSaveFail", "base_url": "https://agentsavefail.example/"},
+        headers=_headers(),
+    ).json()
+    client.post(
+        f"/api/v1/sources/{src['id']}/credentials",
+        json={"username": "u", "password": "p"},
+        headers=_headers(),
+    )
+
+    class _FakeRegistry:
+        async def dispatch(self, action, params, timeout_s=180):
+            if action == "autofill_login":
+                return {"ok": True, "filled": True, "submitted": True, "blocked": False}
+            if action == "get_cookies":
+                raise RuntimeError("extension gone")
+            return {"ok": True}
+
+    monkeypatch.setattr(relay, "agent_registry", _FakeRegistry())
+    monkeypatch.setattr(routes, "_AUTO_SAVE_SETTLE_S", 0)
+
+    r = client.post(f"/api/v1/sources/{src['id']}/agent_login", headers=_headers())
+    assert r.status_code == 200, r.text
+    assert r.json()["autofill"] == "submitted-unsaved"
+
+    client.delete(f"/api/v1/sources/{src['id']}", headers=_headers())
+
+
+def test_agent_login_blocker_fills_without_saving(client, monkeypatch):
+    """A CAPTCHA/MFA blocker => fill only, never submit, never auto-save."""
+    import app.api.routes.sources as routes
+    import app.services.agent_relay as relay
+
+    for row in client.get("/api/v1/sources", headers=_headers()).json():
+        if row["domain"] == "agentblocked.example":
+            client.delete(f"/api/v1/sources/{row['id']}", headers=_headers())
+
+    src = client.post(
+        "/api/v1/sources",
+        json={"name": "AgentBlocked", "base_url": "https://agentblocked.example/"},
+        headers=_headers(),
+    ).json()
+    client.post(
+        f"/api/v1/sources/{src['id']}/credentials",
+        json={"username": "u", "password": "p"},
+        headers=_headers(),
+    )
+
+    calls = []
+
+    class _FakeRegistry:
+        async def dispatch(self, action, params, timeout_s=180):
+            calls.append(action)
+            if action == "autofill_login":
+                return {"ok": True, "filled": True, "submitted": False, "blocked": True}
+            return {"ok": True}
+
+    monkeypatch.setattr(relay, "agent_registry", _FakeRegistry())
+    monkeypatch.setattr(routes, "_AUTO_SAVE_SETTLE_S", 0)
+
+    r = client.post(f"/api/v1/sources/{src['id']}/agent_login", headers=_headers())
+    assert r.status_code == 200, r.text
+    assert r.json()["autofill"] == "filled-blocker-present"
+    assert "get_cookies" not in calls  # no auto-save on a blocker
 
     client.delete(f"/api/v1/sources/{src['id']}", headers=_headers())
 

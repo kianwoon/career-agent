@@ -328,8 +328,8 @@ class _FakePage:
         return ""
 
 
-async def test_autofill_fills_and_never_submits(monkeypatch):
-    """Saved creds fill the form (submit=False) and report 'filled'."""
+async def test_autofill_submits_when_no_blocker(monkeypatch):
+    """Saved creds with no blocker fill the form (submit=True) => 'submitted'."""
     from app.services import source_flows as sf
 
     async def fake_find_visible(page, selectors, retries=3):
@@ -342,20 +342,20 @@ async def test_autofill_fills_and_never_submits(monkeypatch):
 
     async def fake_fill(page, username, password, submit=True):
         seen["submit"] = submit
-        return {"ok": True}
+        return {"ok": True, "submitted": True}
 
     monkeypatch.setattr(sf, "_find_visible", fake_find_visible)
     monkeypatch.setattr(sf, "_looks_blocked", fake_blocked)
     monkeypatch.setattr(sf, "_fill_login_form", fake_fill)
 
     status, blocker = await sf.autofill_wizard_login(_FakePage(), "u", "p")
-    assert status == "filled"
+    assert status == "submitted"
     assert blocker is None
-    assert seen["submit"] is False  # fill only — user confirms submit
+    assert seen["submit"] is True  # no blocker — auto-submit once
 
 
 async def test_autofill_fills_even_with_captcha_blocker(monkeypatch):
-    """A CAPTCHA/bot wall is reported but never blocks the fill."""
+    """A CAPTCHA/bot wall is reported, the fill still happens, no submit."""
     from app.services import source_flows as sf
 
     async def fake_find_visible(page, selectors, retries=3):
@@ -364,8 +364,11 @@ async def test_autofill_fills_even_with_captcha_blocker(monkeypatch):
     async def fake_blocked(page):
         return "anti-bot challenge: ...."
 
+    seen = {}
+
     async def fake_fill(page, username, password, submit=True):
-        return {"ok": True}
+        seen["submit"] = submit
+        return {"ok": True, "submitted": False}
 
     monkeypatch.setattr(sf, "_find_visible", fake_find_visible)
     monkeypatch.setattr(sf, "_looks_blocked", fake_blocked)
@@ -374,6 +377,7 @@ async def test_autofill_fills_even_with_captcha_blocker(monkeypatch):
     status, blocker = await sf.autofill_wizard_login(_FakePage(), "u", "p")
     assert status == "filled"
     assert blocker == "CAPTCHA / bot challenge"
+    assert seen["submit"] is False  # blocker present — fill only
 
 
 async def test_autofill_no_form_times_out_empty(monkeypatch):

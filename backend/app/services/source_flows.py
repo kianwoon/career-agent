@@ -242,6 +242,11 @@ class WizardSession:
         self.events: list[dict[str, Any]] = []
         self.last_activity = asyncio.get_event_loop().time()
         self.logged_in = False
+        # Derived re-login autofill outcome (e.g. "submitted-saved"); None until
+        # a login-mode start runs the saved-credential autofill. Status string
+        # only — never carries credentials.
+        self.autofill_status: str | None = None
+        self.autofill_blocker: str | None = None
 
     async def start(self, start_url: str, storage_state: dict | None = None) -> None:
         self.pw = await async_playwright().start()
@@ -393,7 +398,13 @@ class WizardSession:
 
     async def status(self) -> dict[str, Any]:
         if self.page is None:
-            return {"url": "", "title": "", "logged_in": self.logged_in}
+            return {
+                "url": "",
+                "title": "",
+                "logged_in": self.logged_in,
+                "autofill_status": self.autofill_status,
+                "autofill_blocker": self.autofill_blocker,
+            }
         try:
             url = self.page.url
             title = await self.page.title()
@@ -417,9 +428,21 @@ class WizardSession:
                     if text_len > 100:
                         self.logged_in = True
                         logger.info("Wizard login auto-detected as complete (url=%s)", url[:80])
-            return {"url": url, "title": title, "logged_in": self.logged_in}
+            return {
+                "url": url,
+                "title": title,
+                "logged_in": self.logged_in,
+                "autofill_status": self.autofill_status,
+                "autofill_blocker": self.autofill_blocker,
+            }
         except Exception:
-            return {"url": "", "title": "", "logged_in": self.logged_in}
+            return {
+                "url": "",
+                "title": "",
+                "logged_in": self.logged_in,
+                "autofill_status": self.autofill_status,
+                "autofill_blocker": self.autofill_blocker,
+            }
 
     async def fill_credentials(self, username: str, password: str, submit: bool = True) -> dict[str, Any]:
         """Type credentials into the best-matching fields on the current page."""
@@ -896,13 +919,14 @@ async def autofill_wizard_login(
 
     Called backend-side on Re-login (mode=login) so the operator lands on a
     pre-filled sign-in page. Polls for the login form first (sites commonly
-    302 the base URL to a sign-in route), then types the credentials WITHOUT
-    submitting — the wizard is interactive and the user confirms submit.
-    Works whether or not a CAPTCHA/MFA is present: a blocker only stops the
-    auto-SUBMIT, never the fill; solvers and submit stay manual.
+    302 the base URL to a sign-in route), then types the credentials. When NO
+    CAPTCHA/MFA blocker is present we also submit the form ONCE so the sign-in
+    proceeds; when a blocker IS present we fill only and leave the challenge
+    and submit to the user.
 
     Returns (status, blocker) where status is one of:
-      "filled"     — both fields were typed (never submitted)
+      "submitted"  — both fields were typed AND the form was submitted
+      "filled"     — both fields were typed (blocker present; never submitted)
       "empty-form" — no login form appeared within the timeout
       "error"      — a browser-level failure (page closed/navigated away)
     blocker is a human-readable marker ("CAPTCHA / bot challenge" /
@@ -938,13 +962,18 @@ async def autofill_wizard_login(
     if not form_ready:
         return "empty-form", blocker
 
+    # Submit only when no blocker was detected; otherwise fill-only and let the
+    # operator solve the challenge and confirm the submit manually.
     try:
-        # submit=False is deliberate: fill only, never auto-submit.
-        result = await _fill_login_form(page, username, password, submit=False)
+        result = await _fill_login_form(
+            page, username, password, submit=blocker is None
+        )
     except Exception as exc:
         logger.warning("wizard auto-fill: failed to fill the login form: %s", exc)
         return "error", blocker
-    return ("filled" if result.get("ok") else "empty-form"), blocker
+    if not result.get("ok"):
+        return "empty-form", blocker
+    return ("submitted" if result.get("submitted") else "filled"), blocker
 
 
 async def attempt_credential_relogin(source: Any) -> tuple[bool, str]:
