@@ -311,6 +311,99 @@ async function cmdFill(selector, text) {
   return r;
 }
 
+// autofill — fill a login form with SAVED credentials (from the backend relay).
+// Re-login opens the site's sign-in page in the user's browser; the backend
+// then hands the decrypted pair here so the form arrives pre-filled. Fill
+// ONLY — never submit; a CAPTCHA/MFA step (if present) is left for the user.
+// Returns booleans only (never echoes the credentials). Polls for the form
+// first because SPAs/302 redirects render the inputs late.
+async function cmdAutofillLogin(username, password) {
+  const userSels = [
+    "#session_key",
+    "input[name='session_key']",
+    "input[type='email']",
+    "input[type='text'][name*='user' i]",
+    "input[type='text'][id*='user' i]",
+    "input[type='text'][name*='email' i]",
+    "input[type='text'][id*='email' i]",
+    "input[type='text']:not([name*='search' i])",
+    "input[type='tel']",
+  ];
+  const passSels = [
+    "#session_password",
+    "input[name='session_password']",
+    "input[type='password']",
+  ];
+  const deadline = Date.now() + 15000;
+  let last = { ok: false, filled: false, reason: "no-login-form" };
+  while (Date.now() < deadline) {
+    const r = await execOnTab(
+      (uSels, pSels, user, pass) => {
+        const visible = (el) =>
+          !!el && (el.offsetParent !== null || el.getClientRects().length > 0);
+        const deepFind = (sels) => {
+          const queue = [document.documentElement, document.body].filter(Boolean);
+          const seen = new Set();
+          while (queue.length) {
+            const n = queue.shift();
+            if (!n || seen.has(n)) continue;
+            seen.add(n);
+            for (const s of sels) {
+              let hit = false;
+              try {
+                hit = n.nodeType === 1 && n.matches(s);
+              } catch (e) {}
+              if (hit && visible(n)) return n;
+            }
+            if (n.shadowRoot)
+              for (const k of Array.from(n.shadowRoot.children)) queue.push(k);
+            if (n.children) for (const k of Array.from(n.children)) queue.push(k);
+          }
+          return null;
+        };
+        const setVal = (el, txt) => {
+          el.focus();
+          el.scrollIntoView({ block: "center" });
+          const proto =
+            el instanceof HTMLTextAreaElement
+              ? HTMLTextAreaElement.prototype
+              : HTMLInputElement.prototype;
+          const setter = Object.getOwnPropertyDescriptor(proto, "value").set;
+          setter.call(el, txt);
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+        };
+        const uEl = deepFind(uSels);
+        const pEl = deepFind(pSels);
+        const body = (document.body?.innerText || "").toLowerCase();
+        const blocked = /captcha|verification code|one-time|two-factor|2fa|authenticator|are you human|verify you are/.test(
+          body.slice(0, 4000)
+        );
+        if (!uEl && !pEl) return { ok: false, filled: false, blocked, reason: "no-login-form" };
+        try {
+          if (uEl) setVal(uEl, user);
+          if (pEl) setVal(pEl, pass);
+        } catch (e) {
+          return { ok: false, filled: false, blocked, reason: "fill-failed" };
+        }
+        return {
+          ok: true,
+          filled: !!(uEl && pEl),
+          user: !!uEl,
+          pass: !!pEl,
+          blocked,
+        };
+      },
+      [userSels, passSels, String(username ?? ""), String(password ?? "")]
+    );
+    if (r) last = r;
+    if (r && r.ok && r.filled) return r;
+    if (r && r.blocked) return r; // challenge present — report without waiting
+    await sleep(600);
+  }
+  return last;
+}
+
 async function cmdClick(selector) {
   await waitForElement(selector);
   const r = await execOnTab((sel) => {
@@ -1823,6 +1916,7 @@ async function executeCommand(cmd) {
   switch (action) {
     case "navigate": return cmdNavigate(params.url, { activate: params.activate || false });
     case "fill": return cmdFill(params.selector, params.text);
+    case "autofill_login": return cmdAutofillLogin(params.username, params.password);
     case "click": return cmdClick(params.selector);
     case "press": return cmdPress(params.key || "Enter");
     case "extract": return cmdExtract(params.card, params.fields, params.maxItems);

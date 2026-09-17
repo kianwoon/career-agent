@@ -711,7 +711,56 @@ async def agent_login(source_id: str, db: AsyncSession = Depends(get_db)) -> dic
         )
     except RuntimeError as exc:
         raise HTTPException(502, str(exc))
-    return {"ok": True, "login_url": login_url}
+
+    # Re-login should land on a PRE-FILLED sign-in form when creds are saved.
+    # The page lives in the USER's browser via the extension relay, so the
+    # fill is a second relay command (never a backend Playwright page). Fill
+    # only — the extension never submits; CAPTCHA/MFA stay manual.
+    autofill = await _autofill_agent_login(source)
+    return {"ok": True, "login_url": login_url, "autofill": autofill}
+
+
+async def _autofill_agent_login(source: Source) -> str:
+    """Relay-fill the agent tab's login form with SAVED credentials.
+
+    Best-effort: no saved/unreadable blob, an outdated extension (unknown
+    action), or a relay failure all degrade to the previous empty-form
+    behaviour. The username/password travel only inside the agent relay
+    command (the extension's poll channel) — never logged, never in the
+    response (only the derived status string is returned).
+    """
+    from app.services.encryption import decrypt_credentials
+
+    blob = getattr(source, "login_credentials", None)
+    if not blob:
+        return "skipped-no-credentials"
+    try:
+        username, password = decrypt_credentials(blob)
+    except Exception:
+        logger.info("agent_login auto-fill: stored credentials unreadable")
+        return "skipped-unreadable"
+    from app.services.agent_relay import agent_registry
+
+    try:
+        result = await agent_registry.dispatch(
+            "autofill_login",
+            {"username": username, "password": password},
+            timeout_s=30,
+        )
+    except Exception as exc:  # relay/timeout/unknown action — never fatal
+        if "Unknown action" in str(exc):
+            logger.info(
+                "autofill_login unsupported (extension outdated — reload the "
+                "unpacked extension to enable auto-fill)"
+            )
+        else:
+            logger.warning("agent_login auto-fill failed: %s", exc)
+        return "skipped-error"
+    if not isinstance(result, dict):
+        return "empty-form"
+    if result.get("blocked"):
+        return "filled-blocker-present" if result.get("filled") else "blocked"
+    return "filled" if result.get("filled") else "empty-form"
 
 
 class AgentSessionPayload(BaseModel):

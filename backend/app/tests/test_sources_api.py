@@ -296,6 +296,86 @@ def test_wizard_start_login_no_creds_skips_autofill(client, monkeypatch):
     client.delete(f"/api/v1/sources/{src['id']}", headers=_headers())
 
 
+def test_agent_login_autofills_saved_credentials(client, monkeypatch):
+    """Re-login via the browser agent (the path the UI actually hits) relays an
+    autofill_login with the decrypted pair AFTER navigating, and the response
+    never carries credential material."""
+    import app.services.agent_relay as relay
+
+    for row in client.get("/api/v1/sources", headers=_headers()).json():
+        if row["domain"] == "agentfill.example":
+            client.delete(f"/api/v1/sources/{row['id']}", headers=_headers())
+
+    src = client.post(
+        "/api/v1/sources",
+        json={"name": "AgentFill", "base_url": "https://agentfill.example/"},
+        headers=_headers(),
+    ).json()
+    client.post(
+        f"/api/v1/sources/{src['id']}/credentials",
+        json={"username": "ops@agentfill.example", "password": "s3cret-pw"},
+        headers=_headers(),
+    )
+
+    calls = []
+
+    class _FakeRegistry:
+        async def dispatch(self, action, params, timeout_s=180):
+            calls.append((action, params))
+            if action == "autofill_login":
+                return {"ok": True, "filled": True}
+            return {"ok": True}
+
+    monkeypatch.setattr(relay, "agent_registry", _FakeRegistry())
+
+    r = client.post(f"/api/v1/sources/{src['id']}/agent_login", headers=_headers())
+    assert r.status_code == 200, r.text
+    # Navigate first, then the credential-bearing autofill relay command.
+    assert [c[0] for c in calls if c[0] in ("navigate", "autofill_login")] == [
+        "navigate",
+        "autofill_login",
+    ]
+    fill = next(p for a, p in calls if a == "autofill_login")
+    assert fill == {"username": "ops@agentfill.example", "password": "s3cret-pw"}
+    # Secrets never leave the backend through the response.
+    assert "s3cret-pw" not in r.text
+    assert "ops@agentfill.example" not in r.text
+    assert r.json()["autofill"] == "filled"
+
+    client.delete(f"/api/v1/sources/{src['id']}", headers=_headers())
+
+
+def test_agent_login_no_credentials_skips_autofill(client, monkeypatch):
+    """No saved creds => no autofill relay command is dispatched."""
+    import app.services.agent_relay as relay
+
+    for row in client.get("/api/v1/sources", headers=_headers()).json():
+        if row["domain"] == "agentnofill.example":
+            client.delete(f"/api/v1/sources/{row['id']}", headers=_headers())
+
+    src = client.post(
+        "/api/v1/sources",
+        json={"name": "AgentNoFill", "base_url": "https://agentnofill.example/"},
+        headers=_headers(),
+    ).json()
+
+    calls = []
+
+    class _FakeRegistry:
+        async def dispatch(self, action, params, timeout_s=180):
+            calls.append(action)
+            return {"ok": True}
+
+    monkeypatch.setattr(relay, "agent_registry", _FakeRegistry())
+
+    r = client.post(f"/api/v1/sources/{src['id']}/agent_login", headers=_headers())
+    assert r.status_code == 200, r.text
+    assert "autofill_login" not in calls
+    assert r.json()["autofill"] == "skipped-no-credentials"
+
+    client.delete(f"/api/v1/sources/{src['id']}", headers=_headers())
+
+
 def test_clear_session_keeps_credentials(client):
     """DELETE /session wipes the session but preserves saved credentials so the
     next search can auto re-login."""
