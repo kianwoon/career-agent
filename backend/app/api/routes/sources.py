@@ -36,6 +36,7 @@ from app.services.site_profiles import profile_for_source
 from app.services.source_flows import (
     FLOW_TYPES,
     WizardSession,
+    autofill_wizard_login,
     discover_flow,
     domain_of,
     execute_flow,
@@ -550,8 +551,47 @@ async def wizard_start(
         await wiz.close()
         raise HTTPException(502, f"Could not start wizard browser in container: {exc}")
 
+    # Re-login (mode=login) starts CLEAN, so the sign-in page is empty. If a
+    # password is saved, fill it backend-side so the operator lands on a
+    # pre-filled form (they still confirm/submit). Fill happens with or without
+    # a CAPTCHA/MFA present; a blocker only stops auto-submit (which we never
+    # do anyway). Secrets never leave the backend.
+    if req.mode == "login":
+        await _autofill_login_wizard(source, wiz)
+
     _wizards[wizard_id] = wiz
     return WizardStartResponse(wizard_id=wizard_id, mode=req.mode, start_url=start_url)
+
+
+async def _autofill_login_wizard(source: Source, wiz: WizardSession) -> None:
+    """Fill the wizard login form with the source's SAVED credentials (backend).
+
+    Purely best-effort: a missing/unreadable blob, no login form within the
+    poll window, or a browser error all fall back silently to the current
+    empty-form behaviour (the operator types manually). Never logs or returns
+    the username/password.
+    """
+    from app.services.encryption import decrypt_credentials
+
+    blob = getattr(source, "login_credentials", None)
+    if not blob:
+        return
+    try:
+        username, password = decrypt_credentials(blob)
+    except Exception:
+        logger.info("wizard auto-fill: failed (stored credentials unreadable)")
+        return
+    try:
+        status, blocker = await autofill_wizard_login(wiz.page, username, password)
+    except Exception as exc:
+        logger.warning("wizard auto-fill: failed (%s)", exc)
+        return
+    logger.info(
+        "wizard auto-fill: %s%s",
+        status,
+        " (blocker-present)" if blocker else "",
+    )
+
 
 
 async def _wiz(source_id: str, mode: str) -> WizardSession:

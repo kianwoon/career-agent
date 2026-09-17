@@ -189,6 +189,113 @@ def test_source_credentials_save_forget_and_never_leak(client):
     client.delete(f"/api/v1/sources/{src['id']}", headers=_headers())
 
 
+class _FakeWizard:
+    """Stand-in for WizardSession so wizard_start runs without a browser."""
+
+    instances: list["_FakeWizard"] = []
+
+    def __init__(self, source_id, flow_type, domain=None):
+        self.source_id = source_id
+        self.flow_type = flow_type
+        self.domain = domain
+        self.page = object()
+        self.started = False
+        self.closed = False
+        _FakeWizard.instances.append(self)
+
+    async def age_s(self):
+        return 0.0
+
+    async def start(self, start_url, storage_state=None):
+        self.started = True
+
+    async def close(self):
+        self.closed = True
+
+    async def fill_credentials(self, username, password, submit=True):
+        return {"ok": True}
+
+
+def test_wizard_start_login_autofills_saved_credentials(client, monkeypatch):
+    """Re-login with saved creds calls the backend auto-fill path, and neither
+    the username nor the password appears in the response body."""
+    import app.api.routes.sources as routes
+
+    for row in client.get("/api/v1/sources", headers=_headers()).json():
+        if row["domain"] == "wizautofill.example":
+            client.delete(f"/api/v1/sources/{row['id']}", headers=_headers())
+
+    src = client.post(
+        "/api/v1/sources",
+        json={"name": "WizAutofill", "base_url": "https://wizautofill.example/"},
+        headers=_headers(),
+    ).json()
+    client.post(
+        f"/api/v1/sources/{src['id']}/credentials",
+        json={"username": "ops@wizautofill.example", "password": "s3cret-pw"},
+        headers=_headers(),
+    )
+
+    calls = []
+
+    async def fake_autofill(page, username, password, timeout_s=10.0):
+        calls.append((username, password))
+        return "filled", None
+
+    _FakeWizard.instances = []
+    monkeypatch.setattr(routes, "WizardSession", _FakeWizard)
+    monkeypatch.setattr(routes, "autofill_wizard_login", fake_autofill)
+
+    r = client.post(
+        f"/api/v1/sources/{src['id']}/wizard/start",
+        json={"mode": "login"},
+        headers=_headers(),
+    )
+    assert r.status_code == 201, r.text
+    # The saved pair reached the fill path exactly once (backend-side only).
+    assert calls == [("ops@wizautofill.example", "s3cret-pw")]
+    # Response carries no credential material.
+    assert "s3cret-pw" not in r.text
+    assert "ops@wizautofill.example" not in r.text
+    assert set(r.json().keys()) == {"wizard_id", "mode", "start_url"}
+
+    client.delete(f"/api/v1/sources/{src['id']}", headers=_headers())
+
+
+def test_wizard_start_login_no_creds_skips_autofill(client, monkeypatch):
+    """No saved credentials => auto-fill is never attempted (empty form)."""
+    import app.api.routes.sources as routes
+
+    for row in client.get("/api/v1/sources", headers=_headers()).json():
+        if row["domain"] == "wiznocreds.example":
+            client.delete(f"/api/v1/sources/{row['id']}", headers=_headers())
+
+    src = client.post(
+        "/api/v1/sources",
+        json={"name": "WizNoCreds", "base_url": "https://wiznocreds.example/"},
+        headers=_headers(),
+    ).json()
+
+    called = []
+
+    async def fake_autofill(page, username, password, timeout_s=10.0):
+        called.append(True)
+        return "filled", None
+
+    monkeypatch.setattr(routes, "WizardSession", _FakeWizard)
+    monkeypatch.setattr(routes, "autofill_wizard_login", fake_autofill)
+
+    r = client.post(
+        f"/api/v1/sources/{src['id']}/wizard/start",
+        json={"mode": "login"},
+        headers=_headers(),
+    )
+    assert r.status_code == 201, r.text
+    assert called == []
+
+    client.delete(f"/api/v1/sources/{src['id']}", headers=_headers())
+
+
 def test_clear_session_keeps_credentials(client):
     """DELETE /session wipes the session but preserves saved credentials so the
     next search can auto re-login."""

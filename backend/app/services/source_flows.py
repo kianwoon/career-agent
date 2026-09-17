@@ -889,6 +889,64 @@ def _relogin_blocker(page: Any, reason: str | None) -> str | None:
     return reason
 
 
+async def autofill_wizard_login(
+    page: Any, username: str, password: str, timeout_s: float = 10.0
+) -> tuple[str, str | None]:
+    """Best-effort fill of the wizard's login form with SAVED credentials.
+
+    Called backend-side on Re-login (mode=login) so the operator lands on a
+    pre-filled sign-in page. Polls for the login form first (sites commonly
+    302 the base URL to a sign-in route), then types the credentials WITHOUT
+    submitting — the wizard is interactive and the user confirms submit.
+    Works whether or not a CAPTCHA/MFA is present: a blocker only stops the
+    auto-SUBMIT, never the fill; solvers and submit stay manual.
+
+    Returns (status, blocker) where status is one of:
+      "filled"     — both fields were typed (never submitted)
+      "empty-form" — no login form appeared within the timeout
+      "error"      — a browser-level failure (page closed/navigated away)
+    blocker is a human-readable marker ("CAPTCHA / bot challenge" /
+    "MFA/verification challenge") when the page showed one, else None.
+    Never logs or returns the credential values.
+    """
+    deadline = asyncio.get_event_loop().time() + timeout_s
+    form_ready = False
+    while asyncio.get_event_loop().time() < deadline:
+        try:
+            user_sel = await _find_visible(page, _LOGIN_USER_SELECTORS, retries=1)
+            pass_sel = await _find_visible(page, _LOGIN_PASS_SELECTORS, retries=1)
+        except Exception:
+            user_sel = pass_sel = None
+        if user_sel and pass_sel:
+            form_ready = True
+            break
+        await asyncio.sleep(0.5)
+
+    blocker: str | None = None
+    try:
+        if await _looks_blocked(page):
+            blocker = "CAPTCHA / bot challenge"
+        else:
+            body = (
+                await page.evaluate("(document.body?.innerText || '').toLowerCase()")
+            ) or ""
+            if any(m in body[:4000] for m in _RELOGIN_MFA_MARKERS):
+                blocker = "MFA/verification challenge"
+    except Exception:
+        pass
+
+    if not form_ready:
+        return "empty-form", blocker
+
+    try:
+        # submit=False is deliberate: fill only, never auto-submit.
+        result = await _fill_login_form(page, username, password, submit=False)
+    except Exception as exc:
+        logger.warning("wizard auto-fill: failed to fill the login form: %s", exc)
+        return "error", blocker
+    return ("filled" if result.get("ok") else "empty-form"), blocker
+
+
 async def attempt_credential_relogin(source: Any) -> tuple[bool, str]:
     """Headless re-login using the source's SAVED (decrypted) credentials.
 
