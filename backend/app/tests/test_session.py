@@ -125,8 +125,8 @@ def test_credentials_blob_uses_random_nonce():
 
 
 def test_credentials_reject_non_credential_blob():
-    """A valid session-state blob is not a credential pair -> ValueError, so
+    """A valid session-state blob is not a credential pair -> TypeError, so
     self-heal falls back to the manual banner instead of crashing."""
     blob = encrypt_session_state(json.dumps({"cookies": []}))
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError):
         decrypt_credentials(blob)

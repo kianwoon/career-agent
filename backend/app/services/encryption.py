@@ -111,7 +111,7 @@ def encrypt_credentials(username: str, password: str) -> str:
 def decrypt_credentials(blob: str) -> tuple[str, str]:
     """Decrypt a credentials blob into (username, password).
 
-    Raises ValueError when the blob is not a well-formed credential pair so the
+    Raises TypeError when the blob is not a well-formed credential pair so the
     caller can fall back to the manual re-login banner instead of crashing.
     """
     raw = decrypt_session_state(blob)
@@ -122,5 +122,5 @@ def decrypt_credentials(blob: str) -> tuple[str, str]:
     username = data.get("username")
     password = data.get("password")
     if not isinstance(username, str) or not isinstance(password, str):
-        raise ValueError("Stored credentials blob is missing username/password")
+        raise TypeError("Stored credentials blob is missing username/password")
     return username, password
